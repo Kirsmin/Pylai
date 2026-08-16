@@ -1,0 +1,105 @@
+name: CI — 构建 + Dev 镜像
+
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: "10"
+          run_install: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Build backend
+        working-directory: OS
+        run: |
+          dotnet build Pylaios.csproj -c Release
+
+      - name: Config validate（模板即有效配置）
+        working-directory: OS
+        run: |
+          cp pylai.example.toml pylai.toml
+          dotnet run --no-build -c Release --project Pylaios.csproj --no-launch-profile -- config validate
+
+      - name: Build frontend
+        working-directory: UI
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build AdminUI
+        working-directory: AdminUI
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build Dev Docker image (linux/amd64)
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -t pylai-dev:latest \
+            --load .
+          docker save pylai-dev:latest -o pylai-dev-amd64.tar
+
+      - name: Upload Dev image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pylai-dev-amd64
+          path: pylai-dev-amd64.tar
+          retention-days: 14
+
+      - name: Smoke test — 完整实例启动 + 健康检查 + 登录
+        run: |
+          docker load < pylai-dev-amd64.tar
+          docker run -d --name smoke -p 8080:80 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
+
+          for i in $(seq 1 30); do
+            sleep 5
+            if curl -sf --max-time 5 http://localhost:8080/health/ready | grep -q '"status":"healthy"'; then
+              echo "==> health/ready OK"
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "==> 等待就绪超时"; docker logs smoke 2>&1 | tail -40; exit 1
+            fi
+          done
+
+          curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
+
+          ADMIN_PW=$(docker logs smoke 2>/dev/null | grep "管理员" | awk '{print $NF}')
+          curl -sf --max-time 8 -X POST http://localhost:8080/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "{\"usernameOrEmail\":\"admin@pylaios.local\",\"password\":\"$ADMIN_PW\"}" \
+            | grep -q '"success":true' || { echo "登录失败"; docker logs smoke 2>&1 | tail -30; exit 1; }
+          echo "==> 登录 OK"
+
+          docker rm -f smoke >/dev/null 2>&1

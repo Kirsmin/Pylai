@@ -1,0 +1,203 @@
+# =============================================================================
+# Pylaios 配置文件（单文件，全部配置集中于此）
+# 复制为 pylai.toml 后填写本机值；仓库内此模板不包含任何秘密。
+# 社区反馈可执行 `Pylaios config export` 生成脱敏配置（敏感字段留空）。
+# =============================================================================
+
+# 服务器基础配置
+[Server]
+Url = "http://localhost:5000"
+MaxRequestBodyMB = 2
+
+# CORS 跨域资源共享
+[Cors]
+Enabled = true
+AllowedOrigins = ["http://localhost:5173"]
+AllowedMethods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+AllowedHeaders = ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
+AllowCredentials = true
+
+# 前端地址
+[Frontend]
+Url = "http://localhost:5173"
+
+# IP 解析 — 可信代理与白名单
+[IpResolution]
+TrustedProxies = []
+TrustedHeaders = ["X-Forwarded-For"]
+IpWhitelist = []
+# Forwarded Headers — 启用后由 UseForwardedHeaders 处理 X-Forwarded-For / X-Forwarded-Proto，
+# 反代（Nginx 等）后 Scheme/RemoteIpAddress 自动修正（TLS 终止由 Nginx 完成，后端不处理 HTTPS）。
+# TrustedProxies / TrustedNetworks(CIDR) 指明哪些来源的转发头可信，务必只填代理服务器地址。
+ForwardedHeadersEnabled = false
+TrustedNetworks = []
+
+# 数据库连接（仅支持 PostgreSQL；密码直接存本文件，请勿提交仓库）
+[Database]
+ConnectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password="
+
+# Redis 缓存 — 限流/封禁状态缓存层
+[Redis]
+Host = "127.0.0.1"
+Port = 6379
+Password = ""
+Database = 0
+ConnectTimeoutMs = 5000
+
+# 数据库备份目录（backup 命令产物，pg_dump 快照）
+[Backup]
+Directory = "backups"
+
+# ASP.NET Core Identity 密码策略
+[Identity.Password]
+RequiredLength = 8
+RequireDigit = true
+RequireLowercase = false
+RequireUppercase = false
+RequireNonAlphanumeric = false
+
+[Identity.Lockout]
+DefaultTimeoutMinutes = 5
+MaxFailedAttempts = 5
+
+# 认证 Cookie
+[Cookie]
+Name = "Pylaios.Auth"
+# 会话追踪 Cookie（登录时生成，哈希存 UserSessions 表）
+SessionName = "Pylaios.Session"
+HttpOnly = true
+SameSite = "Lax"
+SecurePolicy = "Always"
+ExpireDays = 14
+SlidingExpiration = true
+
+# OpenIddict OAuth2 + OpenID Connect
+# 传输安全要求：生产默认强制 HTTPS；纯内网 HTTP 部署可设 RequireHttps = false
+[OpenIddict]
+RequireHttps = true
+
+[OpenIddict.AccessToken]
+LifetimeHours = 1
+DisableEncryption = false
+
+[OpenIddict.RefreshToken]
+LifetimeDays = 7
+
+[OpenIddict.IdentityToken]
+LifetimeHours = 1
+
+[OpenIddict.Endpoints]
+Authorize = "/connect/authorize"
+Token = "/connect/token"
+UserInfo = "/connect/userinfo"
+Introspect = "/connect/introspect"
+EndSession = "/connect/logout"
+
+[OpenIddict.Grants]
+AuthorizationCode = true
+RefreshToken = true
+ClientCredentials = true
+
+[OpenIddict.Scopes]
+openId = true
+profileBasic = true
+profileMail = true
+profileRole = true
+offlineAccess = true
+
+[OpenIddict.Certificates.Signing]
+# 留空时从数据库 SigningKeys 读取；首次安装请执行 `Pylaios key rotate --if-empty`
+Path = ""
+Password = ""
+
+[OpenIddict.Certificates.Encryption]
+Path = ""
+Password = ""
+
+# 外部登录（AppId/ClientSecret 留空即禁用）
+[ExternalLogin.Facebook]
+AppId = ""
+AppSecret = ""
+
+[ExternalLogin.Microsoft]
+ClientId = ""
+ClientSecret = ""
+
+[ExternalLogin.Github]
+ClientId = ""
+ClientSecret = ""
+
+# 邮件发送（SMTP）
+[Email]
+FromName = "Pylaios"
+FromAddress = ""
+
+[Email.Smtp]
+Host = ""
+Port = 587
+UseSsl = true
+Username = ""
+Password = ""
+
+# 日志级别
+[Logging]
+DefaultLevel = "Debug"
+MicrosoftAspNetCoreLevel = "Warning"
+PylaiosLevel = "Trace"
+
+# Token 清理（OpenIddict Quartz 后台任务，定期清除过期 token）
+[TokenCleanup]
+Enabled = true
+
+# IP 登录限流 — 超过阈值后 IP 被临时封禁
+[LoginRateLimit]
+MaxFailuresPerIp = 10
+BanDurationMinutes = [15, 60, 1440, -1]
+CooldownDays = 3
+
+# 管理 API 限流 — UserToken/OAuth 认证失败
+[AdminRateLimit]
+MaxFailuresFirstBan = 5
+FirstBanDurationSeconds = 30
+MaxFailuresSecondBan = 20
+SecondBanDurationHours = 24
+
+# 邀请码（提权）— 本地核销，邀请码从下方 Gift 配置种子入库
+[InviteCode]
+MaxFailuresPerIp = 20
+BanDurationHours = 48
+EmailCodeBanDurationHours = 24
+UsernameCheckMaxPerHourPerIp = 100
+# 每个邀请码的最大核销次数
+MaxRedemptions = 10
+# 邀请码列表（db seed 时种子到 InviteCodes 表，已有码不会被覆盖）
+[InviteCode.Gift]
+Normal = ["NORMAL-001", "NORMAL-002", "NORMAL-003"]
+Admin = ["ADMIN-001", "ADMIN-002"]
+Max = ["MAX-001", "MAX-002", "MAX-003"]
+
+# 种子数据（db seed 执行；密码为空的种子用户不会被创建，避免空密码账户）
+[Seeds.DefaultAdmin]
+Email = "admin@pylaios.local"
+Password = ""
+DisplayName = "Administrator"
+
+[Seeds.DefaultUser]
+Email = "user@pylaios.local"
+Password = ""
+DisplayName = "Test User"
+
+[Seeds.DefaultMax]
+Email = "max@pylaios.local"
+Password = ""
+DisplayName = "Max User"
+
+# UserToken — 用户个人 API Token
+[UserToken]
+# 默认有效期（天），0 表示永不过期
+DefaultLifetimeDays = 365
+
+# 特殊功能密码二次验证失败封禁（账号级，1 天）
+[ConfirmationRateLimit]
+MaxFailures = 10
+BanDurationHours = 24

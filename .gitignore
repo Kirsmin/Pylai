@@ -1,0 +1,74 @@
+# .NET 构建输出
+**/[Bb]in/
+**/[Oo]bj/
+**/packages/
+
+# Node
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# Python
+**/__pycache__/
+*.pyc
+
+# IDE / 编辑器
+**/.trae/
+**/.vscode/
+**/.idea/
+*.suo
+*.swp
+*.swo
+
+# 编译产物
+*.exe
+*.dll
+*.pdb
+
+# 数据库（开发环境）
+*.db
+*.sqlite
+*.db-shm
+*.db-wal
+**/test_env.txt
+
+# 本地配置文件（含密码等敏感值，不入库；模板 pylai.example.toml 入库）
+**/*.local.toml
+pylai.toml
+OS/pylai.toml
+
+# 数据库备份（backup 命令产物）
+OS/backups/
+backups/
+
+# 运行时临时文件
+*session.json
+error.txt
+*.log
+log_output.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 开发证书（本地生成，不入库）
+certs/
+
+# 杂项
+**/MainConfig.toml
+
+# 开发辅助文件不入库
+**/project.md
+**/Change.md
+**/API.md
+**/AGENTS.md
+
+# 文档不入库
+**/README.md
+**/Usage.md
+
+# pnpm 本地 store（沙箱内安装用，不入库）
+**/.pnpm-store/
+
+# 本地参考备份（bk-Pylai-20260808，含文档，不入库）
+bk-Pylai-20260808/

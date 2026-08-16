@@ -1,0 +1,15 @@
+# .dockerignore — Dev 镜像构建上下文精简
+.git
+.gitignore
+**/*.md
+dist
+scripts
+OS/bin
+OS/obj
+OS/backups
+OS/pylai.toml
+**/node_modules
+**/.pnpm-store
+**/__pycache__
+certs
+*.log

@@ -1,0 +1,155 @@
+name: Build and Release Pylai
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，例如 0.0.1 或 v0.0.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "release-${{ github.ref }}-${{ inputs.version || github.ref_name }}"
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION#V}"
+
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: ${VERSION}" >&2
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build all release packages
+        run: |
+          python scripts/release.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --target all
+
+      - name: Smoke test AMD64 image
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          docker load < "dist/Pylai-${VERSION}-Linux-AMD64.tar"
+
+          mkdir -p /tmp/pylai-smoke/config /tmp/pylai-smoke/data /tmp/pylai-smoke/pg
+          chmod 777 /tmp/pylai-smoke/pg
+          docker create --name pylai-smoke-template "pylaios:${VERSION}-AMD64" >/dev/null
+          docker cp pylai-smoke-template:/opt/pylai/pylai.example.toml /tmp/pylai-smoke/config/pylai.toml
+          docker rm pylai-smoke-template >/dev/null
+
+          python3 - <<'PYGEN'
+          from pathlib import Path
+          p = Path('/tmp/pylai-smoke/config/pylai.toml')
+          text = p.read_text()
+          text = text.replace('Url = "http://localhost:5000"', 'Url = "http://0.0.0.0:5000"', 1)
+          text = text.replace('Url = "http://localhost:5173"', 'Url = "http://localhost:18080"', 1)
+          text = text.replace('ConnectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password="',
+                              'ConnectionString = "Host=127.0.0.1;Port=5432;Database=pylai;Username=pylai;Password=smoketestdbpass"', 1)
+          text = text.replace('[Redis]\nHost = "127.0.0.1"\nPort = 6379\nPassword = ""',
+                              '[Redis]\nHost = "127.0.0.1"\nPort = 6379\nPassword = "smoketestredispass"', 1)
+          text = text.replace('RequireHttps = true', 'RequireHttps = false', 1)
+          text = text.replace('SecurePolicy = "Always"', 'SecurePolicy = "SameAsRequest"', 1)
+          text = text.replace('AllowedOrigins = ["http://localhost:5173"]', 'AllowedOrigins = ["http://localhost:18080"]', 1)
+          p.write_text(text)
+          PYGEN
+
+          docker run -d --name pylai-release-smoke -p 18080:80 \
+            -e PYLAI_ROLE=server \
+            -e PYLAI_UI_URL=http://localhost:18080 \
+            -e PYLAI_DB_USER=pylai \
+            -e PYLAI_DB_PASSWORD=smoketestdbpass \
+            -e PYLAI_DB_NAME=pylai \
+            -e PYLAI_REDIS_PASSWORD=smoketestredispass \
+            -v /tmp/pylai-smoke/config:/etc/pylai \
+            -v /tmp/pylai-smoke/data:/var/lib/pylai \
+            -v /tmp/pylai-smoke/pg:/var/lib/postgresql \
+            "pylaios:${VERSION}-AMD64"
+
+          for i in $(seq 1 40); do
+            sleep 5
+            if curl -sf --max-time 5 http://127.0.0.1:18080/health/ready | grep -q '"status":"healthy"'; then
+              echo "==> health/ready OK"
+              break
+            fi
+            if [ "$i" = "40" ]; then
+              echo "==> smoke 超时"; docker logs pylai-release-smoke 2>&1 | tail -80; exit 1
+            fi
+          done
+          curl -sf --max-time 5 -o /dev/null http://127.0.0.1:18080/ || exit 1
+          curl -sf --max-time 5 -o /dev/null http://127.0.0.1:18080/admin/ || exit 1
+          docker rm -f pylai-release-smoke >/dev/null 2>&1
+          sudo rm -rf /tmp/pylai-smoke
+
+      - name: Create GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists. Refusing to overwrite it." >&2
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            gh release create "${RELEASE_TAG}" \
+              dist/*.tar \
+              dist/*.tar.sha256 \
+              dist/ManagePylai.py \
+              dist/ManagePylai.py.sha256 \
+              dist/release.json \
+              --title "Pylai v${RELEASE_VERSION}" \
+              --generate-notes
+          else
+            gh release create "${RELEASE_TAG}" \
+              dist/*.tar \
+              dist/*.tar.sha256 \
+              dist/ManagePylai.py \
+              dist/ManagePylai.py.sha256 \
+              dist/release.json \
+              --title "Pylai v${RELEASE_VERSION}" \
+              --generate-notes \
+              --target "${GITHUB_SHA}"
+          fi
