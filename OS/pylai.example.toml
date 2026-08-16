@@ -135,7 +135,9 @@ FromAddress = ""
 [Email.Smtp]
 Host = ""
 Port = 587
-UseSsl = true
+# Security: None / StartTls / SslOnConnect
+# 常见组合：465 -> SslOnConnect（SMTPS/隐式 TLS）；587 -> StartTls；25 -> None
+Security = "StartTls"
 Username = ""
 Password = ""
 

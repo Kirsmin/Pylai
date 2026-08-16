@@ -168,7 +168,8 @@ public static class ConfigValidator
 
     private static void ValidateSmtp(MainConfig config, ConfigLoadResult result)
     {
-        var hostEmpty = string.IsNullOrWhiteSpace(config.Email.Smtp.Host);
+        var smtp = config.Email.Smtp;
+        var hostEmpty = string.IsNullOrWhiteSpace(smtp.Host);
         var fromEmpty = string.IsNullOrWhiteSpace(config.Email.FromAddress);
 
         if (hostEmpty && fromEmpty)
@@ -181,6 +182,32 @@ public static class ConfigValidator
         {
             result.Errors.Add(new ConfigIssue(FileOf<EmailConfig>(), "Email", "E004",
                 "Email.Smtp.Host 与 Email.FromAddress 必须同时配置或同时留空"));
+        }
+
+        var security = smtp.Security?.Trim();
+        var validSecurity = security is not null
+            && (security.Equals("None", StringComparison.OrdinalIgnoreCase)
+                || security.Equals("StartTls", StringComparison.OrdinalIgnoreCase)
+                || security.Equals("SslOnConnect", StringComparison.OrdinalIgnoreCase));
+        if (!validSecurity)
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<SmtpConfig>(), "Email.Smtp.Security", "E003",
+                $"无效 SMTP 加密方式: {smtp.Security}（可用: None / StartTls / SslOnConnect）"));
+            return;
+        }
+
+        if (smtp.Port == 465 && !security!.Equals("SslOnConnect", StringComparison.OrdinalIgnoreCase))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<SmtpConfig>(), "Email.Smtp.Security", "E006",
+                "端口 465 为 SMTPS/隐式 TLS 端口，Email.Smtp.Security 必须为 SslOnConnect；如需 STARTTLS 请使用 587"));
+        }
+        else if (smtp.Port == 587 && security!.Equals("SslOnConnect", StringComparison.OrdinalIgnoreCase))
+        {
+            result.Warnings.Add("端口 587 通常使用 STARTTLS；当前配置为 SslOnConnect，请确认 SMTP 服务端支持隐式 TLS");
+        }
+        else if (smtp.Port == 25 && security!.Equals("SslOnConnect", StringComparison.OrdinalIgnoreCase))
+        {
+            result.Warnings.Add("端口 25 通常为明文或 STARTTLS；当前配置为 SslOnConnect，请确认 SMTP 服务端支持");
         }
     }
 

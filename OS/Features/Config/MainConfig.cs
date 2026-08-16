@@ -360,7 +360,8 @@ public class SmtpConfig
     public string Host { get; set; } = "";
     [ConfigRange(1, 65535)]
     public int Port { get; set; } = 587;
-    public bool UseSsl { get; set; } = true;
+    [ConfigDescription("SMTP 加密方式：None / StartTls / SslOnConnect（465 通常用 SslOnConnect，587 通常用 StartTls）")]
+    public string Security { get; set; } = "StartTls";
     public string Username { get; set; } = "";
     [ConfigSensitive]
     public string Password { get; set; } = "";

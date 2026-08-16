@@ -145,7 +145,8 @@ public class AccountController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
 
-        await _emailSender.SendConfirmationLinkAsync(user, request.Email, code);
+        var sendError = await SendEmailCodeSafeAsync(user, request.Email, code, "绑定邮箱");
+        if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "绑定邮箱码已发送 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
 
@@ -218,7 +219,8 @@ public class AccountController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {Email}", code, user.Uid, request.NewEmail);
 
-        await _emailSender.SendConfirmationLinkAsync(user, user.Email, code);
+        var sendError = await SendEmailCodeSafeAsync(user, user.Email, code, "更换邮箱");
+        if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "更换邮箱验证码已发送 | uid:{Uid} | → {NewEmail}", code, user.Uid, request.NewEmail);
 
@@ -238,7 +240,8 @@ public class AccountController : ControllerBase
 
         var newCode = await _emailCodeService.CreateAsync($"change-email-final:{user.Uid}", result.Entry!.Email);
 
-        await _emailSender.SendConfirmationLinkAsync(user, result.Entry.Email!, newCode);
+        var sendError = await SendEmailCodeSafeAsync(user, result.Entry.Email!, newCode, "确认新邮箱");
+        if (sendError is not null) return sendError;
         _logger.LogCode(_testMode, LogLevel.Information, "新邮箱验证码已发送 | uid:{Uid} | → {Email}", newCode, user.Uid, result.Entry.Email);
 
         return Ok(new EmailCodeResponse { Success = true, Sent = true, PendingEmail = result.Entry.Email });
@@ -473,6 +476,25 @@ public class AccountController : ControllerBase
         _logger.LogInformation("外部登录解绑 | uid:{Uid} | Provider:{Provider}", user.Uid, provider);
 
         return Ok(new { Success = true });
+    }
+
+    private async Task<IActionResult?> SendEmailCodeSafeAsync(User user, string email, string code, string action)
+    {
+        try
+        {
+            await _emailSender.SendConfirmationLinkAsync(user, email, code);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("邮件发送失败 | 操作:{Action} uid:{Uid} → {Email}", action, user.Uid, email);
+            return StatusCode(503, new EmailCodeResponse
+            {
+                Success = false,
+                Error = "邮件发送失败，请检查 SMTP 配置或稍后重试。",
+                ErrorCode = "email_send_failed"
+            });
+        }
     }
 
     private async Task<(User? User, IActionResult? Error)> RequireUserAsync()

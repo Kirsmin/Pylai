@@ -140,7 +140,21 @@ public class RegisterController : ControllerBase
         await _sessionService.UpdateSessionAsync(request.SessionToken, session);
 
         var dummy = new User();
-        await _emailSender.SendConfirmationLinkAsync(dummy, request.Email, code);
+        try
+        {
+            await _emailSender.SendConfirmationLinkAsync(dummy, request.Email, code);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("验证码邮件发送失败 | → {Email}", request.Email);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, false, "SMTP send failed", request.SessionToken);
+            return StatusCode(503, new SendEmailCodeResponse
+            {
+                Success = false,
+                Error = "邮件发送失败，请检查 SMTP 配置或稍后重试。",
+                ErrorCode = "email_send_failed"
+            });
+        }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, true, null, request.SessionToken);
 
@@ -265,7 +279,22 @@ public class RegisterController : ControllerBase
         await _sessionService.UpdateSessionAsync(request.SessionToken, session);
 
         var dummy = new User();
-        await _emailSender.SendConfirmationLinkAsync(dummy, request.NewEmail, code);
+        try
+        {
+            await _emailSender.SendConfirmationLinkAsync(dummy, request.NewEmail, code);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError("更换邮箱验证码发送失败 | → {NewEmail}", request.NewEmail);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailChanged, null, request.NewEmail, false, "SMTP send failed", request.SessionToken);
+            return StatusCode(503, new ChangeRegistrationEmailResponse
+            {
+                Success = false,
+                Error = "邮件发送失败，请检查 SMTP 配置或稍后重试。",
+                ErrorCode = "email_send_failed",
+                ChangesRemaining = remaining
+            });
+        }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailChanged, null, request.NewEmail, true, $"Change #{session.EmailChangeCount}", request.SessionToken);
 

@@ -86,9 +86,16 @@ public class PasswordResetController : ControllerBase
 
             _logger.LogCode(_testMode, LogLevel.Debug, "重置码生成 | uid:{Uid} | → {Email}", code, user.Uid, user.Email);
 
-            await _emailSender.SendPasswordResetCodeAsync(user, user.Email, code);
-
-            _logger.LogCode(_testMode, LogLevel.Information, "重置码已发送 → {Email} | uid:{Uid}", code, user.Uid, user.Email);
+            try
+            {
+                await _emailSender.SendPasswordResetCodeAsync(user, user.Email, code);
+                _logger.LogCode(_testMode, LogLevel.Information, "重置码已发送 → {Email} | uid:{Uid}", code, user.Uid, user.Email);
+            }
+            catch (Exception ex)
+            {
+                // 忘记密码接口保持恒成功，避免泄露邮箱是否注册；发送失败仅记录日志。
+                _logger.LogError("密码重置邮件发送失败 | uid:{Uid} → {Email}", user.Uid, user.Email);
+            }
         }
         else
         {
