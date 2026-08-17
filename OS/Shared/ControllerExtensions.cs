@@ -78,6 +78,27 @@ public static class ControllerExtensions
                 && u.Status != UserStatus.Deleted);
     }
 
+    public static async Task<IActionResult?> RequireMfaStepUpAsync(
+        this ControllerBase controller,
+        IMfaService mfa,
+        ApplicationDbContext context)
+    {
+        var user = await controller.GetCurrentUserAsync(context);
+        if (user is null)
+            return new UnauthorizedObjectResult(new { success = false, error = "Unauthorized.", errorCode = "unauthorized" });
+
+        if (AuthConstants.Groups.Rank(user.Group) < AuthConstants.Groups.Rank(AuthConstants.Roles.Admin))
+            return null;
+
+        if (await mfa.HasRecentStepUpAsync(user.Uid))
+            return null;
+
+        return new ObjectResult(new { success = false, error = "敏感操作需要 MFA 二次验证。", errorCode = "mfa_step_up_required" })
+        {
+            StatusCode = StatusCodes.Status403Forbidden
+        };
+    }
+
     public static Task<bool> IsEmailTakenAsync(this ApplicationDbContext context, string email)
     {
         var normalized = UsernameNormalizer.Normalize(email);
@@ -109,9 +130,8 @@ public static class ControllerExtensions
             Method = controller.HttpContext.Request.Method,
             IpAddress = ipResolver.GetClientIp(controller.HttpContext),
             UserAgent = controller.HttpContext.Request.Headers.UserAgent.ToString(),
-            SessionToken = sessionToken,
             Success = success,
-            Details = details
+            Details = SensitiveDataRedactor.Redact(details)
         });
     }
 }

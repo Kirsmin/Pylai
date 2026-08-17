@@ -75,6 +75,7 @@ public static class ConfigLoader
                 .AddTomlFile(path)
                 .Build();
             var config = new MainConfig();
+            ClearCollectionDefaults(config, new HashSet<object>());
             configuration.Bind(config);
             result.Config = config;
         }
@@ -89,6 +90,43 @@ public static class ConfigLoader
 
         ConfigValidator.ValidateValues(result.Config, environment, result);
         return result;
+    }
+
+    private static void ClearCollectionDefaults(object instance, HashSet<object> visited)
+    {
+        if (instance is null || !visited.Add(instance))
+            return;
+
+        var type = instance.GetType();
+        foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (!property.CanWrite || property.GetIndexParameters().Length > 0)
+                continue;
+
+            var propertyType = property.PropertyType;
+            var value = property.GetValue(instance);
+            if (propertyType.IsArray && propertyType.GetElementType() is { } elementType)
+            {
+                property.SetValue(instance, Array.CreateInstance(elementType, 0));
+                continue;
+            }
+
+            if (propertyType.IsGenericType
+                && propertyType.GetGenericTypeDefinition() == typeof(List<>)
+                && value is System.Collections.IList)
+            {
+                property.SetValue(instance, Activator.CreateInstance(propertyType));
+                continue;
+            }
+
+            if (value is not null
+                && propertyType.IsClass
+                && propertyType != typeof(string)
+                && !typeof(System.Collections.IEnumerable).IsAssignableFrom(propertyType))
+            {
+                ClearCollectionDefaults(value, visited);
+            }
+        }
     }
 
     private static void CollectPath(KeyValueSyntax kv, string prefix,

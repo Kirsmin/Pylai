@@ -21,6 +21,9 @@ public class MainConfig
     public IpResolutionConfig IpResolution { get; set; } = new();
     public UserTokenConfig UserToken { get; set; } = new();
     public ConfirmationRateLimitConfig ConfirmationRateLimit { get; set; } = new();
+    public MfaConfig Mfa { get; set; } = new();
+    public DataProtectionConfig DataProtection { get; set; } = new();
+    public DeploymentConfig Deployment { get; set; } = new();
     public BackupConfig Backup { get; set; } = new();
 }
 
@@ -34,6 +37,9 @@ public class ServerConfig
     [ConfigRange(1, 10240)]
     [ConfigDescription("Kestrel 请求体大小上限（MB）")]
     public int MaxRequestBodyMB { get; set; } = 2;
+
+    [ConfigDescription("允许的 HTTP Host 白名单，生产环境禁止使用通配符 *")]
+    public string[] AllowedHosts { get; set; } = [];
 }
 
 [ConfigFile("pylai.toml")]
@@ -57,7 +63,12 @@ public class PasswordConfig
 {
     [ConfigRange(1, 128)]
     [ConfigDescription("密码最小长度")]
-    public int RequiredLength { get; set; } = 8;
+    public int RequiredLength { get; set; } = 12;
+    [ConfigRange(1, 128)]
+    [ConfigDescription("Admin/Max 密码最小长度")]
+    public int AdminRequiredLength { get; set; } = 14;
+    [ConfigDescription("是否使用 HIBP k-anonymity 检查泄露密码")]
+    public bool CheckBreachedPasswords { get; set; } = true;
     [ConfigDescription("密码必须包含数字")]
     public bool RequireDigit { get; set; } = true;
     [ConfigDescription("密码必须包含小写字母")]
@@ -122,8 +133,18 @@ public class OpenIddictConfig
     public GrantsConfig Grants { get; set; } = new();
     public ScopesConfig Scopes { get; set; } = new();
     public CertificatesConfig Certificates { get; set; } = new();
+    public SigningKeyEncryptionConfig SigningKeyEncryption { get; set; } = new();
+    [ConfigDescription("固定 OIDC Issuer（必须与外部访问地址一致，生产环境必填）")]
+    public string Issuer { get; set; } = "http://localhost:5000";
     [ConfigDescription("OpenIddict 传输安全要求（生产默认强制 HTTPS；纯内网 HTTP 部署可设 false）")]
     public bool RequireHttps { get; set; } = true;
+}
+
+[ConfigFile("pylai.toml")]
+public class SigningKeyEncryptionConfig
+{
+    [ConfigDescription("签名私钥 KEK 文件；必须位于数据库边界之外")]
+    public string KeyFile { get; set; } = "";
 }
 
 public class ScopesConfig
@@ -223,6 +244,9 @@ public class LoggingConfig
 [ConfigFile("pylai.toml")]
 public class InviteCodeConfig
 {
+    [ConfigSensitive]
+    [ConfigDescription("邀请码 HMAC pepper；生产环境必须由独立 Secret 注入")]
+    public string ServerPepper { get; set; } = "";
     [ConfigRange(1, 1000)]
     public int MaxFailuresPerIp { get; set; } = 20;
     [ConfigRange(1, 8760)]
@@ -232,20 +256,11 @@ public class InviteCodeConfig
     [ConfigRange(1, 10000)]
     public int UsernameCheckMaxPerHourPerIp { get; set; } = 100;
     [ConfigRange(1, 1000)]
-    [ConfigDescription("每个邀请码的最大核销次数")]
+    [ConfigDescription("普通邀请码的默认最大核销次数")]
     public int MaxRedemptions { get; set; } = 10;
-    public InviteCodeGiftConfig Gift { get; set; } = new();
-}
-
-[ConfigFile("pylai.toml")]
-public class InviteCodeGiftConfig
-{
-    [ConfigDescription("normal 组种子邀请码列表")]
-    public List<string> Normal { get; set; } = [];
-    [ConfigDescription("admin 组种子邀请码列表")]
-    public List<string> Admin { get; set; } = [];
-    [ConfigDescription("max 组种子邀请码列表")]
-    public List<string> Max { get; set; } = [];
+    [ConfigRange(1, 8760)]
+    [ConfigDescription("新邀请码默认有效期（小时）")]
+    public int DefaultLifetimeHours { get; set; } = 168;
 }
 
 [ConfigFile("pylai.toml")]
@@ -318,7 +333,7 @@ public class IpResolutionConfig
     [ConfigDescription("可信代理 IP 列表（仅信任这些来源的 X-Forwarded-For）")]
     public string[] TrustedProxies { get; set; } = [];
     public string[] IpWhitelist { get; set; } = [];
-    public string[] TrustedHeaders { get; set; } = ["X-Forwarded-For"];
+    public string[] TrustedHeaders { get; set; } = ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"];
     public bool ForwardedHeadersEnabled { get; set; }
     [ConfigDescription("可信代理 CIDR 网络（如 10.0.0.0/8）")]
     public string[] TrustedNetworks { get; set; } = [];
@@ -328,8 +343,8 @@ public class IpResolutionConfig
 public class UserTokenConfig
 {
     [ConfigRange(0, 3650)]
-    [ConfigDescription("UserToken 默认有效期（天），0 表示永不过期")]
-    public int DefaultLifetimeDays { get; set; } = 365;
+    [ConfigDescription("UserToken 默认有效期（天），生产建议 30-90 天")]
+    public int DefaultLifetimeDays { get; set; } = 60;
 }
 
 [ConfigFile("pylai.toml")]
@@ -341,6 +356,35 @@ public class ConfirmationRateLimitConfig
     [ConfigRange(1, 8760)]
     [ConfigDescription("达到上限后账号特殊功能操作锁定小时数")]
     public int BanDurationHours { get; set; } = 24;
+}
+
+[ConfigFile("pylai.toml")]
+public class MfaConfig
+{
+    [ConfigDescription("WebAuthn Relying Party ID")]
+    public string RelyingPartyId { get; set; } = "localhost";
+    [ConfigDescription("WebAuthn 显示名称")]
+    public string RelyingPartyName { get; set; } = "Pylaios";
+    [ConfigDescription("WebAuthn 允许来源")]
+    public string[] Origins { get; set; } = ["http://localhost:5173"];
+    [ConfigRange(1, 30)]
+    public int ChallengeLifetimeMinutes { get; set; } = 5;
+    public bool RequireForAdmin { get; set; } = true;
+    public bool RequireWebAuthnForMax { get; set; } = true;
+}
+
+[ConfigFile("pylai.toml")]
+public class DataProtectionConfig
+{
+    [ConfigDescription("ASP.NET Core DataProtection 持久化密钥目录")]
+    public string KeyDirectory { get; set; } = "";
+}
+
+[ConfigFile("pylai.toml")]
+public class DeploymentConfig
+{
+    [ConfigDescription("当前镜像是否包含 bundled Nginx 反向代理")]
+    public bool BundledNginx { get; set; }
 }
 
 [ConfigFile("pylai.toml")]

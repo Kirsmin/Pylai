@@ -23,6 +23,8 @@ public class LoginResponse : ApiResponse
     public bool LockedOut { get; set; }
     public string? LockoutRemaining { get; set; }
     public string? BanId { get; set; }
+    public string? MfaTransactionId { get; set; }
+    public string[] MfaMethods { get; set; } = [];
 }
 
 public class PasswordPolicyResponse : ApiResponse
@@ -32,4 +34,6 @@ public class PasswordPolicyResponse : ApiResponse
     public bool RequireLowercase { get; set; }
     public bool RequireUppercase { get; set; }
     public bool RequireNonAlphanumeric { get; set; }
+    public int AdminMinLength { get; set; }
+    public bool CheckBreachedPasswords { get; set; }
 }

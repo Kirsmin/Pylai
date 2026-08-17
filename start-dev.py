@@ -36,9 +36,6 @@ ROOT = Path(__file__).resolve().parent
 HASH_EXCLUDE_DIRS = {"bin", "obj", "node_modules", "dist", ".git", "__pycache__", ".pnpm-store"}
 HASH_PATHS = ("Dockerfile", ".dockerignore", "dev", "deploy", "OS", "UI", "AdminUI")
 
-# 测试环境展示用邀请码（对应 [InviteCode.Gift] 配置，db seed 入库）
-INVITE_CODES = ["NORMAL-001", "ADMIN-001", "MAX-001"]
-
 _exiting = False
 
 
@@ -98,7 +95,7 @@ def build_image() -> None:
     print(f"==> 源码有变化，使用 buildx 重新编译镜像（linux/amd64）...")
     # docker.io 可能被网络策略阻断：buildx 客户端进程不带代理时拉取会失败，
     # 先经 dockerd（带 daemon 代理）预拉取，buildkit 将直接使用本地镜像。
-    for image in ("docker/dockerfile:1", "node:24"):
+    for image in ("docker/dockerfile:1.14.2", "node:24.19.0-bookworm-slim"):
         run("docker", "pull", image)
     result = subprocess.run(
         ["docker", "buildx", "build",
@@ -166,10 +163,12 @@ def print_summary(ui_url: str) -> None:
     print(f"  Admin 账号  : admin@pylaios.local / {secrets.get('ADMIN_PASSWORD', '<未知>')}")
     print(f"  Normal 账号 : user@pylaios.local / {secrets.get('USER_PASSWORD', '<未知>')}")
     print(f"  OAuth 客户端: pylai-console / {secrets.get('CLIENT_SECRET', '<未知>')}")
-    print(f"  管理台客户端: pylai-admin（Public/PKCE，无需 secret）")
-    print(f"  （pylai-console 为 Confidential，授权码/client_credentials/refresh_token；pylai-admin 为 Public + PKCE）")
+    print(f"  管理台    : Cookie BFF（不保存 OAuth token）")
+    print(f"  OAuth 客户端: pylai-console（Confidential，授权码/client_credentials/refresh_token）")
     print()
-    print(f"  邀请码（注册提权用）: {', '.join(INVITE_CODES)}")
+    print(f"  Normal 邀请码: {secrets.get('INVITE_NORMAL_CODE', '<未知>')}（仅此一次）")
+    print(f"  Admin 邀请码 : {secrets.get('INVITE_ADMIN_CODE', '<未知>')}（仅此一次）")
+    print(f"  Max 邀请码   : {secrets.get('INVITE_MAX_CODE', '<未知>')}（仅此一次）")
     print()
     print("  实时日志持续显示中，按 Ctrl+C 优雅退出（停止并删除容器与数据卷）。")
     print("=" * 72)
@@ -233,6 +232,19 @@ def main() -> int:
     result = subprocess.run(
         ["docker", "run", "-d", "--name", CONTAINER,
          "--restart", "no",
+         "--read-only",
+         "--cap-drop", "ALL",
+         "--cap-add", "CHOWN",
+         "--cap-add", "DAC_OVERRIDE",
+         "--cap-add", "FOWNER",
+         "--cap-add", "SETGID",
+         "--cap-add", "SETUID",
+         "--cap-add", "NET_BIND_SERVICE",
+         "--cap-add", "KILL",
+         "--tmpfs", "/tmp:rw,nosuid,size=64m",
+         "--tmpfs", "/run:rw,nosuid,size=16m",
+         "--security-opt", "no-new-privileges:true",
+         "--pids-limit", "512",
          "-p", f"127.0.0.1:{UI_PORT}:80",
          "-p", f"127.0.0.1:{API_PORT}:5000",
          "-v", f"{VOLUME_DATA}:/var/lib/pylai",

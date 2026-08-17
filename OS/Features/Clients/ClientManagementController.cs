@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Net;
 
 namespace Pylaios.Features.Clients;
 
@@ -11,13 +12,23 @@ public class ClientManagementController : ControllerBase
     private readonly IClientService _clientService;
     private readonly IAuditService _auditService;
     private readonly IpResolutionService _ipResolver;
+    private readonly ApplicationDbContext _context;
+    private readonly IMfaService _mfa;
     private readonly ILogger<ClientManagementController> _logger;
 
-    public ClientManagementController(IClientService clientService, IAuditService auditService, IpResolutionService ipResolver, ILogger<ClientManagementController> logger)
+    public ClientManagementController(
+        IClientService clientService,
+        IAuditService auditService,
+        IpResolutionService ipResolver,
+        ApplicationDbContext context,
+        IMfaService mfa,
+        ILogger<ClientManagementController> logger)
     {
         _clientService = clientService;
         _auditService = auditService;
         _ipResolver = ipResolver;
+        _context = context;
+        _mfa = mfa;
         _logger = logger;
     }
 
@@ -40,6 +51,8 @@ public class ClientManagementController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] ClientCreateRequest request)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         if (TryValidateCreate(request, out var validationError))
             return BadRequest(new ApiResponse { Success = false, Error = validationError, ErrorCode = "invalid_request" });
 
@@ -64,6 +77,8 @@ public class ClientManagementController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(string id, [FromBody] ClientUpdateRequest request)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         if (TryValidateUpdate(request, out var validationError))
             return BadRequest(new ApiResponse { Success = false, Error = validationError, ErrorCode = "invalid_request" });
 
@@ -90,6 +105,8 @@ public class ClientManagementController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(string id)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         var deleted = await _clientService.DeleteAsync(id);
         if (!deleted)
             return NotFound(new ApiResponse { Success = false, Error = "客户端不存在。", ErrorCode = "not_found" });
@@ -102,6 +119,8 @@ public class ClientManagementController : ControllerBase
     [HttpPatch("{id}/disable")]
     public async Task<IActionResult> Disable(string id)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         var result = await _clientService.SetDisabledAsync(id, true);
         if (!result)
             return NotFound(new ApiResponse { Success = false, Error = "客户端不存在。", ErrorCode = "not_found" });
@@ -114,6 +133,8 @@ public class ClientManagementController : ControllerBase
     [HttpPatch("{id}/enable")]
     public async Task<IActionResult> Enable(string id)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         var result = await _clientService.SetDisabledAsync(id, false);
         if (!result)
             return NotFound(new ApiResponse { Success = false, Error = "客户端不存在。", ErrorCode = "not_found" });
@@ -141,6 +162,8 @@ public class ClientManagementController : ControllerBase
     [RequestSizeLimit(2L * 1024L * 1024L)]
     public async Task<IActionResult> UploadLogo(string id, IFormFile file)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         if (file is null || file.Length == 0)
             return BadRequest(new ApiResponse { Success = false, Error = "请选择要上传的 Logo 文件。", ErrorCode = "invalid_request" });
         try
@@ -162,6 +185,8 @@ public class ClientManagementController : ControllerBase
     [HttpDelete("{id}/logo")]
     public async Task<IActionResult> DeleteLogo(string id)
     {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
         var result = await _clientService.DeleteLogoAsync(id);
         if (!result)
             return NotFound(new ApiResponse { Success = false, Error = "客户端不存在或没有 Logo。", ErrorCode = "not_found" });
@@ -207,7 +232,7 @@ public class ClientManagementController : ControllerBase
         foreach (var value in uris)
         {
             if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
-                || (uri.Scheme != "http" && uri.Scheme != "https")
+                || (uri.Scheme != "https" && !IsLoopbackUri(uri))
                 || string.IsNullOrEmpty(uri.Host))
             {
                 error = $"{field} 包含非法 URI: {value}";
@@ -217,4 +242,9 @@ public class ClientManagementController : ControllerBase
 
         return false;
     }
+
+    private static bool IsLoopbackUri(Uri uri)
+        => uri.Scheme == "http"
+            && (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                || IPAddress.TryParse(uri.Host, out var ip) && IPAddress.IsLoopback(ip));
 }

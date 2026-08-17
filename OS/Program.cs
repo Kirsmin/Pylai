@@ -1,5 +1,7 @@
 using System.Reflection;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.FileProviders;
 using Cocona;
 using Cocona.CommandLine;
 using Microsoft.Extensions.Logging.Console;
@@ -68,7 +70,9 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
         options.Limits.MaxRequestBodySize = mb * 1024L * 1024L;
     });
 
-    var dataProtectionPath = Environment.GetEnvironmentVariable("PYLAI_DATA_DIR");
+    var dataProtectionPath = string.IsNullOrWhiteSpace(config.DataProtection.KeyDirectory)
+        ? Environment.GetEnvironmentVariable("PYLAI_DATA_DIR")
+        : config.DataProtection.KeyDirectory;
     if (!string.IsNullOrWhiteSpace(dataProtectionPath))
     {
         Directory.CreateDirectory(dataProtectionPath);
@@ -76,7 +80,15 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
             .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
     }
 
-    builder.Services.AddPylaios(config, builder.Environment);
+    try
+    {
+        builder.Services.AddPylaios(config, builder.Environment);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"错误  Pylaios       服务配置失败，拒绝启动: {ex.Message}");
+        return 3;
+    }
 
     ConfigureLogging(builder.Logging, config, builder.Environment);
 
@@ -124,6 +136,19 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     if (migrationCheck.Pending is null)
         Console.Error.WriteLine("警告  Pylaios       数据库连接失败，无法确认迁移状态（/health/ready 将反映数据库状态）");
 
+    if (migrationCheck.Pending is not null)
+    {
+        try
+        {
+            await ProductionSecurityGate.ValidateAsync(app.Services, config, app.Environment);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"错误  Pylaios       生产安全启动门禁失败，拒绝启动: {ex.Message}");
+            return 3;
+        }
+    }
+
     if (!testMode
         && (string.IsNullOrEmpty(config.Email.Smtp.Host) || string.IsNullOrEmpty(config.Email.FromAddress)))
     {
@@ -131,6 +156,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     }
 
 
+    app.UseHostFiltering();
     app.UseForwardedHeaders();
 
     if (app.Environment.IsDevelopment())
@@ -150,6 +176,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     app.UseMiddleware<AuditMiddleware>();
     app.UseMiddleware<AdminApiIpBanMiddleware>();
     app.UseAuthentication();
+    app.UseMiddleware<AdminBffCsrfMiddleware>();
     app.UseMiddleware<SessionValidationMiddleware>();
     app.UseAuthorization();
     app.MapControllers();
@@ -165,7 +192,8 @@ static async Task<int> RunCliAsync(string[] args, string[] cliArgs, string? conf
 {
     CliHelpers.ConfigPath = ResolveConfigPath(Environment.CurrentDirectory, configFlag);
 
-    var loadResult = ConfigLoader.Load(CliHelpers.ConfigPath, "Production");
+    var cliEnvironment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production";
+    var loadResult = ConfigLoader.Load(CliHelpers.ConfigPath, cliEnvironment);
     if (loadResult.Errors.Count > 0 || loadResult.Config is null)
     {
         Console.Out.WriteLine(CliHelpers.SerializeJson(new
@@ -178,6 +206,11 @@ static async Task<int> RunCliAsync(string[] args, string[] cliArgs, string? conf
     var config = loadResult.Config;
 
     var cocona = CoconaApp.CreateBuilder();
+    cocona.Services.AddSingleton<IWebHostEnvironment>(new CliHostEnvironment
+    {
+        EnvironmentName = cliEnvironment,
+        ContentRootPath = Environment.CurrentDirectory
+    });
     cocona.Services.AddPylaios(config, env: null, cliOnly: true);
 
     // CLI 输出规范：stdout=JSON、stderr=日志。日志显式走 stderr，避免与 JSON 混流；
@@ -210,6 +243,7 @@ static async Task<int> RunCliAsync(string[] args, string[] cliArgs, string? conf
     app.AddSubCommand("client", c => c.AddCommands<ClientCommands>());
     app.AddSubCommand("ban", c => c.AddCommands<BanCommands>());
     app.AddSubCommand("user-token", c => c.AddCommands<UserTokenCommands>());
+    app.AddSubCommand("invite", c => c.AddCommands<InviteCommands>());
     app.AddSubCommand("db", c => c.AddCommands<DbCommands>());
     app.AddSubCommand("key", c => c.AddCommands<SigningKeyCommands>());
     app.AddSubCommand("backup", c => c.AddCommands<BackupCommands>());
@@ -304,4 +338,15 @@ static void ConfigureEfLogging(ILoggingBuilder logging)
 sealed class CliEnvironmentProvider(string[] args) : ICoconaEnvironmentProvider
 {
     public string[] GetCommandLineArgs() => args;
+}
+
+
+sealed class CliHostEnvironment : IWebHostEnvironment
+{
+    public string ApplicationName { get; set; } = "Pylaios.Cli";
+    public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
+    public string WebRootPath { get; set; } = "";
+    public string EnvironmentName { get; set; } = "Production";
+    public string ContentRootPath { get; set; } = "";
+    public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
 }

@@ -12,4 +12,6 @@ export interface PasswordPolicy {
   requireLowercase: boolean
   requireUppercase: boolean
   requireNonAlphanumeric: boolean
+  adminMinLength?: number
+  checkBreachedPasswords?: boolean
 }

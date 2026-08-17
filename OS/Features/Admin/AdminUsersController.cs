@@ -16,6 +16,7 @@ public class AdminUsersController : ControllerBase
     private readonly IPasswordHasher<User> _passwordHasher;
     private readonly IUserTokenService _userTokenService;
     private readonly IUserAccessRevoker _userAccessRevoker;
+    private readonly IMfaService _mfa;
     private readonly IAuditService _auditService;
     private readonly IpResolutionService _ipResolver;
     private readonly ILogger<AdminUsersController> _logger;
@@ -26,6 +27,7 @@ public class AdminUsersController : ControllerBase
         IPasswordHasher<User> passwordHasher,
         IUserTokenService userTokenService,
         IUserAccessRevoker userAccessRevoker,
+        IMfaService mfa,
         IAuditService auditService,
         IpResolutionService ipResolver,
         ILogger<AdminUsersController> logger)
@@ -35,6 +37,7 @@ public class AdminUsersController : ControllerBase
         _passwordHasher = passwordHasher;
         _userTokenService = userTokenService;
         _userAccessRevoker = userAccessRevoker;
+        _mfa = mfa;
         _auditService = auditService;
         _ipResolver = ipResolver;
         _logger = logger;
@@ -178,6 +181,11 @@ public class AdminUsersController : ControllerBase
                 return BadRequest(new ApiResponse { Success = false, Error = "无效的用户组。", ErrorCode = "invalid_request" });
             if (target.Uid == current.Uid && request.Group != AuthConstants.Roles.Max)
                 return StatusCode(403, new ApiResponse { Success = false, Error = "不能取消自己的 max 组。", ErrorCode = "forbidden" });
+            if (target.Group != request.Group)
+            {
+                var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+                if (stepUp is not null) return stepUp;
+            }
             if (target.Group != request.Group)
             {
                 target.Group = request.Group;

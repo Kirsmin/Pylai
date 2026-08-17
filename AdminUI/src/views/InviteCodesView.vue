@@ -5,7 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import PageHeader from '@/components/PageHeader.vue'
 import AppPagination from '@/components/AppPagination.vue'
 import AppBadge from '@/components/AppBadge.vue'
-import type { AdminInviteCode } from '@/types/admin'
+import type { AdminInviteCode, AdminInviteCodeCreateResponse } from '@/types/admin'
 
 const authStore = useAuthStore()
 const message = useMessage()
@@ -32,6 +32,17 @@ function groupTone(group: string): 'success' | 'info' | 'purple' | 'neutral' {
   if (group.toLowerCase() === 'normal') return 'success'
   if (group.toLowerCase() === 'admin') return 'info'
   if (group.toLowerCase() === 'max') return 'purple'
+  return 'neutral'
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
+}
+
+function statusTone(status: string): 'success' | 'danger' | 'neutral' {
+  if (status === 'Active') return 'success'
+  if (status === 'Revoked') return 'danger'
   return 'neutral'
 }
 
@@ -74,22 +85,24 @@ function resetFilters() {
 onMounted(load)
 
 const editorVisible = ref(false)
-const editingCode = ref<string | null>(null)
+const editingId = ref<string | null>(null)
 const saving = ref(false)
-const form = ref({ code: '', group: 'normal', maxRedemptions: 10 })
+const form = ref({ group: 'normal', maxRedemptions: 10, lifetimeHours: 168 })
+const createdCode = ref<AdminInviteCodeCreateResponse | null>(null)
+const createdVisible = ref(false)
 
 function openCreate() {
-  editingCode.value = null
-  form.value = { code: '', group: 'normal', maxRedemptions: 10 }
+  editingId.value = null
+  form.value = { group: 'normal', maxRedemptions: 10, lifetimeHours: 168 }
   editorVisible.value = true
 }
 
 function openEdit(code: AdminInviteCode) {
-  editingCode.value = code.code
+  editingId.value = code.id
   form.value = {
-    code: code.code,
     group: code.group,
-    maxRedemptions: code.maxRedemptions
+    maxRedemptions: code.maxRedemptions,
+    lifetimeHours: Math.max(1, Math.round((Date.parse(code.expiresAt) - Date.now()) / 3600000))
   }
   editorVisible.value = true
 }
@@ -97,23 +110,23 @@ function openEdit(code: AdminInviteCode) {
 async function save() {
   saving.value = true
   try {
-    if (editingCode.value === null) {
-      await authStore.request('/api/admin/invite-codes', {
+    if (editingId.value === null) {
+      const data = await authStore.request<AdminInviteCodeCreateResponse>('/api/admin/invite-codes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          code: form.value.code.trim(),
           group: form.value.group,
-          maxRedemptions: form.value.maxRedemptions
+          maxRedemptions: form.value.maxRedemptions,
+          lifetimeHours: form.value.lifetimeHours
         })
       })
-      message.success('邀请码已创建')
+      createdCode.value = data ?? null
+      createdVisible.value = data?.success === true
     } else {
-      await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(editingCode.value)}`, {
+      await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(editingId.value)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          group: form.value.group,
           maxRedemptions: form.value.maxRedemptions
         })
       })
@@ -149,10 +162,14 @@ async function openDetail(code: string) {
   }
 }
 
-async function remove(code: string) {
+async function revoke(id: string) {
   try {
-    await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(code)}`, { method: 'DELETE' })
-    message.success('邀请码已删除')
+    await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revoked: true })
+    })
+    message.success('邀请码已撤销')
     if (detailVisible.value) detailVisible.value = false
     load()
   } catch (err) {
@@ -182,23 +199,31 @@ async function remove(code: string) {
         <div class="admin-table-wrap">
           <table class="admin-table table-invites">
             <colgroup>
-              <col style="width: 30%" />
-              <col style="width: 14%" />
+              <col style="width: 20%" />
+              <col style="width: 12%" />
+              <col style="width: 22%" />
+              <col style="width: 20%" />
               <col style="width: 26%" />
-              <col style="width: 30%" />
             </colgroup>
             <thead>
               <tr>
                 <th>邀请码</th>
                 <th>用户组</th>
+                <th>状态 / 有效期</th>
                 <th>已核销 / 上限</th>
                 <th class="cell-actions">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="code in codes" :key="code.code">
-                <td><span class="mono cell-primary cell-ellipsis">{{ code.code }}</span></td>
+              <tr v-for="code in codes" :key="code.id">
+                <td><span class="mono cell-primary cell-ellipsis">{{ code.prefix }}...</span></td>
                 <td><AppBadge :tone="groupTone(code.group)">{{ code.group }}</AppBadge></td>
+                <td>
+                  <div class="invite-status-cell">
+                    <AppBadge :tone="statusTone(code.status)">{{ code.status }}</AppBadge>
+                    <span class="mono muted small">{{ formatDate(code.expiresAt) }}</span>
+                  </div>
+                </td>
                 <td>
                   <div class="progress-cell">
                     <span class="mono muted">{{ code.usedCount }} / {{ code.maxRedemptions }}</span>
@@ -207,13 +232,13 @@ async function remove(code: string) {
                 </td>
                 <td>
                   <div class="cell-actions">
-                    <NButton v-if="endpointAllowed('GET', '/api/admin/invite-codes/{code}')" size="tiny" quaternary type="success" @click="openDetail(code.code)">详情</NButton>
-                    <NButton v-if="endpointAllowed('PATCH', '/api/admin/invite-codes/{code}')" size="tiny" quaternary type="success" @click="openEdit(code)">编辑</NButton>
-                    <NPopconfirm v-if="endpointAllowed('DELETE', '/api/admin/invite-codes/{code}')" @positive-click="remove(code.code)">
+                    <NButton v-if="endpointAllowed('GET', '/api/admin/invite-codes/{id}')" size="tiny" quaternary type="success" @click="openDetail(code.id)">详情</NButton>
+                    <NButton v-if="endpointAllowed('PATCH', '/api/admin/invite-codes/{id}')" size="tiny" quaternary type="success" @click="openEdit(code)">编辑</NButton>
+                    <NPopconfirm v-if="endpointAllowed('PATCH', '/api/admin/invite-codes/{id}') && code.status === 'Active'" @positive-click="revoke(code.id)">
                       <template #trigger>
-                        <NButton size="tiny" quaternary type="error">删除</NButton>
+                        <NButton size="tiny" quaternary type="error">撤销</NButton>
                       </template>
-                      <span style="white-space: nowrap;">删除邀请码 {{ code.code }}？</span>
+                      <span style="white-space: nowrap;">撤销邀请码 {{ code.prefix }}...？</span>
                     </NPopconfirm>
                   </div>
                 </td>
@@ -226,12 +251,8 @@ async function remove(code: string) {
       <NEmpty v-else description="没有邀请码" class="admin-empty" />
     </div>
 
-    <NModal v-model:show="editorVisible" preset="card" style="width: min(92%, 440px);" :title="editingCode === null ? '创建邀请码' : '编辑邀请码'">
+    <NModal v-model:show="editorVisible" preset="card" style="width: min(92%, 440px);" :title="editingId === null ? '创建邀请码' : '编辑邀请码'">
       <div class="admin-form-stack">
-        <label v-if="editingCode === null" class="admin-field">
-          <span class="admin-field-label">邀请码</span>
-          <input v-model="form.code" class="admin-input" placeholder="如 TEST-001" />
-        </label>
         <label class="admin-field">
           <span class="admin-field-label">用户组</span>
           <NSelect v-model:value="form.group" :options="groupOptions" />
@@ -240,9 +261,22 @@ async function remove(code: string) {
           <span class="admin-field-label">最大核销次数</span>
           <input v-model.number="form.maxRedemptions" type="number" min="1" class="admin-input" />
         </label>
+        <label v-if="editingId === null" class="admin-field">
+          <span class="admin-field-label">有效期（小时）</span>
+          <input v-model.number="form.lifetimeHours" type="number" min="1" class="admin-input" />
+        </label>
         <div class="admin-form-actions" style="margin-top: 0;">
-          <NButton type="success" ghost :loading="saving" :disabled="editingCode === null && !form.code.trim()" @click="save">保存</NButton>
+          <NButton type="success" ghost :loading="saving" @click="save">保存</NButton>
         </div>
+      </div>
+    </NModal>
+
+    <NModal v-model:show="createdVisible" preset="card" style="width: min(92%, 520px);" title="邀请码已创建">
+      <div v-if="createdCode" class="admin-form-stack">
+        <p>请立即保存，此后无法再次查看完整邀请码。</p>
+        <div class="mono cell-primary" style="font-size: 18px; word-break: break-all;">{{ createdCode.code }}</div>
+        <div class="muted">{{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
+        <NButton type="success" ghost @click="createdVisible = false">我已保存</NButton>
       </div>
     </NModal>
 
@@ -250,8 +284,10 @@ async function remove(code: string) {
       <div v-if="detailLoading" class="admin-modal-state"><NSpin /></div>
       <template v-else-if="detail">
         <dl class="admin-detail-grid">
-          <div><dt>邀请码</dt><dd class="mono">{{ detail.code }}</dd></div>
+          <div><dt>邀请码</dt><dd class="mono">{{ detail.prefix }}...</dd></div>
           <div><dt>用户组</dt><dd><AppBadge :tone="groupTone(detail.group)">{{ detail.group }}</AppBadge></dd></div>
+          <div><dt>状态</dt><dd><AppBadge :tone="statusTone(detail.status)">{{ detail.status }}</AppBadge></dd></div>
+          <div><dt>有效期</dt><dd class="mono">{{ formatDate(detail.expiresAt) }}</dd></div>
           <div><dt>核销进度</dt><dd class="mono">{{ detail.usedCount }} / {{ detail.maxRedemptions }}</dd></div>
         </dl>
         <h3 class="sub-title">核销记录</h3>

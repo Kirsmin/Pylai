@@ -335,6 +335,32 @@ namespace Pylaios.Features.Database.Migrations
                     b.ToTable("UserLogins");
                 });
 
+            modelBuilder.Entity("Pylaios.Features.Account.UserMfaSettings", b =>
+                {
+                    b.Property<Guid>("UserUid")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("EncryptedTotpSecret")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<DateTimeOffset?>("LastVerifiedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("TotpEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("UserUid");
+
+                    b.ToTable("UserMfaSettings");
+                });
+
             modelBuilder.Entity("Pylaios.Features.Account.UserSession", b =>
                 {
                     b.Property<long>("Id")
@@ -378,6 +404,48 @@ namespace Pylaios.Features.Database.Migrations
                     b.HasIndex("UserUid");
 
                     b.ToTable("UserSessions");
+                });
+
+            modelBuilder.Entity("Pylaios.Features.Account.WebAuthnCredential", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("CredentialId")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTimeOffset?>("LastUsedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("PublicKey")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<long>("SignCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Transports")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<Guid>("UserUid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CredentialId")
+                        .IsUnique();
+
+                    b.HasIndex("UserUid");
+
+                    b.ToTable("WebAuthnCredentials");
                 });
 
             modelBuilder.Entity("Pylaios.Features.Admin.AdminAuthFailure", b =>
@@ -434,9 +502,6 @@ namespace Pylaios.Features.Database.Migrations
                     b.Property<string>("Method")
                         .HasColumnType("text");
 
-                    b.Property<string>("SessionToken")
-                        .HasColumnType("text");
-
                     b.Property<int?>("StatusCode")
                         .HasColumnType("integer");
 
@@ -462,8 +527,6 @@ namespace Pylaios.Features.Database.Migrations
                     b.HasIndex("Endpoint");
 
                     b.HasIndex("EventType");
-
-                    b.HasIndex("SessionToken");
 
                     b.HasIndex("Timestamp");
 
@@ -592,12 +655,17 @@ namespace Pylaios.Features.Database.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
 
-                    b.Property<byte[]>("CertificateData")
-                        .IsRequired()
-                        .HasColumnType("bytea");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("EncryptedCertificateData")
+                        .HasColumnType("bytea");
+
+                    b.Property<byte[]>("EncryptionNonce")
+                        .HasColumnType("bytea");
+
+                    b.Property<byte[]>("EncryptionTag")
+                        .HasColumnType("bytea");
 
                     b.Property<DateTimeOffset>("ExpiresAt")
                         .HasColumnType("timestamp with time zone");
@@ -607,6 +675,10 @@ namespace Pylaios.Features.Database.Migrations
 
                     b.Property<bool>("IsRevoked")
                         .HasColumnType("boolean");
+
+                    b.Property<byte[]>("PublicCertificateData")
+                        .IsRequired()
+                        .HasColumnType("bytea");
 
                     b.Property<string>("Thumbprint")
                         .IsRequired()
@@ -656,9 +728,17 @@ namespace Pylaios.Features.Database.Migrations
 
             modelBuilder.Entity("Pylaios.Features.Registration.InviteCode", b =>
                 {
-                    b.Property<string>("Code")
-                        .HasMaxLength(128)
-                        .HasColumnType("character varying(128)");
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CodeHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("Group")
                         .IsRequired()
@@ -668,6 +748,16 @@ namespace Pylaios.Features.Database.Migrations
                     b.Property<int>("MaxRedemptions")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Prefix")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
                     b.PrimitiveCollection<string>("UsedBy")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -675,7 +765,14 @@ namespace Pylaios.Features.Database.Migrations
                     b.Property<int>("UsedCount")
                         .HasColumnType("integer");
 
-                    b.HasKey("Code");
+                    b.HasKey("Id");
+
+                    b.HasIndex("CodeHash")
+                        .IsUnique();
+
+                    b.HasIndex("ExpiresAt");
+
+                    b.HasIndex("Status");
 
                     b.ToTable("InviteCodes");
                 });
@@ -704,6 +801,25 @@ namespace Pylaios.Features.Database.Migrations
                     b.HasIndex("BanExpiresAt");
 
                     b.ToTable("InviteCodeFailures");
+                });
+
+            modelBuilder.Entity("Pylaios.Features.Registration.RegistrationSessionBinding", b =>
+                {
+                    b.Property<string>("SessionTokenHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UserUid")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("SessionTokenHash");
+
+                    b.HasIndex("UserUid");
+
+                    b.ToTable("RegistrationSessionBindings");
                 });
 
             modelBuilder.Entity("Pylaios.Features.UserTokens.UserToken", b =>
@@ -916,6 +1032,15 @@ namespace Pylaios.Features.Database.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("Pylaios.Features.Account.UserMfaSettings", b =>
+                {
+                    b.HasOne("Pylaios.Features.Users.User", null)
+                        .WithOne()
+                        .HasForeignKey("Pylaios.Features.Account.UserMfaSettings", "UserUid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Pylaios.Features.Account.UserSession", b =>
                 {
                     b.HasOne("Pylaios.Features.Users.User", "User")
@@ -925,6 +1050,24 @@ namespace Pylaios.Features.Database.Migrations
                         .IsRequired();
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("Pylaios.Features.Account.WebAuthnCredential", b =>
+                {
+                    b.HasOne("Pylaios.Features.Users.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserUid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Pylaios.Features.Registration.RegistrationSessionBinding", b =>
+                {
+                    b.HasOne("Pylaios.Features.Users.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserUid")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("OpenIddict.EntityFrameworkCore.Models.OpenIddictEntityFrameworkCoreApplication", b =>

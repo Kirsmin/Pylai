@@ -163,6 +163,11 @@ public sealed class UserCommands
         if (user is null)
             return await CliHelpers.ErrorAsync($"用户不存在: {target}");
 
+        var userManager = _ctx.Services.GetRequiredService<Microsoft.AspNetCore.Identity.UserManager<User>>();
+        var passwordErrors = await AuthHelper.ValidatePasswordAsync(userManager, user, password);
+        if (passwordErrors.Count > 0)
+            return await CliHelpers.ErrorAsync(passwordErrors[0].Description);
+
         user.PasswordHash = _ctx.PasswordHasher.HashPassword(user, password);
         await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
 

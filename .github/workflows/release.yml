@@ -24,20 +24,20 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14"
+          python-version: "3.14.0"
 
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Resolve version
         id: version
@@ -66,28 +66,53 @@ jobs:
             --version "${{ steps.version.outputs.version }}" \
             --target all
 
-      - name: Smoke test AMD64 image
+      - name: Smoke test AMD64 image（read-only + cap-drop）
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           docker load < "dist/Pylai-${VERSION}-Linux-AMD64.tar"
 
-          mkdir -p /tmp/pylai-smoke/config /tmp/pylai-smoke/data /tmp/pylai-smoke/pg
-          chmod 777 /tmp/pylai-smoke/pg
+          SMOKE=/tmp/pylai-smoke
+          mkdir -p "$SMOKE/config/certs" "$SMOKE/data" "$SMOKE/pg"
+          chmod 777 "$SMOKE/pg"
           docker create --name pylai-smoke-template "pylaios:${VERSION}-AMD64" >/dev/null
-          docker cp pylai-smoke-template:/opt/pylai/pylai.example.toml /tmp/pylai-smoke/config/pylai.toml
+          docker cp pylai-smoke-template:/opt/pylai/pylai.example.toml "$SMOKE/config/pylai.toml"
           docker rm pylai-smoke-template >/dev/null
 
+          openssl rand -hex 32 > "$SMOKE/config/certs/signing-kek"
+          chmod 600 "$SMOKE/config/certs/signing-kek"
+          SMOKE_PEPPER=$(openssl rand -hex 32)
+          SMOKE_PFX_PASS=$(openssl rand -hex 16)
+          SMOKE_DB_PASS=$(openssl rand -hex 16)
+          SMOKE_REDIS_PASS=$(openssl rand -hex 16)
+          export SMOKE_PEPPER SMOKE_PFX_PASS SMOKE_DB_PASS SMOKE_REDIS_PASS
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -subj "/CN=Pylai Release Smoke" \
+            -keyout "$SMOKE/config/certs/encryption-key.pem" \
+            -out "$SMOKE/config/certs/encryption-cert.pem" >/dev/null 2>&1
+          openssl pkcs12 -export -out "$SMOKE/config/certs/encryption.pfx" \
+            -inkey "$SMOKE/config/certs/encryption-key.pem" \
+            -in "$SMOKE/config/certs/encryption-cert.pem" \
+            -passout "pass:${SMOKE_PFX_PASS}" >/dev/null 2>&1
+
           python3 - <<'PYGEN'
+          import os
           from pathlib import Path
           p = Path('/tmp/pylai-smoke/config/pylai.toml')
           text = p.read_text()
           text = text.replace('Url = "http://localhost:5000"', 'Url = "http://0.0.0.0:5000"', 1)
           text = text.replace('Url = "http://localhost:5173"', 'Url = "http://localhost:18080"', 1)
+          text = text.replace('Issuer = "http://localhost:5000"', 'Issuer = "http://localhost:18080"', 1)
+          text = text.replace('ServerPepper = ""', f'ServerPepper = "{os.environ["SMOKE_PEPPER"]}"', 1)
+          text = text.replace('KeyFile = ""', 'KeyFile = "/etc/pylai/certs/signing-kek"', 1)
+          text = text.replace('[OpenIddict.Certificates.Encryption]\nPath = ""',
+                              '[OpenIddict.Certificates.Encryption]\nPath = "/etc/pylai/certs/encryption.pfx"', 1)
+          text = text.replace('Path = "/etc/pylai/certs/encryption.pfx"\nPassword = ""',
+                              f'Path = "/etc/pylai/certs/encryption.pfx"\nPassword = "{os.environ["SMOKE_PFX_PASS"]}"', 1)
           text = text.replace('ConnectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password="',
-                              'ConnectionString = "Host=127.0.0.1;Port=5432;Database=pylai;Username=pylai;Password=smoketestdbpass"', 1)
+                              f'ConnectionString = "Host=127.0.0.1;Port=5432;Database=pylai;Username=pylai;Password={os.environ["SMOKE_DB_PASS"]}"', 1)
           text = text.replace('[Redis]\nHost = "127.0.0.1"\nPort = 6379\nPassword = ""',
-                              '[Redis]\nHost = "127.0.0.1"\nPort = 6379\nPassword = "smoketestredispass"', 1)
+                              f'[Redis]\nHost = "127.0.0.1"\nPort = 6379\nPassword = "{os.environ["SMOKE_REDIS_PASS"]}"', 1)
           text = text.replace('RequireHttps = true', 'RequireHttps = false', 1)
           text = text.replace('SecurePolicy = "Always"', 'SecurePolicy = "SameAsRequest"', 1)
           text = text.replace('AllowedOrigins = ["http://localhost:5173"]', 'AllowedOrigins = ["http://localhost:18080"]', 1)
@@ -95,15 +120,28 @@ jobs:
           PYGEN
 
           docker run -d --name pylai-release-smoke -p 18080:80 \
+            --read-only \
+            --cap-drop ALL \
+            --cap-add CHOWN \
+            --cap-add DAC_OVERRIDE \
+            --cap-add FOWNER \
+            --cap-add SETGID \
+            --cap-add SETUID \
+            --cap-add NET_BIND_SERVICE \
+            --cap-add KILL \
+            --tmpfs /tmp:rw,nosuid,size=64m \
+            --tmpfs /run:rw,nosuid,size=16m \
+            --security-opt no-new-privileges:true \
+            --pids-limit 512 \
             -e PYLAI_ROLE=server \
             -e PYLAI_UI_URL=http://localhost:18080 \
             -e PYLAI_DB_USER=pylai \
-            -e PYLAI_DB_PASSWORD=smoketestdbpass \
+            -e "PYLAI_DB_PASSWORD=${SMOKE_DB_PASS}" \
             -e PYLAI_DB_NAME=pylai \
-            -e PYLAI_REDIS_PASSWORD=smoketestredispass \
-            -v /tmp/pylai-smoke/config:/etc/pylai \
-            -v /tmp/pylai-smoke/data:/var/lib/pylai \
-            -v /tmp/pylai-smoke/pg:/var/lib/postgresql \
+            -e "PYLAI_REDIS_PASSWORD=${SMOKE_REDIS_PASS}" \
+            -v "$SMOKE/config:/etc/pylai" \
+            -v "$SMOKE/data:/var/lib/pylai" \
+            -v "$SMOKE/pg:/var/lib/postgresql" \
             "pylaios:${VERSION}-AMD64"
 
           for i in $(seq 1 40); do
@@ -113,13 +151,21 @@ jobs:
               break
             fi
             if [ "$i" = "40" ]; then
-              echo "==> smoke 超时"; docker logs pylai-release-smoke 2>&1 | tail -80; exit 1
+              echo "==> smoke 超时"; docker logs pylai-release-smoke 2>&1 | tail -100; exit 1
             fi
           done
           curl -sf --max-time 5 -o /dev/null http://127.0.0.1:18080/ || exit 1
           curl -sf --max-time 5 -o /dev/null http://127.0.0.1:18080/admin/ || exit 1
+          PID1=$(docker inspect pylai-release-smoke --format '{{.State.Pid}}')
+          for needle in "user = pylai" "user = redis"; do
+            docker exec pylai-release-smoke sh -c "grep -q '$needle' /etc/supervisor/conf.d/pylai-server.conf" \
+              || { echo "缺少 $needle"; docker logs pylai-release-smoke 2>&1 | tail -60; exit 1; }
+          done
+          if docker exec pylai-release-smoke sh -c "ps -eo user,comm | grep 'Pylaios' | grep -q '^root'"; then
+            echo "Backend 进程以 root 运行"; docker exec pylai-release-smoke ps -eo user,pid,comm; exit 1
+          fi
           docker rm -f pylai-release-smoke >/dev/null 2>&1
-          sudo rm -rf /tmp/pylai-smoke
+          sudo rm -rf "$SMOKE"
 
       - name: Create GitHub Release and upload assets
         env:

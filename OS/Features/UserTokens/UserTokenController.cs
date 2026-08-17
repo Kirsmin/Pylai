@@ -154,7 +154,6 @@ public class UserTokenController : ControllerBase
             success = false,
             error = guard.Error,
             errorCode = guard.ErrorCode,
-            attemptsRemaining = guard.AttemptsRemaining,
             banId = guard.BanId,
             banRemaining = guard.BanRemaining
         };

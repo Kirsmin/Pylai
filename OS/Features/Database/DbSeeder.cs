@@ -16,51 +16,22 @@ public static class DbSeeder
 
         var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         var passwordHasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher<User>>();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<User>>();
 
-        await SeedUsersAsync(context, passwordHasher, config);
-        await SeedInviteCodesAsync(context, config);
-    }
-
-    private static async Task SeedInviteCodesAsync(ApplicationDbContext context, MainConfig config)
-    {
-        var gift = config.InviteCode.Gift;
-        var defs = new (string Group, IEnumerable<string> Codes)[]
-        {
-            (AuthConstants.Roles.Normal, gift.Normal),
-            (AuthConstants.Roles.Admin, gift.Admin),
-            (AuthConstants.Roles.Max, gift.Max)
-        };
-
-        foreach (var (group, codes) in defs)
-        {
-            foreach (var code in codes)
-            {
-                if (await context.InviteCodes.AnyAsync(c => c.Code == code))
-                    continue;
-
-                context.InviteCodes.Add(new InviteCode
-                {
-                    Code = code,
-                    Group = group,
-                    MaxRedemptions = config.InviteCode.MaxRedemptions > 0
-                        ? config.InviteCode.MaxRedemptions
-                        : 10
-                });
-            }
-        }
-
-        await context.SaveChangesAsync();
+        await SeedUsersAsync(context, passwordHasher, userManager, config);
     }
 
     private static async Task SeedUsersAsync(
         ApplicationDbContext context,
         IPasswordHasher<User> passwordHasher,
+        UserManager<User> userManager,
         MainConfig config)
     {
         var admin = config.Seeds.DefaultAdmin;
         if (!string.IsNullOrEmpty(admin.Email) && !string.IsNullOrEmpty(admin.Password))
         {
             await CreateUserIfNotExists(context, passwordHasher,
+                userManager,
                 admin.Email, admin.Password, admin.DisplayName,
                 AuthConstants.Roles.Admin);
         }
@@ -73,6 +44,7 @@ public static class DbSeeder
         if (!string.IsNullOrEmpty(user.Email) && !string.IsNullOrEmpty(user.Password))
         {
             await CreateUserIfNotExists(context, passwordHasher,
+                userManager,
                 user.Email, user.Password, user.DisplayName,
                 AuthConstants.Roles.Normal);
         }
@@ -85,6 +57,7 @@ public static class DbSeeder
         if (!string.IsNullOrEmpty(max.Email) && !string.IsNullOrEmpty(max.Password))
         {
             await CreateUserIfNotExists(context, passwordHasher,
+                userManager,
                 max.Email, max.Password, max.DisplayName,
                 AuthConstants.Roles.Max);
         }
@@ -97,6 +70,7 @@ public static class DbSeeder
     private static async Task CreateUserIfNotExists(
         ApplicationDbContext context,
         IPasswordHasher<User> passwordHasher,
+        UserManager<User> userManager,
         string email,
         string password,
         string displayName,
@@ -121,6 +95,13 @@ public static class DbSeeder
             SecurityStamp = Guid.NewGuid().ToString(),
             RegisterTime = DateTimeOffset.UtcNow
         };
+
+        var passwordErrors = await AuthHelper.ValidatePasswordAsync(userManager, user, password);
+        if (passwordErrors.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"种子用户 {email} 的密码不符合当前策略：{passwordErrors[0].Description}");
+        }
 
         user.PasswordHash = passwordHasher.HashPassword(user, password);
 

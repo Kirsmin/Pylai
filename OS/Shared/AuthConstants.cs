@@ -85,6 +85,7 @@ public static class AuthConstants
         public const string InviteCodeCreated = "InviteCodeCreated";
         public const string InviteCodeUpdated = "InviteCodeUpdated";
         public const string InviteCodeDeleted = "InviteCodeDeleted";
+        public const string InviteCodeRevoked = "InviteCodeRevoked";
         public const string AdminUserUpdated = "AdminUserUpdated";
         public const string AdminUserDeleted = "AdminUserDeleted";
         public const string SessionsRevokedAll = "SessionsRevokedAll";

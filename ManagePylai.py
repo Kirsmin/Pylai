@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +55,11 @@ class ManageError(Exception):
 
 def out(message: str = "") -> None:
     print(message, flush=True)
+
+
+def random_password(length: int = 12) -> str:
+    """生成同时包含数字、小写和大写字母的初始密码。"""
+    return f"{secrets.token_urlsafe(length)}Aa1"
 
 
 def ask(
@@ -339,12 +345,23 @@ def generate_config(image: str, answers: dict) -> None:
         f'ConnectionString = "Host=127.0.0.1;Port=5432;Database={answers["db_name"]};Username={answers["db_user"]};Password={answers["db_password"]}"',
     )
     text = replace_one(text, 'Password = ""', f'Password = "{answers["redis_password"]}"', 1)
+    text = replace_one(text, 'ServerPepper = ""', f'ServerPepper = "{answers["invite_pepper"]}"')
     text = replace_one(text, 'Directory = "backups"', 'Directory = "/var/lib/pylai/backups"')
-    text = replace_one(text, 'ForwardedHeadersEnabled = false', "ForwardedHeadersEnabled = true")
-    text = replace_one(text, 'TrustedProxies = []', f'TrustedProxies = {toml_string_list(answers["trusted_proxies"])}')
+    text = replace_one(text, 'ForwardedHeadersEnabled = true', "ForwardedHeadersEnabled = true")
+    text = replace_one(text, 'TrustedProxies = ["127.0.0.1", "::1"]', f'TrustedProxies = {toml_string_list(answers["trusted_proxies"])}')
     text = replace_one(text, 'TrustedNetworks = []', f'TrustedNetworks = {toml_string_list(answers["trusted_networks"])}')
+    text = replace_one(text, 'KeyFile = ""', 'KeyFile = "/etc/pylai/certs/signing-kek"')
     text = replace_one(text, 'AllowedOrigins = ["http://localhost:5173"]',
                        f'AllowedOrigins = {toml_string_list(answers["cors_origins"])}')
+    text = replace_one(text, 'Issuer = "http://localhost:5000"', f'Issuer = "{answers["origin"]}"')
+    external_host = urlparse(answers["public_url"]).hostname or "localhost"
+    allowed_hosts = [external_host]
+    if external_host not in ("localhost", "127.0.0.1", "::1"):
+        allowed_hosts.extend(("localhost", "127.0.0.1"))
+    text = replace_one(text, 'AllowedHosts = ["localhost", "127.0.0.1"]',
+                       f'AllowedHosts = {toml_string_list(allowed_hosts)}')
+    text = replace_one(text, 'RelyingPartyId = "localhost"', f'RelyingPartyId = "{external_host}"')
+    text = replace_one(text, 'Origins = ["http://localhost:5173"]', f'Origins = {toml_string_list(cors_origins)}')
 
     if answers["public_url"].startswith("https://"):
         text = replace_one(text, "RequireHttps = false", "RequireHttps = true") if "RequireHttps = false" in text else text
@@ -535,18 +552,23 @@ def collect_install_answers() -> dict:
     db_name = ask("PostgreSQL 数据库名", "pylai")
     db_password = secrets.token_hex(16)
     redis_password = secrets.token_hex(16)
+    ensure_home()
+    signing_kek = secrets.token_hex(32)
+    signing_kek_path = CERT_DIR / "signing-kek"
+    signing_kek_path.write_text(signing_kek, encoding="ascii")
+    signing_kek_path.chmod(0o600)
 
     out("\n-- 初始账号 --")
     max_email = ask("Max 账号邮箱/登录名", "max@pylai.local")
     max_password = secrets.token_urlsafe(12)
     if ask_yes_no("创建初始 Admin 账号？", True):
         admin_email = ask("Admin 账号邮箱/登录名", "admin@pylai.local")
-        admin_password = secrets.token_urlsafe(12)
+        admin_password = random_password(14)
     else:
         admin_email, admin_password = "", ""
     if ask_yes_no("创建初始 Normal 测试账号？", False):
         user_email = ask("Normal 账号邮箱/登录名", "user@pylai.local")
-        user_password = secrets.token_urlsafe(12)
+        user_password = random_password(12)
     else:
         user_email, user_password = "", ""
 
@@ -580,36 +602,35 @@ def collect_install_answers() -> dict:
             signing_pfx = f"{CONTAINER_CERT_DIR}/signing.pfx"
     encryption_pfx = ""
     encryption_pfx_password = ""
-    if ask_yes_no("自动生成加密证书（推荐，避免重启后 token 失效）？", True):
+    if ask_yes_no("自动生成加密证书（推荐，生产环境必需）？", True) and shutil.which("openssl"):
+        ensure_home()
+        host_pfx = CERT_DIR / "encryption.pfx"
+        key_file = CERT_DIR / "encryption-key.pem"
+        cert_file = CERT_DIR / "encryption-cert.pem"
+        encryption_pfx_password = secrets.token_urlsafe(12)
+        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(key_file), "-out", str(cert_file), "-days", "3650",
+             "-subj", "/CN=Pylai Encryption"], timeout=300)
+        run(["openssl", "pkcs12", "-export", "-out", str(host_pfx),
+             "-inkey", str(key_file), "-in", str(cert_file),
+             "-passout", f"pass:{encryption_pfx_password}"], timeout=300)
+        Path(host_pfx).chmod(0o600)
+        key_file.unlink(missing_ok=True)
+        cert_file.unlink(missing_ok=True)
+        encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
+
+    if not encryption_pfx:
         if shutil.which("openssl") is None:
-            out("未找到 openssl，将使用临时加密密钥（重启后已签发 token 会失效）。")
-        else:
-            ensure_home()
-            host_pfx = CERT_DIR / "encryption.pfx"
-            key_file = CERT_DIR / "encryption-key.pem"
-            cert_file = CERT_DIR / "encryption-cert.pem"
-            encryption_pfx_password = secrets.token_urlsafe(12)
-            run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                 "-keyout", str(key_file), "-out", str(cert_file), "-days", "3650",
-                 "-subj", "/CN=Pylai Encryption"], timeout=300)
-            run(["openssl", "pkcs12", "-export", "-out", str(host_pfx),
-                 "-inkey", str(key_file), "-in", str(cert_file),
-                 "-passout", f"pass:{encryption_pfx_password}"], timeout=300)
-            Path(host_pfx).chmod(0o600)
-            key_file.unlink(missing_ok=True)
-            cert_file.unlink(missing_ok=True)
-            encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
-    else:
-        encryption_pfx = ask("加密 PFX 文件路径（留空则使用临时密钥）", "", allow_blank=True).strip()
-        if encryption_pfx and Path(encryption_pfx).is_file():
-            encryption_pfx_password = ask("加密 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
-            destination = CERT_DIR / "encryption.pfx"
-            shutil.copy2(encryption_pfx, destination)
-            destination.chmod(0o600)
-            encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
-        else:
-            encryption_pfx = ""
-    trusted_proxies = ask("可信代理 IP（逗号分隔，主机 Nginx 与本机）", "127.0.0.1")
+            out("未找到 openssl，无法自动生成加密证书。")
+        encryption_pfx = ask("请提供加密 PFX 文件路径（生产环境必需）", "", allow_blank=True).strip()
+        if not encryption_pfx or not Path(encryption_pfx).is_file():
+            raise ManageError("生产环境必须配置持久化 OpenIddict 加密证书。")
+        encryption_pfx_password = ask("加密 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
+        destination = CERT_DIR / "encryption.pfx"
+        shutil.copy2(encryption_pfx, destination)
+        destination.chmod(0o600)
+        encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
+    trusted_proxies = ask("可信代理 IP（逗号分隔，主机 Nginx 与本机）", "127.0.0.1,::1")
     trusted_networks = ask("可信代理 CIDR（逗号分隔）", "172.16.0.0/12")
 
     origin = public_url.rstrip("/")
@@ -620,12 +641,14 @@ def collect_install_answers() -> dict:
 
     return {
         "public_url": public_url,
+        "origin": public_url.rstrip("/"),
         "public_port": public_port,
         "api_port": api_port,
         "db_user": db_user,
         "db_name": db_name,
         "db_password": db_password,
         "redis_password": redis_password,
+        "invite_pepper": secrets.token_hex(32),
         "max_email": max_email,
         "max_password": max_password,
         "admin_email": admin_email,
@@ -656,6 +679,19 @@ def start_container(image: str, answers: dict) -> None:
     cmd = [
         "docker", "run", "-d", "--name", CONTAINER,
         "--restart", "unless-stopped",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--cap-add", "CHOWN",
+        "--cap-add", "DAC_OVERRIDE",
+        "--cap-add", "FOWNER",
+        "--cap-add", "SETGID",
+        "--cap-add", "SETUID",
+        "--cap-add", "NET_BIND_SERVICE",
+        "--cap-add", "KILL",
+        "--tmpfs", "/tmp:rw,nosuid,size=64m",
+        "--tmpfs", "/run:rw,nosuid,size=16m",
+        "--security-opt", "no-new-privileges:true",
+        "--pids-limit", "512",
         "-p", f"{answers['public_port']}:80",
         "-p", f"127.0.0.1:{answers['api_port']}:5000",
         "-v", f"{CONFIG_DIR}:/etc/pylai",
@@ -835,8 +871,19 @@ def action_change_url() -> None:
     new_url = ask("新公开地址", state.get("public_url"))
     if not CONFIG_FILE.is_file():
         raise ManageError("配置文件不存在")
+    origin = new_url.rstrip("/")
+    external_host = urlparse(new_url).hostname or "localhost"
+    allowed_hosts = [external_host]
+    if external_host not in ("localhost", "127.0.0.1", "::1"):
+        allowed_hosts.extend(("localhost", "127.0.0.1"))
     text = CONFIG_FILE.read_text(encoding="utf-8")
     text = _replace_toml_block_value(text, "[Frontend]", "Url", toml_string(new_url))
+    text = _replace_toml_block_value(text, "[OpenIddict]", "Issuer", toml_string(origin))
+    text = _replace_toml_block_value(text, "[OpenIddict]", "RequireHttps", "true" if origin.startswith("https://") else "false")
+    text = _replace_toml_block_value(text, "[Server]", "AllowedHosts", toml_string_list(allowed_hosts))
+    text = _replace_toml_block_value(text, "[Mfa]", "RelyingPartyId", toml_string(external_host))
+    text = _replace_toml_block_value(text, "[Mfa]", "Origins", toml_string_list([origin]))
+    text = _replace_toml_block_value(text, "[Cookie]", "SecurePolicy", toml_string("Always" if origin.startswith("https://") else "SameAsRequest"))
     CONFIG_FILE.write_text(text, encoding="utf-8")
     CONFIG_FILE.chmod(0o600)
     state["public_url"] = new_url
@@ -992,7 +1039,14 @@ def action_key_status() -> None:
 
 
 def action_key_rotate() -> None:
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "key", "rotate", "--config", "/etc/pylai/pylai.toml"], timeout=120)
+    state = load_state()
+    mfa_user = ask("用于 MFA 验证的 Admin/Max 账户", state.get("max_email") or "max@pylai.local")
+    mfa_code = ask("该账户 TOTP 验证码", "", secret=True)
+    if not mfa_code:
+        raise ManageError("签名密钥轮换需要 MFA 验证码。")
+    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "key", "rotate",
+         "--mfa-user", mfa_user, "--mfa-code", mfa_code,
+         "--config", "/etc/pylai/pylai.toml"], timeout=120)
 
 
 def action_db_status() -> None:
@@ -1039,6 +1093,7 @@ server {{
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
 
     location / {{
         proxy_pass http://127.0.0.1:{port};

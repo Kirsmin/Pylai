@@ -8,6 +8,7 @@ public static class ConfigValidator
     public static void ValidateValues(MainConfig config, string environment, ConfigLoadResult result)
     {
         ValidateServer(config, result);
+        ValidateOpenIddictIssuer(config, result, environment);
         ValidateLogging(config, result);
         ValidateCookie(config, result);
         ValidateFrontend(config, result);
@@ -15,14 +16,49 @@ public static class ConfigValidator
         ValidateIpResolution(config, result);
         ValidateCors(config, result);
         ValidateSmtp(config, result);
-        ValidateInviteCodes(config, result);
+        ValidateMfa(config, result);
+        ValidateInviteCodes(config, result, environment);
+        ValidateDeployment(config, result);
+        if (!environment.Equals("Development", StringComparison.OrdinalIgnoreCase)
+            && (config.UserToken.DefaultLifetimeDays is < 1 or > 90))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<UserTokenConfig>(), "UserToken.DefaultLifetimeDays", "E005",
+                "生产环境 UserToken 默认有效期必须在 1-90 天之间"));
+        }
 
         if (!environment.Equals("Development", StringComparison.OrdinalIgnoreCase))
         {
+            if (config.Server.AllowedHosts.Length == 0 || config.Server.AllowedHosts.Contains("*", StringComparer.OrdinalIgnoreCase))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<ServerConfig>(), "Server.AllowedHosts", "E004",
+                    "生产环境必须配置明确的 AllowedHosts 白名单，禁止使用通配符 *"));
+            }
+
             ValidateCertificate(config.OpenIddict.Certificates.Signing,
                 "OpenIddict.Certificates.Signing", FileOf<CertificatesConfig>(), result, optional: true);
             ValidateCertificate(config.OpenIddict.Certificates.Encryption,
-                "OpenIddict.Certificates.Encryption", FileOf<CertificatesConfig>(), result, optional: true);
+                "OpenIddict.Certificates.Encryption", FileOf<CertificatesConfig>(), result,
+                optional: false);
+
+            if (string.IsNullOrWhiteSpace(config.DataProtection.KeyDirectory))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<DataProtectionConfig>(), "DataProtection.KeyDirectory", "E004",
+                    "生产环境必须配置持久化 DataProtection 密钥目录，拒绝使用临时密钥环"));
+            }
+
+            if (string.IsNullOrWhiteSpace(config.OpenIddict.Certificates.Signing.Path)
+                && string.IsNullOrWhiteSpace(config.OpenIddict.SigningKeyEncryption.KeyFile))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<SigningKeyEncryptionConfig>(), "OpenIddict.SigningKeyEncryption.KeyFile", "E004",
+                    "数据库托管签名密钥必须配置数据库边界之外的 KEK 文件"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(config.OpenIddict.SigningKeyEncryption.KeyFile)
+                && !File.Exists(config.OpenIddict.SigningKeyEncryption.KeyFile))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<SigningKeyEncryptionConfig>(), "OpenIddict.SigningKeyEncryption.KeyFile", "E007",
+                    $"签名 KEK 文件不存在: {config.OpenIddict.SigningKeyEncryption.KeyFile}"));
+            }
 
             if (!config.OpenIddict.RequireHttps
                 && config.Cookie.SecurePolicy.Equals("Always", StringComparison.OrdinalIgnoreCase))
@@ -41,6 +77,29 @@ public static class ConfigValidator
         {
             result.Errors.Add(new ConfigIssue(FileOf<ServerConfig>(), "Server.Url", "E006",
                 $"Server.Url 不是合法监听地址: {config.Server.Url}（应为 http(s)://host:port）"));
+        }
+    }
+
+    private static void ValidateOpenIddictIssuer(MainConfig config, ConfigLoadResult result, string environment)
+    {
+        if (!Uri.TryCreate(config.OpenIddict.Issuer, UriKind.Absolute, out var issuer)
+            || (issuer.Scheme != "http" && issuer.Scheme != "https")
+            || string.IsNullOrEmpty(issuer.Host)
+            || !string.IsNullOrEmpty(issuer.Query)
+            || !string.IsNullOrEmpty(issuer.Fragment)
+            || !string.IsNullOrEmpty(issuer.PathAndQuery.Trim('/')))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<OpenIddictConfig>(), "OpenIddict.Issuer", "E006",
+                $"OpenIddict.Issuer 不是合法地址: {config.OpenIddict.Issuer}（应为 http(s)://host[:port]，不带路径）"));
+            return;
+        }
+
+        if (!environment.Equals("Development", StringComparison.OrdinalIgnoreCase)
+            && config.OpenIddict.RequireHttps
+            && !issuer.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<OpenIddictConfig>(), "OpenIddict.Issuer", "E006",
+                "OpenIddict.RequireHttps=true 时 OpenIddict.Issuer 必须使用 https"));
         }
     }
 
@@ -211,28 +270,68 @@ public static class ConfigValidator
         }
     }
 
-    private static void ValidateInviteCodes(MainConfig config, ConfigLoadResult result)
+    private static void ValidateMfa(MainConfig config, ConfigLoadResult result)
     {
-        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var (group, codes) in new (string Group, IEnumerable<string> Codes)[]
-                 {
-                     (AuthConstants.Roles.Normal, config.InviteCode.Gift.Normal),
-                     (AuthConstants.Roles.Admin, config.InviteCode.Gift.Admin),
-                     (AuthConstants.Roles.Max, config.InviteCode.Gift.Max)
-                 })
+        if (string.IsNullOrWhiteSpace(config.Mfa.RelyingPartyId))
         {
-            foreach (var code in codes)
+            result.Errors.Add(new ConfigIssue(FileOf<MfaConfig>(), "Mfa.RelyingPartyId", "E004",
+                "Mfa.RelyingPartyId 不能为空"));
+        }
+
+        if (config.Mfa.Origins.Length == 0)
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<MfaConfig>(), "Mfa.Origins", "E004",
+                "Mfa.Origins 不能为空"));
+            return;
+        }
+
+        foreach (var origin in config.Mfa.Origins)
+        {
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)
+                || (uri.Scheme != "http" && uri.Scheme != "https")
+                || string.IsNullOrEmpty(uri.Host)
+                || !string.IsNullOrEmpty(uri.Query)
+                || !string.IsNullOrEmpty(uri.Fragment)
+                || !string.IsNullOrEmpty(uri.PathAndQuery.Trim('/')))
             {
-                if (seen.TryGetValue(code, out var existingGroup))
-                {
-                    result.Errors.Add(new ConfigIssue(FileOf<InviteCodeConfig>(), "InviteCode.Gift", "E004",
-                        $"邀请码 {code} 同时出现在 {existingGroup} 与 {group} 列表中"));
-                }
-                else
-                {
-                    seen[code] = group;
-                }
+                result.Errors.Add(new ConfigIssue(FileOf<MfaConfig>(), "Mfa.Origins", "E006",
+                    $"WebAuthn Origin 不合法: {origin}（应为 http(s)://host[:port]）"));
             }
+        }
+    }
+
+    private static void ValidateInviteCodes(MainConfig config, ConfigLoadResult result, string environment)
+    {
+        if (!environment.Equals("Development", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(config.InviteCode.ServerPepper))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<InviteCodeConfig>(), "InviteCode.ServerPepper", "E004",
+                "生产环境必须配置独立的邀请码 HMAC pepper"));
+        }
+
+        if (string.IsNullOrWhiteSpace(config.InviteCode.ServerPepper))
+            result.Warnings.Add("InviteCode.ServerPepper 未配置；邀请码创建与兑换将被禁用");
+
+        if (config.InviteCode.DefaultLifetimeHours <= 0)
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<InviteCodeConfig>(), "InviteCode.DefaultLifetimeHours", "E005",
+                "邀请码默认有效期必须大于 0 小时"));
+        }
+    }
+
+    private static void ValidateDeployment(MainConfig config, ConfigLoadResult result)
+    {
+        if (!config.Deployment.BundledNginx)
+            return;
+
+        if (!config.IpResolution.ForwardedHeadersEnabled
+            || !config.IpResolution.TrustedProxies.Contains("127.0.0.1", StringComparer.Ordinal)
+            || !config.IpResolution.TrustedProxies.Contains("::1", StringComparer.Ordinal)
+            || !config.IpResolution.TrustedHeaders.Contains("X-Forwarded-For", StringComparer.OrdinalIgnoreCase)
+            || !config.IpResolution.TrustedHeaders.Contains("X-Forwarded-Proto", StringComparer.OrdinalIgnoreCase))
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<DeploymentConfig>(), "Deployment.BundledNginx", "E004",
+                "bundled Nginx 部署必须启用 ForwardedHeaders，并信任 127.0.0.1、::1 的 X-Forwarded-For / X-Forwarded-Proto"));
         }
     }
 

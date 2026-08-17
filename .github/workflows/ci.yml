@@ -17,39 +17,111 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "10.0.11"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: "24"
+          node-version: "24.13.3"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v5
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:
-          version: "10"
+          version: "10.15.1"
           run_install: false
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14"
+          python-version: "3.14.0"
 
       - name: Build backend
         working-directory: OS
         run: |
           dotnet build Pylaios.csproj -c Release
 
-      - name: Config validate（模板即有效配置）
+      - name: Config validate（生产安全配置）
         working-directory: OS
         run: |
-          cp pylai.example.toml pylai.toml
-          dotnet run --no-build -c Release --project Pylaios.csproj --no-launch-profile -- config validate
+          set -euo pipefail
+          cp pylai.example.toml /tmp/pylai-valid.toml
+          printf '%064d' 1 > /tmp/pylai-signing-kek
+          CI_PEPPER=$(openssl rand -hex 32)
+          CI_PFX_PASS=$(openssl rand -hex 16)
+          export CI_PEPPER CI_PFX_PASS
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -subj "/CN=Pylai CI Encryption" \
+            -keyout /tmp/pylai-encryption-key.pem -out /tmp/pylai-encryption-cert.pem >/dev/null 2>&1
+          openssl pkcs12 -export -out /tmp/pylai-encryption.pfx \
+            -inkey /tmp/pylai-encryption-key.pem -in /tmp/pylai-encryption-cert.pem \
+            -passout "pass:${CI_PFX_PASS}" >/dev/null 2>&1
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path('/tmp/pylai-valid.toml')
+          text = p.read_text()
+          text = text.replace('ServerPepper = ""', f'ServerPepper = "{os.environ["CI_PEPPER"]}"', 1)
+          text = text.replace('KeyFile = ""', 'KeyFile = "/tmp/pylai-signing-kek"', 1)
+          text = text.replace('Issuer = "http://localhost:5000"', 'Issuer = "https://localhost:5000"', 1)
+          text = text.replace('[OpenIddict.Certificates.Encryption]\nPath = ""',
+                              '[OpenIddict.Certificates.Encryption]\nPath = "/tmp/pylai-encryption.pfx"', 1)
+          text = text.replace('Path = "/tmp/pylai-encryption.pfx"\nPassword = ""',
+                              f'Path = "/tmp/pylai-encryption.pfx"\nPassword = "{os.environ["CI_PFX_PASS"]}"', 1)
+          p.write_text(text)
+          PY
+          dotnet bin/Release/net10.0/Pylaios.dll config validate --config /tmp/pylai-valid.toml
+
+      - name: Security negative config checks
+        working-directory: OS
+        run: |
+          set -euo pipefail
+          assert_invalid() {
+            local label="$1"
+            local needle="$2"
+            shift 2
+            if dotnet bin/Release/net10.0/Pylaios.dll config validate --config /tmp/pylai-negative.toml >/tmp/negative.json 2>&1; then
+              echo "${label} 仍通过校验"; cat /tmp/negative.json; exit 1
+            fi
+            grep -q "${needle}" /tmp/negative.json || {
+              echo "${label} 未返回预期错误 ${needle}"; cat /tmp/negative.json; exit 1
+            }
+          }
+          cp /tmp/pylai-valid.toml /tmp/pylai-negative.toml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/pylai-negative.toml')
+          text = p.read_text()
+          import re
+          text = re.sub(r'^ServerPepper = ".*"$', 'ServerPepper = ""', text, count=1, flags=re.M)
+          p.write_text(text)
+          PY
+          assert_invalid "缺失 InviteCode.ServerPepper" "InviteCode.ServerPepper"
+
+          cp /tmp/pylai-valid.toml /tmp/pylai-negative.toml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/pylai-negative.toml')
+          text = p.read_text().replace('KeyFile = "/tmp/pylai-signing-kek"', 'KeyFile = ""', 1)
+          p.write_text(text)
+          PY
+          assert_invalid "缺失签名 KEK" "SigningKeyEncryption.KeyFile"
+
+          cp /tmp/pylai-valid.toml /tmp/pylai-negative.toml
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('/tmp/pylai-negative.toml')
+          text = p.read_text()
+          text = re.sub(r'^Path = "/tmp/pylai-encryption.pfx"$', 'Path = ""', text, count=1, flags=re.M)
+          text = re.sub(r'^Password = ".*"$', 'Password = ""', text, count=1, flags=re.M)
+          p.write_text(text)
+          PY
+          assert_invalid "缺失 OpenIddict 加密证书" "OpenIddict.Certificates.Encryption.Path"
 
       - name: Build frontend
         working-directory: UI
@@ -63,6 +135,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      - name: Dependency vulnerability scan
+        run: |
+          set -euo pipefail
+          dotnet list OS/Pylaios.csproj package --vulnerable --include-transitive
+          pnpm --dir UI audit --audit-level high
+          pnpm --dir AdminUI audit --audit-level high
+
       - name: Build Dev Docker image (linux/amd64)
         run: |
           docker buildx build --platform linux/amd64 \
@@ -71,13 +150,31 @@ jobs:
           docker save pylai-dev:latest -o pylai-dev-amd64.tar
 
       - name: Upload Dev image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pylai-dev-amd64
           path: pylai-dev-amd64.tar
           retention-days: 14
 
-      - name: Smoke test — 完整实例启动 + 健康检查 + 登录
+      - name: Container hardening checks
+        run: |
+          set -euo pipefail
+          docker image inspect pylai-dev:latest --format '{{json .Config.ExposedPorts}}' | grep -q '80' || exit 1
+          docker run --rm --entrypoint sh pylai-dev:latest -c '
+            set -e
+            grep -q "user = pylai" /etc/supervisor/conf.d/pylai.conf
+            grep -q "user = redis" /etc/supervisor/conf.d/pylai.conf
+            grep -q "user = pylai" /etc/supervisor/conf.d/pylai-server.conf
+            grep -q "user = redis" /etc/supervisor/conf.d/pylai-server.conf
+            grep -q "^user www-data;" /etc/nginx/sites-available/pylai-dev
+            grep -q "^user www-data;" /etc/nginx/sites-available/pylai-server
+            grep -q "Content-Security-Policy" /etc/nginx/sites-available/pylai-server
+            ! grep -q "unsafe-eval" /etc/nginx/sites-available/pylai-server
+            ! grep -q "script-src 'self' 'unsafe-inline'" /etc/nginx/sites-available/pylai-server
+            ! grep -q "script-src-elem 'unsafe-inline'" /etc/nginx/sites-available/pylai-server
+          '
+
+      - name: Smoke test — 完整实例启动 + 健康检查 + MFA 门禁 + 并发注册
         run: |
           docker load < pylai-dev-amd64.tar
           docker run -d --name smoke -p 8080:80 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
@@ -95,11 +192,20 @@ jobs:
 
           curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
 
-          ADMIN_PW=$(docker logs smoke 2>/dev/null | grep "管理员" | awk '{print $NF}')
-          curl -sf --max-time 8 -X POST http://localhost:8080/api/auth/login \
+          USER_PW=$(docker logs smoke 2>/dev/null | grep "普通用户:" | awk '{print $NF}')
+          ADMIN_PW=$(docker logs smoke 2>/dev/null | grep "管理员:" | awk '{print $NF}')
+          NORMAL_LOGIN=$(curl -sf --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
-            -d "{\"usernameOrEmail\":\"admin@pylaios.local\",\"password\":\"$ADMIN_PW\"}" \
-            | grep -q '"success":true' || { echo "登录失败"; docker logs smoke 2>&1 | tail -30; exit 1; }
-          echo "==> 登录 OK"
+            -d "{\"usernameOrEmail\":\"user@pylaios.local\",\"password\":\"$USER_PW\"}")
+          echo "$NORMAL_LOGIN" | grep -q '"success":true' || { echo "普通用户登录失败"; echo "$NORMAL_LOGIN"; exit 1; }
+
+          ADMIN_LOGIN=$(curl -s --max-time 20 -X POST http://localhost:8080/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d "{\"usernameOrEmail\":\"admin@pylaios.local\",\"password\":\"$ADMIN_PW\"}")
+          echo "$ADMIN_LOGIN" | grep -q '"errorCode":"mfa_required"\|"errorCode":"mfa_setup_required"' \
+            || { echo "Admin 未受 MFA 门禁保护"; echo "$ADMIN_LOGIN"; exit 1; }
+          echo "==> MFA 登录门禁 OK"
+
+          python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
 
           docker rm -f smoke >/dev/null 2>&1

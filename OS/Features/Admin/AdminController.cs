@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -18,6 +19,8 @@ public class AdminController : ControllerBase
     private readonly IEmailVerificationBlockService _emailBlock;
     private readonly IAuditService _auditService;
     private readonly IpResolutionService _ipResolver;
+    private readonly MainConfig _config;
+    private readonly IMfaService _mfa;
     private readonly ILogger<AdminController> _logger;
 
     public AdminController(
@@ -29,6 +32,8 @@ public class AdminController : ControllerBase
         IEmailVerificationBlockService emailBlock,
         IAuditService auditService,
         IpResolutionService ipResolver,
+        MainConfig config,
+        IMfaService mfa,
         ILogger<AdminController> logger)
     {
         _context = context;
@@ -39,6 +44,8 @@ public class AdminController : ControllerBase
         _emailBlock = emailBlock;
         _auditService = auditService;
         _ipResolver = ipResolver;
+        _config = config;
+        _mfa = mfa;
         _logger = logger;
     }
 
@@ -55,14 +62,17 @@ public class AdminController : ControllerBase
             query = query.Where(c => c.Group == group);
 
         var total = await query.CountAsync();
-        var codes = await query.OrderBy(c => c.Code)
+        var codes = await query.OrderBy(c => c.Prefix)
             .Skip(Math.Max(0, skip)).Take(Math.Clamp(take, 1, 100))
             .Select(c => new AdminInviteCodeListItem
             {
-                Code = c.Code,
+                Id = c.Id,
+                Prefix = c.Prefix,
                 Group = c.Group,
                 MaxRedemptions = c.MaxRedemptions,
-                UsedCount = c.UsedCount
+                UsedCount = c.UsedCount,
+                Status = c.Status.ToString(),
+                ExpiresAt = c.ExpiresAt
             })
             .ToListAsync();
 
@@ -75,42 +85,62 @@ public class AdminController : ControllerBase
         if (!ModelState.IsValid)
             return BadRequest(new ApiResponse { Success = false, Error = "请求参数无效。", ErrorCode = "invalid_format" });
 
-        var code = request.Code.Trim();
-        if (code.Length == 0 || code.Length > 128)
-            return BadRequest(new ApiResponse { Success = false, Error = "邀请码格式无效。", ErrorCode = "invalid_format" });
-        if (!AuthConstants.Groups.IsValid(request.Group))
+        var group = request.Group.Trim().ToLowerInvariant();
+        if (!AuthConstants.Groups.IsValid(group))
             return BadRequest(new ApiResponse { Success = false, Error = "无效的用户组。", ErrorCode = "invalid_request" });
-        if (request.MaxRedemptions is <= 0)
+        if (AuthConstants.Groups.Rank(group) >= AuthConstants.Groups.Rank(AuthConstants.Roles.Admin))
+        {
+            var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+            if (stepUp is not null) return stepUp;
+        }
+        var maxRedemptions = request.MaxRedemptions ?? _config.InviteCode.MaxRedemptions;
+        if (maxRedemptions <= 0)
             return BadRequest(new ApiResponse { Success = false, Error = "最大核销次数必须大于 0。", ErrorCode = "invalid_request" });
 
-        if (await _context.InviteCodes.AnyAsync(c => c.Code == code))
-            return Conflict(new ApiResponse { Success = false, Error = "邀请码已存在。", ErrorCode = "duplicate" });
+        var lifetimeHours = request.LifetimeHours ?? _config.InviteCode.DefaultLifetimeHours;
+        if (lifetimeHours <= 0 || lifetimeHours > 8760)
+            return BadRequest(new ApiResponse { Success = false, Error = "有效期必须在 1 到 8760 小时之间。", ErrorCode = "invalid_request" });
 
-        _context.InviteCodes.Add(new InviteCode
+        InviteCodeCreateResult created;
+        try
         {
-            Code = code,
-            Group = request.Group,
-            MaxRedemptions = request.MaxRedemptions ?? 10
-        });
-        await _context.SaveChangesAsync();
+            created = await _inviteCodeService.CreateAsync(group, maxRedemptions, lifetimeHours);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(503, new ApiResponse { Success = false, Error = ex.Message, ErrorCode = "api_error" });
+        }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeCreated,
-            null, null, true, $"Created invite code {code} group:{request.Group}");
+            CurrentActorId(), null, true, $"Created invite prefix {created.Entity.Prefix} group:{group}");
 
-        return Ok(new ApiResponse { Success = true });
+        return Ok(new AdminInviteCodeCreateResponse
+        {
+            Success = true,
+            Id = created.Entity.Id,
+            Code = created.Code,
+            Prefix = created.Entity.Prefix,
+            Group = created.Entity.Group,
+            MaxRedemptions = created.Entity.MaxRedemptions,
+            ExpiresAt = created.Entity.ExpiresAt
+        });
     }
 
-    [HttpGet("invite-codes/{code}")]
-    public async Task<IActionResult> InviteCodeDetail(string code)
+    [HttpGet("invite-codes/{id:guid}")]
+    public async Task<IActionResult> InviteCodeDetail(Guid id)
     {
-        var entity = await _context.InviteCodes.AsNoTracking().FirstOrDefaultAsync(c => c.Code == code);
+        var entity = await _context.InviteCodes.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
         if (entity is null)
             return NotFound(new ApiResponse { Success = false, Error = "邀请码不存在。", ErrorCode = "not_found" });
 
         var usedBy = new List<AdminInviteCodeRedemption>();
         if (entity.UsedBy.Count > 0)
         {
-            var uids = entity.UsedBy.Select(s => Guid.Parse(s)).ToList();
+            var uids = entity.UsedBy
+                .Select(s => Guid.TryParse(s, out var uid) ? uid : (Guid?)null)
+                .Where(uid => uid.HasValue)
+                .Select(uid => uid!.Value)
+                .ToList();
             usedBy = await _context.Users.AsNoTracking()
                 .Where(u => uids.Contains(u.Uid))
                 .Select(u => new AdminInviteCodeRedemption
@@ -124,60 +154,84 @@ public class AdminController : ControllerBase
 
         var detail = new AdminInviteCodeDetail
         {
-            Code = entity.Code,
+            Id = entity.Id,
+            Prefix = entity.Prefix,
             Group = entity.Group,
             MaxRedemptions = entity.MaxRedemptions,
             UsedCount = entity.UsedCount,
-            UsedBy = usedBy
+            UsedBy = usedBy,
+            Status = entity.Status.ToString(),
+            ExpiresAt = entity.ExpiresAt
         };
 
         return Ok(new AdminInviteCodeDetailResponse { Success = true, Code = detail });
     }
 
-    [HttpPatch("invite-codes/{code}")]
-    public async Task<IActionResult> UpdateInviteCode(string code, [FromBody] AdminInviteCodeUpdateRequest request)
+    [HttpPatch("invite-codes/{id:guid}")]
+    public async Task<IActionResult> UpdateInviteCode(Guid id, [FromBody] AdminInviteCodeUpdateRequest request)
     {
-        var entity = await _context.InviteCodes.FirstOrDefaultAsync(c => c.Code == code);
+        var entity = await _context.InviteCodes.FirstOrDefaultAsync(c => c.Id == id);
         if (entity is null)
             return NotFound(new ApiResponse { Success = false, Error = "邀请码不存在。", ErrorCode = "not_found" });
 
-        if (request.Group is not null)
+        if (AuthConstants.Groups.Rank(entity.Group) >= AuthConstants.Groups.Rank(AuthConstants.Roles.Admin)
+            || request.Revoked is true)
         {
-            if (!AuthConstants.Groups.IsValid(request.Group))
-                return BadRequest(new ApiResponse { Success = false, Error = "无效的用户组。", ErrorCode = "invalid_request" });
-            entity.Group = request.Group;
+            var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+            if (stepUp is not null) return stepUp;
         }
 
         if (request.MaxRedemptions is not null)
         {
             if (request.MaxRedemptions <= 0 || request.MaxRedemptions < entity.UsedCount)
                 return BadRequest(new ApiResponse { Success = false, Error = "最大核销次数必须大于 0 且不小于已核销次数。", ErrorCode = "invalid_request" });
+            if (AuthConstants.Groups.Rank(entity.Group) >= AuthConstants.Groups.Rank(AuthConstants.Roles.Admin)
+                && request.MaxRedemptions != 1)
+                return BadRequest(new ApiResponse { Success = false, Error = "Admin/Max 邀请码最大核销次数必须为 1。", ErrorCode = "invalid_request" });
             entity.MaxRedemptions = request.MaxRedemptions.Value;
         }
+
+        if (request.ExpiresAt is not null)
+        {
+            if (request.ExpiresAt <= DateTimeOffset.UtcNow)
+                return BadRequest(new ApiResponse { Success = false, Error = "有效期必须晚于当前时间。", ErrorCode = "invalid_request" });
+            entity.ExpiresAt = request.ExpiresAt.Value;
+        }
+
+        if (request.Revoked is true)
+            entity.Status = InviteCodeStatus.Revoked;
 
         await _context.SaveChangesAsync();
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeUpdated,
-            null, null, true, $"Updated invite code {code}");
+            CurrentActorId(), null, true, $"Updated invite prefix {entity.Prefix}");
 
         return Ok(new ApiResponse { Success = true });
     }
 
-    [HttpDelete("invite-codes/{code}")]
-    public async Task<IActionResult> DeleteInviteCode(string code)
+    [HttpPost("invite-codes/revoke")]
+    public async Task<IActionResult> RevokeInviteCodes([FromBody] AdminInviteCodeRevokeRequest request)
     {
-        var entity = await _context.InviteCodes.FirstOrDefaultAsync(c => c.Code == code);
-        if (entity is null)
-            return NotFound(new ApiResponse { Success = false, Error = "邀请码不存在。", ErrorCode = "not_found" });
+        var ids = request.Ids.Distinct().ToList();
+        if (ids.Count == 0 || ids.Count > 1000)
+            return BadRequest(new ApiResponse { Success = false, Error = "一次最多撤销 1000 个邀请码。", ErrorCode = "invalid_request" });
 
-        _context.InviteCodes.Remove(entity);
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
+
+        var entities = await _context.InviteCodes.Where(c => ids.Contains(c.Id)).ToListAsync();
+        foreach (var entity in entities)
+            entity.Status = InviteCodeStatus.Revoked;
         await _context.SaveChangesAsync();
 
-        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeDeleted,
-            null, null, true, $"Deleted invite code {code}");
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeRevoked,
+            CurrentActorId(), null, true, $"Revoked invite codes count:{entities.Count}");
 
         return Ok(new ApiResponse { Success = true });
     }
+
+    private string? CurrentActorId()
+        => User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
 
     // ============ 封禁管理 ============
 

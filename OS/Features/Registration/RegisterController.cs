@@ -382,44 +382,36 @@ public class RegisterController : ControllerBase
 
         if (session.PendingEmail is not null)
         {
-            if (await _context.IsEmailTakenAsync(session.PendingEmail))
-            {
-                _logger.LogWarning("邮箱已被占用 | {Email}", session.PendingEmail);
-                return StatusCode(403, new CreateAccountResponse { Success = false, Error = "邮箱验证已被限制，请稍后重试。", ErrorCode = "banned" });
-            }
-
             user.Email = session.PendingEmail;
             user.NormalizedEmail = UsernameNormalizer.Normalize(session.PendingEmail);
         }
 
         user.PasswordHash = _passwordHasher.HashPassword(user, request.Password);
+
+        var sessionTokenHash = AuthHelper.HashCode(request.SessionToken);
+        var binding = new RegistrationSessionBinding
+        {
+            SessionTokenHash = sessionTokenHash,
+            UserUid = user.Uid
+        };
+
+        await using var transaction = await _context.Database.BeginTransactionAsync();
         _context.Users.Add(user);
+        _context.RegistrationSessionBindings.Add(binding);
         try
         {
             await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
         }
         catch (DbUpdateException ex) when (ex.IsUniqueViolation())
         {
-            var normalizedEmail = session.PendingEmail is null
-                ? null
-                : UsernameNormalizer.Normalize(session.PendingEmail);
-            var existing = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u =>
-                u.Name == session.NormalizedName
-                || (normalizedEmail != null && u.NormalizedEmail == normalizedEmail));
-
-            if (existing is null)
-                return StatusCode(409, new CreateAccountResponse { Success = false, Error = "用户名或邮箱已被占用。", ErrorCode = "duplicate" });
-
-            session.UserUid = existing.Uid;
-            session.Step = 5;
-            await _sessionService.UpdateSessionAsync(request.SessionToken, session);
-            return Ok(new CreateAccountResponse
+            await transaction.RollbackAsync();
+            _context.ChangeTracker.Clear();
+            return Conflict(new CreateAccountResponse
             {
-                Success = true,
-                Uid = existing.Uid,
-                Name = existing.Name,
-                DisplayName = existing.DisplayName,
-                Group = existing.Group
+                Success = false,
+                Error = "用户名或邮箱已被占用。",
+                ErrorCode = "duplicate"
             });
         }
 
@@ -433,7 +425,7 @@ public class RegisterController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "用户已创建但注册会话更新失败 | uid:{Uid}", user.Uid);
+            _logger.LogWarning(ex, "用户已创建，但 Redis 注册会话更新失败 | uid:{Uid}", user.Uid);
         }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.UserCreated, user.Uid.ToString(), user.Email, true,
@@ -469,7 +461,13 @@ public class RegisterController : ControllerBase
 
         var ip = this.GetClientIp(_ipResolver);
 
-        _logger.LogDebug("邀请码核销请求 | 码:{InviteCode} | uid:{Uid} | IP:{Ip}", request.InviteCode, session.UserUid, ip);
+        var invitePrefix = request.InviteCode.Trim();
+        if (invitePrefix.Length > 3)
+            invitePrefix = invitePrefix[..3];
+        _logger.LogDebug("邀请码核销请求 | prefix:{Prefix} | uid:{Uid} | IP:{Ip}", invitePrefix, session.UserUid, ip);
+
+        if (session.UserUid is null)
+            return BadRequest(new InviteCodeRedeemResponse { Success = false, Error = "invalid_or_expired", ErrorCode = "invalid_session" });
 
         var user = await _context.Users.FindAsync(session.UserUid.Value);
         if (user is null)
@@ -487,13 +485,13 @@ public class RegisterController : ControllerBase
 
         if (result.NewGroup is not null)
         {
-            session.InviteCode = request.InviteCode;
+            session.InviteCodePrefix = result.Prefix;
             session.InviteCodeType = result.NewGroup;
             session.Step = 6;
             await _sessionService.UpdateSessionAsync(request.SessionToken, session);
 
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeRedeemed, user.Uid.ToString(), null, true,
-                $"InviteCode: {request.InviteCode}, Group: {result.NewGroup}");
+                $"InvitePrefix: {result.Prefix}, Group: {result.NewGroup}");
 
             _logger.LogInformation("邀请码提权成功 | uid:{Uid} | 组:{Group}", session.UserUid, result.NewGroup);
 
@@ -501,12 +499,12 @@ public class RegisterController : ControllerBase
         }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeRedeemFailed, user.Uid.ToString(), null, false,
-            $"InviteCode: {request.InviteCode}, Message: {result.Message}");
+            $"InvitePrefix: {result.Prefix}, Result: {result.Message}");
 
         if (result.ApiError)
             return StatusCode(502, new InviteCodeRedeemResponse { Success = false, Error = result.Message, ErrorCode = "api_error" });
 
-        return BadRequest(new InviteCodeRedeemResponse { Success = false, Error = result.Message, ErrorCode = "invalid_invite" });
+        return BadRequest(new InviteCodeRedeemResponse { Success = false, Error = "邀请码无效或已过期。", ErrorCode = "invalid_or_expired" });
     }
 
     [HttpPost("complete")]
@@ -580,6 +578,18 @@ public class RegisterController : ControllerBase
             _logger.LogWarning("会话已过期");
             var err = new { Success = false, Error = "会话已过期或无效，请刷新页面重试。", ErrorCode = "invalid_session" };
             return (null, unauthorized ? Unauthorized(err) : BadRequest(err));
+        }
+
+        if (session.UserUid is not null)
+        {
+            var binding = await _context.RegistrationSessionBindings.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.SessionTokenHash == AuthHelper.HashCode(token!));
+            if (binding is null || binding.UserUid != session.UserUid.Value)
+            {
+                _logger.LogWarning("注册会话绑定校验失败");
+                var err = new { Success = false, Error = "注册会话已失效，请重新开始。", ErrorCode = "invalid_session" };
+                return (null, unauthorized ? Unauthorized(err) : BadRequest(err));
+            }
         }
 
         if (step is not null && session.Step != step)

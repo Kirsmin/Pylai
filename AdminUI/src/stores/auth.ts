@@ -1,54 +1,36 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
-import { API_BASE, ApiError, ADMIN_REDIRECT_URI, parseApiResponse, rawFetch } from '@/utils/http'
-import { randomString, sha256Base64Url } from '@/utils/pkce'
+import { API_BASE, ApiError, parseApiResponse, rawFetch } from '@/utils/http'
+import { getAssertion } from '@/utils/webauthn'
 import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser } from '@/types/admin'
 
-const CLIENT_ID = 'pylai-admin'
-const SCOPE = 'openid profile:basic profile:mail profile:role offline_access'
-const SESSION_KEY = 'pylai_admin_session'
-const OAUTH_KEY = 'pylai_admin_oauth'
-
-interface StoredSession {
-  accessToken: string
-  refreshToken: string
-  expiresAt: number
-}
-
-interface StoredOAuth {
-  state: string
-  verifier: string
-}
-
-function readSession(): StoredSession | null {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY)
-    return raw ? JSON.parse(raw) as StoredSession : null
-  } catch {
-    return null
-  }
-}
-
-function writeSession(session: StoredSession) {
-  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
-}
-
-function clearSessionStorage() {
-  sessionStorage.removeItem(SESSION_KEY)
-  sessionStorage.removeItem(OAUTH_KEY)
+interface StepUpTicket {
+  transactionId: string
+  methods: string[]
 }
 
 export const useAuthStore = defineStore('admin-auth', () => {
   const initialized = ref(false)
   const starting = ref(false)
-  const accessToken = ref('')
-  const refreshToken = ref('')
-  const expiresAt = ref(0)
   const user = ref<AdminCapabilityUser | null>(null)
   const capabilities = ref<AdminCapability[]>([])
   const loginError = ref('')
+  const csrfToken = ref('')
 
-  const isAuthenticated = computed(() => user.value !== null && accessToken.value !== '')
+  const stepUpVisible = ref(false)
+  const stepUpTicket = ref<StepUpTicket | null>(null)
+  const stepUpCode = ref('')
+  const stepUpError = ref('')
+  const stepUpBusy = ref(false)
+  let stepUpPromise: Promise<void> | null = null
+  let stepUpResolve: (() => void) | null = null
+  let stepUpReject: ((reason?: unknown) => void) | null = null
+
+  const mfaTotpEnabled = ref(false)
+  const mfaWebAuthnCount = ref(0)
+  const mfaStepUpSatisfied = ref(false)
+
+  const isAuthenticated = computed(() => user.value !== null)
   const firstCapability = computed(() => capabilities.value[0] ?? null)
   const displayName = computed(() => user.value?.displayName || user.value?.name || '')
   const group = computed(() => user.value?.group?.toLowerCase() ?? '')
@@ -65,207 +47,199 @@ export const useAuthStore = defineStore('admin-auth', () => {
     if (starting.value) return
     starting.value = true
     loginError.value = ''
-
-    try {
-      const state = randomString(16)
-      const verifier = randomString(64)
-      const nonce = randomString(16)
-      sessionStorage.setItem(OAUTH_KEY, JSON.stringify({ state, verifier } as StoredOAuth))
-
-      const params = new URLSearchParams({
-        response_type: 'code',
-        client_id: CLIENT_ID,
-        redirect_uri: ADMIN_REDIRECT_URI,
-        scope: SCOPE,
-        state,
-        nonce,
-        code_challenge_method: 'S256'
-      })
-
-      sha256Base64Url(verifier).then((challenge) => {
-        params.set('code_challenge', challenge)
-        window.location.assign(`${API_BASE}/connect/authorize?${params.toString()}`)
-      }).catch(() => {
-        loginError.value = '当前浏览器无法生成安全登录参数'
-        starting.value = false
-      })
-    } catch {
-      loginError.value = '无法发起登录，请刷新后重试'
-      starting.value = false
-    }
+    const url = new URL(`${API_BASE}/api/admin/bff/login`, window.location.origin)
+    url.searchParams.set('returnUrl', '/admin/')
+    window.location.assign(url.toString())
   }
 
-  async function applyTokenData(data: any) {
-    accessToken.value = data?.access_token as string
-    refreshToken.value = data?.refresh_token as string
-    expiresAt.value = Date.now() + Number(data?.expires_in ?? 3600) * 1000
-    writeSession({
-      accessToken: accessToken.value,
-      refreshToken: refreshToken.value,
-      expiresAt: expiresAt.value
-    })
-  }
-
-  async function exchangeToken(params: URLSearchParams): Promise<boolean> {
-    const res = await rawFetch('/connect/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString()
-    })
-    const data = await res.json().catch(() => null)
-    if (!res.ok || !data?.access_token) {
-      throw new Error(data?.error_description || data?.error || '通过 Pylai 通行证登录失败')
-    }
-    await applyTokenData(data)
-    return true
-  }
-
-  async function handleCallback(code: string, state: string): Promise<boolean> {
-    let stored: StoredOAuth | null = null
-    try {
-      stored = JSON.parse(sessionStorage.getItem(OAUTH_KEY) || 'null') as StoredOAuth | null
-    } catch {
-      stored = null
-    }
-    sessionStorage.removeItem(OAUTH_KEY)
-
-    if (!stored || !state || stored.state !== state) {
-      loginError.value = '登录回调校验失败，请重新登录'
+  async function loadCapabilities(): Promise<boolean> {
+    const response = await rawFetch('/api/admin/capabilities')
+    if (response.status === 401) {
+      user.value = null
+      capabilities.value = []
       return false
     }
-
-    const params = new URLSearchParams({
-      grant_type: 'authorization_code',
-      client_id: CLIENT_ID,
-      code,
-      redirect_uri: ADMIN_REDIRECT_URI,
-      code_verifier: stored.verifier
-    })
-
-    await exchangeToken(params)
-    await loadCapabilities()
-    return true
-  }
-
-  async function refreshAccessToken(): Promise<boolean> {
-    if (!refreshToken.value) return false
-    try {
-      const params = new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: CLIENT_ID,
-        refresh_token: refreshToken.value
-      })
-      await exchangeToken(params)
-      return true
-    } catch {
-      clearLocal()
-      return false
-    }
-  }
-
-  async function loadCapabilities() {
-    if (!accessToken.value) throw new ApiError('未登录', 401, 'unauthorized')
-    const data = await request<AdminCapabilitiesResponse>('/api/admin/capabilities')
-    if (!data?.success) {
-      throw new Error(data?.error || '无法获取管理能力')
-    }
+    const data = await parseApiResponse<AdminCapabilitiesResponse>(response)
+    if (!data?.success) throw new Error(data?.error || '无法获取管理能力')
     user.value = data.user ?? null
     capabilities.value = data.capabilities ?? []
+    return user.value !== null
+  }
+
+  async function ensureCsrf() {
+    if (csrfToken.value) return csrfToken.value
+    const data = await parseApiResponse<{ success: boolean; token: string }>(await rawFetch('/api/admin/bff/csrf'))
+    if (!data?.token) throw new ApiError('无法建立管理会话', 403, 'csrf_invalid')
+    csrfToken.value = data.token
+    return csrfToken.value
+  }
+
+  async function executeOnce<T>(path: string, init: RequestInit = {}): Promise<T | undefined> {
+    const method = (init.method || 'GET').toUpperCase()
+    const headers = new Headers(init.headers)
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method))
+      headers.set('X-CSRF-Token', await ensureCsrf())
+
+    const response = await rawFetch(path, { ...init, headers })
+    if (response.status === 401) {
+      user.value = null
+      capabilities.value = []
+    }
+    return parseApiResponse<T>(response)
   }
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T | undefined> {
-    if (!accessToken.value && refreshToken.value) {
-      await refreshAccessToken()
+    try {
+      return await executeOnce<T>(path, init)
+    } catch (err) {
+      if (err instanceof ApiError && err.errorCode === 'mfa_step_up_required') {
+        await requestMfaStepUp()
+        return executeOnce<T>(path, init)
+      }
+      throw err
     }
-    if (!accessToken.value) {
-      throw new ApiError('请先登录', 401, 'unauthorized')
-    }
-    return requestWithRetry<T>(path, init)
   }
 
-  async function requestWithRetry<T>(path: string, init: RequestInit = {}): Promise<T | undefined> {
-    const res = await rawFetch(path, {
-      ...init,
-      headers: {
-        ...(init.headers || {}),
-        'Authorization': `Bearer ${accessToken.value}`
-      }
+  async function requestMfaStepUp(): Promise<void> {
+    if (stepUpPromise) return stepUpPromise
+
+    stepUpPromise = new Promise<void>((resolve, reject) => {
+      stepUpResolve = resolve
+      stepUpReject = reject
+      void beginMfaStepUp()
+    }).finally(() => {
+      stepUpPromise = null
+      stepUpResolve = null
+      stepUpReject = null
+      stepUpVisible.value = false
+      stepUpTicket.value = null
+      stepUpCode.value = ''
+      stepUpError.value = ''
     })
-
-    if (res.status === 401 && refreshToken.value) {
-      const refreshed = await refreshAccessToken()
-      if (refreshed) {
-        const retry = await rawFetch(path, {
-          ...init,
-          headers: {
-            ...(init.headers || {}),
-            'Authorization': `Bearer ${accessToken.value}`
-          }
-        })
-        return parseApiResponse<T>(retry)
-      }
-    }
-
-    return parseApiResponse<T>(res)
+    return stepUpPromise
   }
 
-  function clearLocal() {
-    accessToken.value = ''
-    refreshToken.value = ''
-    expiresAt.value = 0
+  async function beginMfaStepUp() {
+    stepUpBusy.value = true
+    stepUpError.value = ''
+    try {
+      const data = await parseApiResponse<{ success: boolean; transactionId: string; methods: string[] }>(
+        await rawFetch('/api/auth/mfa/step-up', { method: 'POST' })
+      )
+      if (!data?.success || !data.transactionId) throw new ApiError('无法开始 MFA 验证', 403, 'mfa_invalid')
+      stepUpTicket.value = { transactionId: data.transactionId, methods: data.methods || [] }
+      stepUpVisible.value = true
+    } catch (err) {
+      stepUpError.value = err instanceof Error ? err.message : '无法开始 MFA 验证'
+      stepUpReject?.(err)
+    } finally {
+      stepUpBusy.value = false
+    }
+  }
+
+  async function verifyStepUpTotp() {
+    const ticket = stepUpTicket.value
+    if (!ticket || stepUpCode.value.length !== 6) return
+    stepUpBusy.value = true
+    stepUpError.value = ''
+    try {
+      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/totp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionId: ticket.transactionId, code: stepUpCode.value })
+      }))
+      mfaStepUpSatisfied.value = true
+      stepUpResolve?.()
+    } catch (err) {
+      stepUpError.value = err instanceof Error ? err.message : 'MFA 验证失败，请重试'
+    } finally {
+      stepUpBusy.value = false
+    }
+  }
+
+  async function verifyStepUpWebAuthn() {
+    const ticket = stepUpTicket.value
+    if (!ticket) return
+    stepUpBusy.value = true
+    stepUpError.value = ''
+    try {
+      const options = await parseApiResponse<any>(await rawFetch(
+        `/api/auth/mfa/step-up/webauthn/options?transactionId=${encodeURIComponent(ticket.transactionId)}`
+      ))
+      const response = await getAssertion(options)
+      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/webauthn/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionId: ticket.transactionId, response })
+      }))
+      mfaStepUpSatisfied.value = true
+      stepUpResolve?.()
+    } catch (err) {
+      stepUpError.value = err instanceof Error ? err.message : 'Passkey 验证失败，请重试'
+    } finally {
+      stepUpBusy.value = false
+    }
+  }
+
+  function cancelMfaStepUp() {
+    stepUpReject?.(new ApiError('操作已取消', 403, 'mfa_step_up_cancelled'))
+  }
+
+  async function loadMfaStatus() {
+    try {
+      const data = await parseApiResponse<{
+        success: boolean
+        required: boolean
+        totpEnabled: boolean
+        webAuthnCount: number
+        stepUpSatisfied: boolean
+      }>(await rawFetch('/api/auth/mfa/status'))
+      if (!data?.success) return
+      mfaTotpEnabled.value = data.totpEnabled
+      mfaWebAuthnCount.value = data.webAuthnCount
+      mfaStepUpSatisfied.value = data.stepUpSatisfied
+    } catch {
+      mfaTotpEnabled.value = false
+      mfaWebAuthnCount.value = 0
+      mfaStepUpSatisfied.value = false
+    }
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' })
+    } catch {
+    }
     user.value = null
     capabilities.value = []
-    clearSessionStorage()
-  }
-
-  function logout() {
-    clearLocal()
-    const url = new URL(`${API_BASE}/connect/logout`, window.location.origin)
-    url.searchParams.set('post_logout_redirect_uri', ADMIN_REDIRECT_URI)
-    window.location.assign(url.toString())
+    csrfToken.value = ''
+    stepUpTicket.value = null
+    stepUpVisible.value = false
+    window.location.assign(`${API_BASE}/admin/`)
   }
 
   async function init() {
     const query = new URLSearchParams(window.location.search)
-    const code = query.get('code')
-    const state = query.get('state')
     const oauthError = query.get('error')
+    if (oauthError) loginError.value = oauthError === 'access_denied' ? '登录已取消' : '登录失败'
 
     try {
-      if (oauthError) {
-        loginError.value = oauthError === 'access_denied' ? '授权已取消' : '授权失败'
-      } else if (code) {
-        if (state) {
-          await handleCallback(code, state)
-        } else {
-          loginError.value = '登录回调缺少 state，已拒绝'
-        }
-      } else {
-        const session = readSession()
-        if (session) {
-          accessToken.value = session.accessToken
-          refreshToken.value = session.refreshToken
-          expiresAt.value = session.expiresAt
-
-          if (!accessToken.value || expiresAt.value - Date.now() < 30000) {
-            await refreshAccessToken()
-          }
-          if (accessToken.value) {
-            await loadCapabilities()
-          }
-        }
+      if (!oauthError) {
+        await loadCapabilities()
+        if (user.value) await loadMfaStatus()
       }
-
-      if (oauthError || code) {
-        const clean = new URL(window.location.href)
+      const clean = new URL(window.location.href)
+      if (oauthError) {
         clean.search = ''
         window.history.replaceState({}, '', clean.toString())
       }
     } catch (err) {
       loginError.value = err instanceof Error ? err.message : '初始化登录状态失败'
-      clearLocal()
+      user.value = null
+      capabilities.value = []
     } finally {
       initialized.value = true
+      starting.value = false
     }
   }
 
@@ -282,9 +256,20 @@ export const useAuthStore = defineStore('admin-auth', () => {
     hasCapability,
     capability,
     startLogin,
-    init,
     request,
-    refreshAccessToken,
-    logout
+    logout,
+    init,
+    stepUpVisible,
+    stepUpTicket,
+    stepUpCode,
+    stepUpError,
+    stepUpBusy,
+    verifyStepUpTotp,
+    verifyStepUpWebAuthn,
+    cancelMfaStepUp,
+    mfaTotpEnabled,
+    mfaWebAuthnCount,
+    mfaStepUpSatisfied,
+    loadMfaStatus
   }
 })

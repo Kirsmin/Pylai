@@ -8,13 +8,12 @@ public class ConfirmationResult
     public bool Success { get; init; }
     public string? Error { get; init; }
     public string? ErrorCode { get; init; }
-    public int? AttemptsRemaining { get; init; }
     public string? BanId { get; init; }
     public string? BanRemaining { get; init; }
 
     public static ConfirmationResult Ok() => new() { Success = true };
-    public static ConfirmationResult WrongPassword(int attemptsRemaining)
-        => new() { Success = false, Error = "密码错误。", ErrorCode = "wrong_code", AttemptsRemaining = attemptsRemaining };
+    public static ConfirmationResult WrongPassword()
+        => new() { Success = false, Error = "密码错误。", ErrorCode = "wrong_code" };
     public static ConfirmationResult Locked(string? banRemaining)
         => new() { Success = false, Error = "尝试次数过多，操作已被限制，请24小时后重试。", ErrorCode = "confirmation_locked", BanRemaining = banRemaining };
     public static ConfirmationResult JustLocked(string banId, string? banRemaining)
@@ -78,7 +77,7 @@ public class ConfirmationGuard
             }
 
             await AuditAsync(user, action, false, $"Wrong password | AttemptsRemaining:{attemptsRemaining}");
-            return ConfirmationResult.WrongPassword(attemptsRemaining);
+            return ConfirmationResult.WrongPassword();
         }
 
         if (result == PasswordVerificationResult.SuccessRehashNeeded)

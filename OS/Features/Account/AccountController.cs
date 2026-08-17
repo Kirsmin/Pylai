@@ -279,7 +279,10 @@ public class AccountController : ControllerBase
     [HttpPost("redeem")]
     public async Task<IActionResult> RedeemInviteCode([FromBody] AccountRedeemRequest request)
     {
-        _logger.LogDebug("账号提权请求 | 码:{InviteCode}", request.InviteCode);
+        var invitePrefix = request.InviteCode?.Trim() ?? string.Empty;
+        if (invitePrefix.Length > 3)
+            invitePrefix = invitePrefix[..3];
+        _logger.LogDebug("账号提权请求 | prefix:{Prefix}", invitePrefix);
 
         var (user, userError) = await RequireUserAsync();
         if (userError is not null) return userError;
@@ -301,18 +304,18 @@ public class AccountController : ControllerBase
             _logger.LogInformation("账号提权成功 | uid:{Uid} | {OldGroup} → {NewGroup}", user.Uid, oldGroup, result.NewGroup);
 
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeRedeemed, user.Uid.ToString(), null, true,
-                $"InviteCode: {request.InviteCode}, Group: {result.NewGroup}");
+                $"InvitePrefix: {result.Prefix}, Group: {result.NewGroup}");
 
             return Ok(new AccountRedeemResponse { Success = true, NewGroup = result.NewGroup });
         }
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.InviteCodeRedeemFailed, user.Uid.ToString(), null, false,
-            $"InviteCode: {request.InviteCode}, Message: {result.Message}");
+            $"InvitePrefix: {result.Prefix}, Result: {result.Message}");
 
         if (result.ApiError)
             return StatusCode(502, new AccountRedeemResponse { Success = false, Error = result.Message, ErrorCode = "api_error" });
 
-        return BadRequest(new AccountRedeemResponse { Success = false, Error = result.Message, ErrorCode = "invalid_invite" });
+        return BadRequest(new AccountRedeemResponse { Success = false, Error = "邀请码无效或已过期。", ErrorCode = "invalid_or_expired" });
     }
 
     [HttpGet("authorized-apps")]
@@ -512,7 +515,7 @@ public class AccountController : ControllerBase
     {
         EmailCodeStatus.NotFound => BadRequest(new EmailCodeResponse { Success = false, Error = "验证会话已过期，请重新操作。", ErrorCode = "invalid_session" }),
         EmailCodeStatus.Expired => BadRequest(new EmailCodeResponse { Success = false, Error = "验证码已过期，请重新获取。", ErrorCode = "expired" }),
-        EmailCodeStatus.MaxAttempts => BadRequest(new EmailCodeResponse { Success = false, Error = "尝试次数过多，请稍后重试。", ErrorCode = "max_attempts", AttemptsRemaining = 0 }),
-        _ => BadRequest(new EmailCodeResponse { Success = false, Error = "验证码错误。", ErrorCode = "wrong_code", AttemptsRemaining = result.AttemptsRemaining })
+        EmailCodeStatus.MaxAttempts => BadRequest(new EmailCodeResponse { Success = false, Error = "尝试次数过多，请稍后重试。", ErrorCode = "max_attempts" }),
+        _ => BadRequest(new EmailCodeResponse { Success = false, Error = "验证码错误。", ErrorCode = "wrong_code" })
     };
 }

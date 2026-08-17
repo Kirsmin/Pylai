@@ -11,24 +11,24 @@
     "type-check": "vue-tsc --build"
   },
   "dependencies": {
-    "@vicons/carbon": "^0.13.0",
-    "@vicons/fluent": "^0.13.0",
-    "@vicons/tabler": "^0.13.0",
-    "naive-ui": "^2.44.1",
-    "pinia": "^3.0.4",
-    "vue": "^3.5.40",
-    "vue-router": "^5.2.0"
+    "@vicons/carbon": "0.13.0",
+    "@vicons/fluent": "0.13.0",
+    "@vicons/tabler": "0.13.0",
+    "naive-ui": "2.44.1",
+    "pinia": "3.0.4",
+    "vue": "3.5.41",
+    "vue-router": "5.2.0"
   },
   "devDependencies": {
-    "@tsconfig/node24": "^24.0.4",
-    "@types/node": "^24.13.3",
-    "@vitejs/plugin-vue": "^6.0.8",
-    "@vue/tsconfig": "^0.9.1",
-    "npm-run-all2": "^8.0.4",
-    "typescript": "~6.0.3",
-    "vite": "^8.1.5",
-    "vite-plugin-vue-devtools": "^8.2.1",
-    "vue-tsc": "^3.3.8"
+    "@tsconfig/node24": "24.0.4",
+    "@types/node": "24.13.3",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/tsconfig": "0.9.1",
+    "npm-run-all2": "8.0.4",
+    "typescript": "6.0.3",
+    "vite": "8.2.1",
+    "vite-plugin-vue-devtools": "8.2.1",
+    "vue-tsc": "3.3.9"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

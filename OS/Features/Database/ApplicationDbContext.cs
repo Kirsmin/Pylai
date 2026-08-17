@@ -21,7 +21,10 @@ public class ApplicationDbContext : DbContext
     public DbSet<EmailVerificationBlock> EmailVerificationBlocks => Set<EmailVerificationBlock>();
     public DbSet<OAuthClientMetadata> OAuthClientMetadata => Set<OAuthClientMetadata>();
     public DbSet<InviteCode> InviteCodes => Set<InviteCode>();
+    public DbSet<RegistrationSessionBinding> RegistrationSessionBindings => Set<RegistrationSessionBinding>();
     public DbSet<ConsentAuditEvent> ConsentAuditEvents => Set<ConsentAuditEvent>();
+    public DbSet<UserMfaSettings> UserMfaSettings => Set<UserMfaSettings>();
+    public DbSet<WebAuthnCredential> WebAuthnCredentials => Set<WebAuthnCredential>();
 
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
         : base(options)
@@ -167,7 +170,6 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(e => e.ClientId);
             entity.HasIndex(e => e.Timestamp);
             entity.HasIndex(e => e.Endpoint);
-            entity.HasIndex(e => e.SessionToken);
             entity.Property(e => e.Details).HasMaxLength(AuditLog.DetailsMaxLength);
         });
 
@@ -186,9 +188,50 @@ public class ApplicationDbContext : DbContext
 
         builder.Entity<InviteCode>(entity =>
         {
-            entity.Property(e => e.Code).HasMaxLength(128).IsRequired();
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CodeHash).HasMaxLength(64).IsRequired();
+            entity.HasIndex(e => e.CodeHash).IsUnique();
+            entity.Property(e => e.Prefix).HasMaxLength(3).IsRequired();
             entity.Property(e => e.Group).HasMaxLength(32).IsRequired();
+            entity.Property(e => e.Status).HasMaxLength(16).IsRequired().HasConversion<string>();
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.ExpiresAt);
             entity.Property(e => e.UsedBy).HasColumnType("jsonb");
+        });
+
+        builder.Entity<RegistrationSessionBinding>(entity =>
+        {
+            entity.HasKey(e => e.SessionTokenHash);
+            entity.Property(e => e.SessionTokenHash).HasMaxLength(64);
+            entity.HasIndex(e => e.UserUid);
+            entity.HasOne<User>()
+                  .WithMany()
+                  .HasForeignKey(e => e.UserUid)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<UserMfaSettings>(entity =>
+        {
+            entity.HasKey(e => e.UserUid);
+            entity.Property(e => e.EncryptedTotpSecret).HasMaxLength(1024);
+            entity.HasOne<User>()
+                  .WithOne()
+                  .HasForeignKey<UserMfaSettings>(e => e.UserUid)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<WebAuthnCredential>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CredentialId).IsRequired();
+            entity.Property(e => e.PublicKey).IsRequired();
+            entity.Property(e => e.Transports).HasMaxLength(256);
+            entity.HasIndex(e => e.CredentialId).IsUnique();
+            entity.HasIndex(e => e.UserUid);
+            entity.HasOne<User>()
+                  .WithMany()
+                  .HasForeignKey(e => e.UserUid)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<ConsentAuditEvent>(entity =>

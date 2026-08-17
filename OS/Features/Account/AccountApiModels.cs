@@ -7,6 +7,7 @@ public class EmailVerificationEntry
 {
     public string Hash { get; set; } = string.Empty;
     public string? Email { get; set; }
+    public Guid? UserUid { get; set; }
     public int Attempts { get; set; }
     public DateTimeOffset Expires { get; set; }
 }
@@ -20,13 +21,12 @@ public class ChangePasswordRequest
     public string CurrentPassword { get; set; } = string.Empty;
 
     [Required]
-    [StringLength(100, MinimumLength = 6)]
+    [StringLength(128, MinimumLength = 12)]
     public string NewPassword { get; set; } = string.Empty;
 }
 
 public class PasswordResponse : ApiResponse
 {
-    public int? AttemptsRemaining { get; set; }
 }
 
 public class BindEmailRequest
@@ -55,7 +55,6 @@ public class EmailCodeResponse : ApiResponse
     public bool Sent { get; set; }
     public string? VerifiedEmail { get; set; }
     public string? PendingEmail { get; set; }
-    public int? AttemptsRemaining { get; set; }
 }
 
 public class AccountRedeemRequest

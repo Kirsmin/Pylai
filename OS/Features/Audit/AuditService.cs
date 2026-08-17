@@ -82,7 +82,7 @@ public class AuditService : IAuditService, IHostedService
                 var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
                 foreach (var entry in batch)
                 {
-
+                    entry.Details = SensitiveDataRedactor.Redact(entry.Details);
                     if (entry.Details is { Length: > AuditLog.DetailsMaxLength })
                         entry.Details = entry.Details[..AuditLog.DetailsMaxLength];
                     if (entry.UserAgent is { Length: > AuditLog.UserAgentMaxLength })
@@ -128,6 +128,7 @@ public class AuditService : IAuditService, IHostedService
             await using var writer = new StreamWriter(file, append: true);
             foreach (var entry in batch)
             {
+                entry.Details = SensitiveDataRedactor.Redact(entry.Details);
                 await writer.WriteLineAsync(JsonSerializer.Serialize(entry, JsonOpts));
             }
             await writer.FlushAsync(cancellationToken);

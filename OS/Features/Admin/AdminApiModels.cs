@@ -5,7 +5,7 @@ namespace Pylaios.Features.Admin;
 public class AdminResetPasswordRequest
 {
     [Required]
-    [StringLength(100, MinimumLength = 6)]
+    [StringLength(128, MinimumLength = 12)]
     public string NewPassword { get; set; } = string.Empty;
 }
 
@@ -106,24 +106,27 @@ public class AdminUserSessionsResponse : ApiResponse
 public class AdminInviteCodeCreateRequest
 {
     [Required]
-    public string Code { get; set; } = string.Empty;
-    [Required]
     public string Group { get; set; } = string.Empty;
     public int? MaxRedemptions { get; set; }
+    public int? LifetimeHours { get; set; }
 }
 
 public class AdminInviteCodeUpdateRequest
 {
-    public string? Group { get; set; }
     public int? MaxRedemptions { get; set; }
+    public DateTimeOffset? ExpiresAt { get; set; }
+    public bool? Revoked { get; set; }
 }
 
 public class AdminInviteCodeListItem
 {
-    public string Code { get; set; } = string.Empty;
+    public Guid Id { get; set; }
+    public string Prefix { get; set; } = string.Empty;
     public string Group { get; set; } = string.Empty;
     public int MaxRedemptions { get; set; }
     public int UsedCount { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public DateTimeOffset ExpiresAt { get; set; }
 }
 
 public class AdminInviteCodeListResponse : ApiResponse
@@ -147,6 +150,23 @@ public class AdminInviteCodeRedemption
 public class AdminInviteCodeDetailResponse : ApiResponse
 {
     public AdminInviteCodeDetail? Code { get; set; }
+}
+
+public class AdminInviteCodeCreateResponse : ApiResponse
+{
+    public Guid Id { get; set; }
+    public string? Code { get; set; }
+    public string Prefix { get; set; } = string.Empty;
+    public string Group { get; set; } = string.Empty;
+    public int MaxRedemptions { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public string SaveWarning { get; set; } = "请立即保存，此后无法再次查看完整邀请码。";
+}
+
+public class AdminInviteCodeRevokeRequest
+{
+    [Required]
+    public List<Guid> Ids { get; set; } = [];
 }
 
 public class AdminBanInfo

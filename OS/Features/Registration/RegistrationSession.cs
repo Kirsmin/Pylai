@@ -3,7 +3,7 @@ namespace Pylaios.Features.Registration;
 public class RegistrationSession
 {
     public int Step { get; set; } = 1;
-    public string? InviteCode { get; set; }
+    public string? InviteCodePrefix { get; set; }
     public string? InviteCodeType { get; set; }
     public string? NormalizedName { get; set; }
     public string? DisplayName { get; set; }

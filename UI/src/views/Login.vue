@@ -6,6 +6,7 @@ import { Account } from '@vicons/carbon'
 import { apiFetch, useAuthStore } from '@/stores/auth'
 import { api, ApiError } from '@/utils/api'
 import { SUPPORT_EMAIL, type ScopeInfo } from '@/types/api'
+import { getAssertion, createCredential } from '@/utils/webauthn'
 import Dock from '@/components/Dock.vue'
 
 interface AuthorizedApp {
@@ -93,6 +94,14 @@ const rememberMe = ref(true)
 const lockedOut = ref(false)
 const loginBanId = ref('')
 const loginErrorState = ref<'none' | 'locked_out' | 'ip_banned' | 'server_error' | 'network_error'>('none')
+const mfaTransactionId = ref('')
+const mfaMethods = ref<string[]>([])
+const mfaCode = ref('')
+const mfaEnrollmentId = ref('')
+const mfaSecret = ref('')
+const mfaOtpauthUri = ref('')
+const mfaError = ref('')
+const mfaSetup = ref(false)
 
 const showAppsPanel = ref(false)
 const showThirdPartyPanel = ref(false)
@@ -222,20 +231,7 @@ async function handleLogin() {
     })
 
     if (data.success) {
-
-      authStore.login({
-        uid: data.uid as string,
-        name: data.name as string,
-        displayName: data.displayName as string,
-        group: data.group as string,
-        email: data.email as string
-      }, rememberMe.value)
-      lockedOut.value = false
-      if (returnUrl.value) {
-        window.location.href = returnUrl.value
-      } else {
-        router.push('/')
-      }
+      finishLogin(data)
     } else {
       loginError.value = data.error || '登录失败，请重试'
     }
@@ -256,12 +252,118 @@ async function handleLogin() {
       loginErrorState.value = 'ip_banned'
       loginBanId.value = (e.data?.banId as string) || ''
       loginError.value = e.message || ''
+    } else if (e instanceof ApiError && (e.errorCode === 'mfa_required' || e.errorCode === 'mfa_setup_required')) {
+      mfaTransactionId.value = String(e.data?.mfaTransactionId || '')
+      mfaMethods.value = (e.data?.mfaMethods as string[]) || []
+      mfaSetup.value = e.errorCode === 'mfa_setup_required'
+      mfaError.value = ''
+      if (mfaSetup.value && mfaMethods.value.includes('totp')) await beginTotpEnrollment()
     } else if (e instanceof ApiError) {
       loginError.value = e.message || '登录失败，请重试'
     } else {
       loginErrorState.value = 'network_error'
       loginError.value = '网络错误，请重试'
     }
+  } finally {
+    loading.value = false
+  }
+}
+
+function finishLogin(data: any) {
+  authStore.login({
+    uid: data.uid as string,
+    name: data.name as string,
+    displayName: data.displayName as string,
+    group: data.group as string,
+    email: data.email as string
+  }, rememberMe.value)
+  lockedOut.value = false
+  if (returnUrl.value) window.location.href = returnUrl.value
+  else router.push('/')
+}
+
+async function beginTotpEnrollment() {
+  try {
+    const data = await api('/api/auth/mfa/totp/enroll', {
+      method: 'POST',
+      body: JSON.stringify({ transactionId: mfaTransactionId.value })
+    })
+    mfaEnrollmentId.value = String(data.enrollmentId)
+    mfaSecret.value = String(data.secret)
+    mfaOtpauthUri.value = String(data.otpauthUri)
+  } catch (e) {
+    mfaError.value = e instanceof Error ? e.message : '无法开始 MFA 设置'
+  }
+}
+
+async function verifyMfa() {
+  if (!mfaCode.value || !mfaTransactionId.value) return
+  mfaError.value = ''
+  loading.value = true
+  try {
+    const data = await api('/api/auth/mfa/verify', {
+      method: 'POST',
+      body: JSON.stringify({ transactionId: mfaTransactionId.value, code: mfaCode.value })
+    })
+    finishLogin(data)
+  } catch (e) {
+    mfaError.value = e instanceof ApiError ? e.message : 'MFA 验证失败，请重试'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function confirmTotpSetup() {
+  if (!mfaEnrollmentId.value || !mfaCode.value) return
+  mfaError.value = ''
+  loading.value = true
+  try {
+    const data = await api('/api/auth/mfa/totp/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ enrollmentId: mfaEnrollmentId.value, code: mfaCode.value })
+    })
+    finishLogin(data)
+  } catch (e) {
+    mfaError.value = e instanceof ApiError ? e.message : 'MFA 设置失败，请重试'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function verifyWebAuthn() {
+  mfaError.value = ''
+  loading.value = true
+  try {
+    const options = await api(`/api/auth/mfa/webauthn/assertion-options?transactionId=${encodeURIComponent(mfaTransactionId.value)}`)
+    const response = await getAssertion(options)
+    const data = await api('/api/auth/mfa/webauthn/verify', {
+      method: 'POST',
+      body: JSON.stringify({ transactionId: mfaTransactionId.value, response })
+    })
+    finishLogin(data)
+  } catch (e) {
+    mfaError.value = e instanceof Error ? e.message : 'Passkey 验证失败，请重试'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function setupWebAuthn() {
+  mfaError.value = ''
+  loading.value = true
+  try {
+    const data = await api('/api/auth/mfa/webauthn/registration-options', {
+      method: 'POST',
+      body: JSON.stringify({ transactionId: mfaTransactionId.value })
+    })
+    const response = await createCredential(data.options)
+    await api('/api/auth/mfa/webauthn/registration', {
+      method: 'POST',
+      body: JSON.stringify({ transactionId: mfaTransactionId.value, registrationId: data.registrationId, response })
+    })
+    await verifyWebAuthn()
+  } catch (e) {
+    mfaError.value = e instanceof Error ? e.message : 'Passkey 设置失败，请重试'
   } finally {
     loading.value = false
   }
@@ -278,6 +380,33 @@ async function handleLogin() {
           <p class="login-subtitle">登录</p>
 
           <p v-if="loginError && loginErrorState === 'network_error'" class="error-msg">{{ loginError }}</p>
+
+          <template v-if="mfaTransactionId">
+            <NAlert type="warning" :show-icon="true" :bordered="false" style="width: 100%; max-width: 420px; text-align: left;">
+              <template #header>{{ mfaSetup ? '高权限账户需要设置 MFA' : '需要完成 MFA 验证' }}</template>
+              <p v-if="mfaSetup" style="margin: 4px 0;">请完成第二因素设置后继续登录。</p>
+              <p v-else style="margin: 4px 0;">密码验证已完成，请继续验证第二因素。</p>
+            </NAlert>
+            <template v-if="mfaSetup">
+              <div v-if="mfaSecret" class="mfa-box">
+                <p>使用认证器添加此密钥：</p>
+                <code>{{ mfaSecret }}</code>
+                <small>{{ mfaOtpauthUri }}</small>
+                <NInput v-model:value="mfaCode" maxlength="6" placeholder="认证器验证码" />
+                <NButton type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="confirmTotpSetup">确认 TOTP</NButton>
+              </div>
+              <NButton v-if="mfaMethods.includes('webauthn')" type="success" dashed :loading="loading" @click="setupWebAuthn">设置 Passkey</NButton>
+            </template>
+            <template v-else>
+              <NInput v-if="mfaMethods.includes('totp')" v-model:value="mfaCode" maxlength="6" placeholder="认证器验证码" />
+              <NButton v-if="mfaMethods.includes('totp')" type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="verifyMfa">验证 TOTP</NButton>
+              <NButton v-if="mfaMethods.includes('webauthn')" type="success" dashed :loading="loading" @click="verifyWebAuthn">使用 Passkey</NButton>
+            </template>
+            <p v-if="mfaError" class="error-msg">{{ mfaError }}</p>
+            <NButton quaternary :disabled="loading" @click="mfaTransactionId = ''; mfaCode = ''; mfaError = ''">返回登录</NButton>
+          </template>
+
+          <template v-else>
 
           <NAlert
             v-if="loginError && loginErrorState === 'none'"
@@ -421,6 +550,7 @@ async function handleLogin() {
                 <p style="margin: 4px 0;">请将此页面错误信息发送至 {{ SUPPORT_EMAIL || '站点管理员' }} 以获得支持。</p>
               </template>
             </NAlert>
+          </template>
           </template>
         </template>
 
@@ -575,6 +705,27 @@ async function handleLogin() {
 
 
 <style scoped>
+.mfa-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 420px;
+  padding: 14px;
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  text-align: left;
+}
+
+.mfa-box code {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.mfa-box small {
+  overflow-wrap: anywhere;
+  color: var(--text-tertiary);
+}
 
 
 

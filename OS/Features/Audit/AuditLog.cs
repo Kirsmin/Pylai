@@ -21,8 +21,6 @@ public class AuditLog
 
     public string? IpAddress { get; set; }
 
-    public string? SessionToken { get; set; }
-
     public string? UserAgent { get; set; }
 
     public bool Success { get; set; }

@@ -68,6 +68,13 @@ public class AuthorizationController : Controller
         var request = HttpContext.GetOpenIddictServerRequest()
             ?? throw new InvalidOperationException("The OpenID Connect request cannot be retrieved.");
 
+        if (request.ResponseType == OpenIddictConstants.ResponseTypes.Code
+            && (string.IsNullOrWhiteSpace(request.CodeChallenge)
+                || !string.Equals(request.CodeChallengeMethod, "S256", StringComparison.Ordinal)))
+        {
+            return BuildErrorResponse(Errors.InvalidRequest, "Authorization code requests must use PKCE S256.");
+        }
+
         var consentApproved = (string?)request["consent_approved"];
         var pendingConsent = !string.IsNullOrEmpty(consentApproved)
             ? await _stateCache.GetAsync<PendingAuthorizeRequest>(ConsentState.Key(consentApproved))

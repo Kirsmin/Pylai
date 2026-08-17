@@ -92,9 +92,9 @@ public class AdminCapabilitiesController : ControllerBase
         [
             Endpoint("GET", "/api/admin/invite-codes"),
             Endpoint("POST", "/api/admin/invite-codes"),
-            Endpoint("GET", "/api/admin/invite-codes/{code}"),
-            Endpoint("PATCH", "/api/admin/invite-codes/{code}"),
-            Endpoint("DELETE", "/api/admin/invite-codes/{code}")
+            Endpoint("GET", "/api/admin/invite-codes/{id}"),
+            Endpoint("PATCH", "/api/admin/invite-codes/{id}"),
+            Endpoint("POST", "/api/admin/invite-codes/revoke")
         ]
     };
 

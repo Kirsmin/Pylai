@@ -72,7 +72,7 @@ public sealed class DbCommands
     }
 
 
-    [Command("seed", Description = "显式插入种子数据（初始账号/邀请码，幂等）")]
+    [Command("seed", Description = "显式插入种子数据（仅初始账号，幂等）")]
     public async Task<int> SeedAsync()
     {
         try

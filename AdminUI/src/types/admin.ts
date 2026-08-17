@@ -101,11 +101,24 @@ export interface AdminUserSessionsResponse extends ApiEnvelope {
 }
 
 export interface AdminInviteCode {
-  code: string
+  id: string
+  prefix: string
   group: string
   maxRedemptions: number
   usedCount: number
+  status: string
+  expiresAt: string
   usedBy?: Array<{ uid: string; name: string; displayName: string | null }>
+}
+
+export interface AdminInviteCodeCreateResponse extends ApiEnvelope {
+  id: string
+  code: string
+  prefix: string
+  group: string
+  maxRedemptions: number
+  expiresAt: string
+  saveWarning: string
 }
 
 export interface AdminInviteCodeListResponse extends ApiEnvelope {

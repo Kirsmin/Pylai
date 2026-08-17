@@ -20,5 +20,11 @@ public class SigningKey
 
     public bool IsRevoked { get; set; }
 
-    public byte[] CertificateData { get; set; } = [];
+    public byte[] PublicCertificateData { get; set; } = [];
+
+    public byte[]? EncryptedCertificateData { get; set; }
+
+    public byte[]? EncryptionNonce { get; set; }
+
+    public byte[]? EncryptionTag { get; set; }
 }

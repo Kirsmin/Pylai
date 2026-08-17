@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { Component } from 'vue'
-import { Apps, FileSearch, Logout, MoonStars, ShieldCheck, Sun, Ticket, Users } from '@vicons/tabler'
+import { Apps, FileSearch, Logout, MoonStars, ShieldCheck, ShieldLock, Sun, Ticket, Users } from '@vicons/tabler'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
+import MfaSettingsModal from '@/components/MfaSettingsModal.vue'
+import MfaStepUpModal from '@/components/MfaStepUpModal.vue'
 
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const route = useRoute()
 const router = useRouter()
+const mfaSettingsRef = ref<InstanceType<typeof MfaSettingsModal> | null>(null)
 
 const icons: Record<string, Component> = {
   users: Users,
@@ -55,6 +58,9 @@ function groupTone(group: string): 'success' | 'info' | 'purple' | 'neutral' {
       <button class="dock-icon" type="button" title="切换主题" @click="themeStore.toggle()">
         <NIcon :class="['theme-icon', themeIconClass]" :component="themeIcon" />
       </button>
+      <button class="dock-icon" type="button" title="账户安全与 MFA" @click="mfaSettingsRef?.open()">
+        <NIcon :component="ShieldLock" />
+      </button>
       <button class="dock-icon" type="button" title="退出登录" @click="authStore.logout()">
         <NIcon :component="Logout" />
       </button>
@@ -84,6 +90,9 @@ function groupTone(group: string): 'success' | 'info' | 'purple' | 'neutral' {
         <slot />
       </main>
     </div>
+
+    <MfaSettingsModal ref="mfaSettingsRef" />
+    <MfaStepUpModal />
   </div>
 </template>
 

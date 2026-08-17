@@ -1,6 +1,8 @@
 using System.Net;
+using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authorization.Policy;
+using Microsoft.AspNetCore.HostFiltering;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Console;
@@ -8,6 +10,7 @@ using OpenIddict.EntityFrameworkCore;
 using OpenIddict.Quartz;
 using OpenIddict.Server;
 using StackExchange.Redis;
+using Fido2NetLib;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
 namespace Pylaios.Shared;
@@ -87,6 +90,9 @@ public static class AppServices
         services.AddOpenIddict()
             .AddServer(options =>
             {
+                if (!string.IsNullOrWhiteSpace(config.OpenIddict.Issuer))
+                    options.SetIssuer(config.OpenIddict.Issuer);
+
                 options.SetAuthorizationEndpointUris(config.OpenIddict.Endpoints.Authorize)
                        .SetTokenEndpointUris(config.OpenIddict.Endpoints.Token)
                        .SetIntrospectionEndpointUris(config.OpenIddict.Endpoints.Introspect)
@@ -94,7 +100,8 @@ public static class AppServices
                        .SetEndSessionEndpointUris(config.OpenIddict.Endpoints.EndSession);
 
                 if (config.OpenIddict.Grants.AuthorizationCode)
-                    options.AllowAuthorizationCodeFlow();
+                    options.AllowAuthorizationCodeFlow()
+                           .RequireProofKeyForCodeExchange();
                 if (config.OpenIddict.Grants.RefreshToken)
                     options.AllowRefreshTokenFlow();
                 if (config.OpenIddict.Grants.ClientCredentials)
@@ -161,6 +168,14 @@ public static class AppServices
             .AddUserStore<UserStore>()
             .AddSignInManager()
             .AddDefaultTokenProviders();
+
+        services.AddHttpClient("hibp", client =>
+        {
+            client.BaseAddress = new Uri("https://api.pwnedpasswords.com/range/");
+            client.Timeout = TimeSpan.FromSeconds(3);
+            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Pylaios", "1.0"));
+        });
+        services.AddScoped<IPasswordValidator<User>, PasswordSecurityValidator>();
 
         services.AddScoped<IUserClaimsPrincipalFactory<User>, PylaiosClaimsPrincipalFactory>();
 
@@ -260,6 +275,13 @@ public static class AppServices
 
         services.AddScoped<ILoginRateLimitService, LoginRateLimitService>();
         services.AddScoped<IEmailVerificationCodeService, EmailVerificationCodeService>();
+        services.AddFido2(options =>
+        {
+            options.RPID = config.Mfa.RelyingPartyId;
+            options.RPName = config.Mfa.RelyingPartyName;
+            options.Origins = new HashSet<string>(config.Mfa.Origins, StringComparer.OrdinalIgnoreCase);
+        });
+        services.AddScoped<IMfaService, MfaService>();
         services.AddScoped<CliCommandContext>();
         services.AddScoped<IAuthorizationMiddlewareResultHandler, AdminAuthorizationMiddlewareResultHandler>();
         return services;
@@ -365,6 +387,14 @@ public static class AppServices
 
     public static IServiceCollection AddApiFeature(this IServiceCollection services, MainConfig config)
     {
+        services.Configure<HostFilteringOptions>(options =>
+        {
+            options.AllowedHosts = config.Server.AllowedHosts.Length > 0
+                ? config.Server.AllowedHosts
+                : ["*"];
+            options.AllowEmptyHosts = false;
+        });
+
         if (config.Cors.Enabled)
         {
             services.AddCors(options =>
@@ -373,8 +403,9 @@ public static class AppServices
                 {
                     policy.WithOrigins(config.Cors.AllowedOrigins)
                           .WithMethods(config.Cors.AllowedMethods)
-                          .WithHeaders(config.Cors.AllowedHeaders)
-                          .AllowCredentials();
+                          .WithHeaders(config.Cors.AllowedHeaders);
+                    if (config.Cors.AllowCredentials)
+                        policy.AllowCredentials();
                 });
             });
         }
@@ -387,9 +418,15 @@ public static class AppServices
                 return;
             }
 
-            options.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
-                                      | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
-                                      | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost;
+            var trustedHeaders = config.IpResolution.TrustedHeaders;
+            var forwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.None;
+            if (trustedHeaders.Contains("X-Forwarded-For", StringComparer.OrdinalIgnoreCase))
+                forwardedHeaders |= Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor;
+            if (trustedHeaders.Contains("X-Forwarded-Proto", StringComparer.OrdinalIgnoreCase))
+                forwardedHeaders |= Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
+            if (trustedHeaders.Contains("X-Forwarded-Host", StringComparer.OrdinalIgnoreCase))
+                forwardedHeaders |= Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost;
+            options.ForwardedHeaders = forwardedHeaders;
 
             foreach (var proxy in config.IpResolution.TrustedProxies)
             {
@@ -438,14 +475,10 @@ public static class AppServices
         if (!env.IsDevelopment())
         {
             var encryption = config.OpenIddict.Certificates.Encryption;
-            if (!string.IsNullOrEmpty(encryption.Path))
-            {
-                options.AddEncryptionCertificate(CertificateLoader.LoadPkcs12(encryption.Path, encryption.Password));
-            }
-            else
-            {
-                options.AddEphemeralEncryptionKey();
-            }
+            if (string.IsNullOrWhiteSpace(encryption.Path))
+                throw new InvalidOperationException("生产环境必须配置持久化 OpenIddict 加密证书，禁止使用临时加密密钥。");
+
+            options.AddEncryptionCertificate(CertificateLoader.LoadPkcs12(encryption.Path, encryption.Password));
         }
         else
         {

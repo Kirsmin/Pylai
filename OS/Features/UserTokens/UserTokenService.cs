@@ -226,6 +226,8 @@ public class UserTokenService : IUserTokenService
         var days = lifetimeDays ?? _config.UserToken.DefaultLifetimeDays;
         if (days <= 0)
             return null;
+        if (days > 90)
+            throw new ArgumentOutOfRangeException(nameof(lifetimeDays), "UserToken 有效期不能超过 90 天。");
 
         return DateTimeOffset.UtcNow.AddDays(days);
     }

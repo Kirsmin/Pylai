@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using System.Net;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -410,7 +411,7 @@ public class ClientService : IClientService
     private static Uri ParseUri(string value)
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            || (uri.Scheme != "http" && uri.Scheme != "https")
+            || (uri.Scheme != "https" && !IsLoopbackUri(uri))
             || string.IsNullOrEmpty(uri.Host))
         {
             throw new InvalidOperationException($"非法 URI: {value}");
@@ -418,6 +419,11 @@ public class ClientService : IClientService
 
         return uri;
     }
+
+    private static bool IsLoopbackUri(Uri uri)
+        => uri.Scheme == "http"
+            && (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                || IPAddress.TryParse(uri.Host, out var ip) && IPAddress.IsLoopback(ip));
 
     private async Task<ClientResponse> MapAsync(object app, OAuthClientMetadata? meta, CancellationToken ct)
     {

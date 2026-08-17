@@ -12,6 +12,7 @@ public interface IRedisStateCache
     ValueTask<T?> GetAsync<T>(string key);
     ValueTask SetAsync<T>(string key, T value, TimeSpan ttl);
     ValueTask RemoveAsync(string key);
+    RedisKey CreateKey(string key);
 }
 
 public class RedisStateCache : IRedisStateCache
@@ -28,6 +29,8 @@ public class RedisStateCache : IRedisStateCache
     }
 
     private static RedisKey StateKey(string key) => new($"pylaios:state:{key}");
+
+    public RedisKey CreateKey(string key) => StateKey(key);
 
     public async ValueTask<T?> GetAsync<T>(string key)
     {

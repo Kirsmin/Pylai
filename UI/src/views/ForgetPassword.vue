@@ -18,6 +18,7 @@ const loading = ref(false)
 const done = computed(() => state.value === 'completed')
 
 const email = ref('')
+const transactionId = ref('')
 const emailError = ref('')
 const emailRef = ref<InstanceType<typeof NInput> | null>(null)
 
@@ -60,11 +61,12 @@ async function handleEmailSubmit() {
   }
   loading.value = true
   try {
-    // 防枚举：无论邮箱是否注册都返回 success，前端一律进入验证码步骤
-    await api('/api/auth/forgot-password', {
+    // 防枚举：无论邮箱是否注册都返回同形 transactionId。
+    const data = await api('/api/auth/forgot-password', {
       method: 'POST',
       body: JSON.stringify({ email: email.value })
     })
+    transactionId.value = data.transactionId as string
     state.value = 'verifyCode'
     verificationCode.value = []
     otpStatus.value = undefined
@@ -84,6 +86,7 @@ async function handleEmailSubmit() {
 
 function handleResend() {
   state.value = 'email'
+  transactionId.value = ''
   emailError.value = ''
   verificationCode.value = []
   otpStatus.value = undefined
@@ -106,25 +109,11 @@ function goPassword() {
 
 function handleResetError(e: ApiError) {
   switch (e.errorCode) {
-    case 'expired':
+    case 'invalid_or_expired':
       state.value = 'verifyCode'
       otpStatus.value = 'warning'
-      emailError.value = e.data?.error || '重置验证码已过期或无效。'
+      emailError.value = e.data?.error || '重置事务无效或已过期。'
       verificationCode.value = []
-      break
-    case 'wrong_code':
-      state.value = 'verifyCode'
-      otpStatus.value = 'warning'
-      emailError.value = e.data?.error || '重置验证码错误。'
-      verificationCode.value = []
-      break
-    case 'max_attempts':
-      // 尝试次数耗尽，验证码已被删除 → 回到邮箱步骤重新发起
-      state.value = 'email'
-      emailError.value = e.data?.error || '尝试次数过多，请重新发起重置。'
-      verificationCode.value = []
-      otpStatus.value = undefined
-      otpDisabled.value = false
       break
     case 'invalid_password':
       passwordSubmitError.value = e.data?.error || '新密码不符合密码策略。'
@@ -148,10 +137,10 @@ async function handlePasswordSubmit() {
   passwordSubmitError.value = ''
   try {
     const data = await api('/api/auth/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: email.value,
-        code: verificationCode.value.join(''),
+        method: 'POST',
+        body: JSON.stringify({
+          transactionId: transactionId.value,
+          code: verificationCode.value.join(''),
         newPassword: password.value
       })
     })

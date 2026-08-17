@@ -8,6 +8,8 @@
 [Server]
 Url = "http://localhost:5000"
 MaxRequestBodyMB = 2
+# 允许访问的 Host 白名单；生产环境必须列出明确域名/IP，禁止 "*"
+AllowedHosts = ["localhost", "127.0.0.1"]
 
 # CORS 跨域资源共享
 [Cors]
@@ -23,13 +25,13 @@ Url = "http://localhost:5173"
 
 # IP 解析 — 可信代理与白名单
 [IpResolution]
-TrustedProxies = []
-TrustedHeaders = ["X-Forwarded-For"]
+TrustedProxies = ["127.0.0.1", "::1"]
+TrustedHeaders = ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"]
 IpWhitelist = []
 # Forwarded Headers — 启用后由 UseForwardedHeaders 处理 X-Forwarded-For / X-Forwarded-Proto，
 # 反代（Nginx 等）后 Scheme/RemoteIpAddress 自动修正（TLS 终止由 Nginx 完成，后端不处理 HTTPS）。
 # TrustedProxies / TrustedNetworks(CIDR) 指明哪些来源的转发头可信，务必只填代理服务器地址。
-ForwardedHeadersEnabled = false
+ForwardedHeadersEnabled = true
 TrustedNetworks = []
 
 # 数据库连接（仅支持 PostgreSQL；密码直接存本文件，请勿提交仓库）
@@ -50,7 +52,9 @@ Directory = "backups"
 
 # ASP.NET Core Identity 密码策略
 [Identity.Password]
-RequiredLength = 8
+RequiredLength = 12
+AdminRequiredLength = 14
+CheckBreachedPasswords = true
 RequireDigit = true
 RequireLowercase = false
 RequireUppercase = false
@@ -71,9 +75,18 @@ SecurePolicy = "Always"
 ExpireDays = 14
 SlidingExpiration = true
 
+[DataProtection]
+# 生产环境必须使用持久化目录，不能依赖临时密钥环
+KeyDirectory = "/var/lib/pylai/dataprotection"
+
+[Deployment]
+BundledNginx = true
+
 # OpenIddict OAuth2 + OpenID Connect
 # 传输安全要求：生产默认强制 HTTPS；纯内网 HTTP 部署可设 RequireHttps = false
 [OpenIddict]
+# 固定 Issuer（与外部访问地址一致）；生产环境必须配置
+Issuer = "http://localhost:5000"
 RequireHttps = true
 
 [OpenIddict.AccessToken]
@@ -113,6 +126,10 @@ Password = ""
 [OpenIddict.Certificates.Encryption]
 Path = ""
 Password = ""
+
+[OpenIddict.SigningKeyEncryption]
+# 只保存 AES-GCM KEK 文件路径；KEK 不得存入数据库或配置仓库
+KeyFile = ""
 
 # 外部登录（AppId/ClientSecret 留空即禁用）
 [ExternalLogin.Facebook]
@@ -164,19 +181,16 @@ FirstBanDurationSeconds = 30
 MaxFailuresSecondBan = 20
 SecondBanDurationHours = 24
 
-# 邀请码（提权）— 本地核销，邀请码从下方 Gift 配置种子入库
+# 邀请码（提权）— 由管理 API/CLI 生成，db seed 绝不创建邀请码
 [InviteCode]
+ServerPepper = ""
 MaxFailuresPerIp = 20
 BanDurationHours = 48
 EmailCodeBanDurationHours = 24
 UsernameCheckMaxPerHourPerIp = 100
-# 每个邀请码的最大核销次数
+# 普通邀请码的默认最大核销次数
 MaxRedemptions = 10
-# 邀请码列表（db seed 时种子到 InviteCodes 表，已有码不会被覆盖）
-[InviteCode.Gift]
-Normal = ["NORMAL-001", "NORMAL-002", "NORMAL-003"]
-Admin = ["ADMIN-001", "ADMIN-002"]
-Max = ["MAX-001", "MAX-002", "MAX-003"]
+DefaultLifetimeHours = 168
 
 # 种子数据（db seed 执行；密码为空的种子用户不会被创建，避免空密码账户）
 [Seeds.DefaultAdmin]
@@ -197,9 +211,18 @@ DisplayName = "Max User"
 # UserToken — 用户个人 API Token
 [UserToken]
 # 默认有效期（天），0 表示永不过期
-DefaultLifetimeDays = 365
+DefaultLifetimeDays = 60
 
 # 特殊功能密码二次验证失败封禁（账号级，1 天）
 [ConfirmationRateLimit]
 MaxFailures = 10
 BanDurationHours = 24
+
+# 高权限账户 MFA
+[Mfa]
+RelyingPartyId = "localhost"
+RelyingPartyName = "Pylaios"
+Origins = ["http://localhost:5173"]
+ChallengeLifetimeMinutes = 5
+RequireForAdmin = true
+RequireWebAuthnForMax = true

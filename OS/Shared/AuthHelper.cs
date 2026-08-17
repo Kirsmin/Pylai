@@ -43,6 +43,12 @@ public static class AuthHelper
         return RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
     }
 
+    public static string GenerateOpaqueToken(int bytes = 32)
+        => Convert.ToBase64String(RandomNumberGenerator.GetBytes(bytes))
+            .Replace('+', '-')
+            .Replace('/', '_')
+            .TrimEnd('=');
+
     public static string HashCode(string code)
     {
         var bytes = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(code));

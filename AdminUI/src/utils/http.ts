@@ -1,7 +1,5 @@
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/+$/, '') ?? ''
 
-export const ADMIN_REDIRECT_URI = new URL(import.meta.env.BASE_URL, window.location.origin).href
-
 export function rawFetch(input: string, init?: RequestInit): Promise<Response> {
   return fetch(`${API_BASE}${input}`, {
     ...init,

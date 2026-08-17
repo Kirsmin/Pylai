@@ -1,9 +1,9 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.14.2
 
 ARG PYLAI_VERSION=0.0.1
 ARG PYLAI_DB_SCHEMA=dev
 
-FROM node:24 AS ui
+FROM node:24.19.0-bookworm-slim AS ui
 WORKDIR /ui
 RUN corepack enable
 COPY UI/package.json UI/pnpm-lock.yaml ./
@@ -11,7 +11,7 @@ RUN pnpm install --frozen-lockfile
 COPY UI/ ./
 RUN pnpm build
 
-FROM node:24 AS admin-ui
+FROM node:24.19.0-bookworm-slim AS admin-ui
 WORKDIR /adminui
 RUN corepack enable
 COPY AdminUI/package.json AdminUI/pnpm-lock.yaml ./
@@ -19,12 +19,12 @@ RUN pnpm install --frozen-lockfile
 COPY AdminUI/ ./
 RUN pnpm build
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS backend
+FROM mcr.microsoft.com/dotnet/sdk:10.0.11 AS backend
 WORKDIR /src
 COPY OS/ ./
 RUN dotnet publish Pylaios.csproj -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,11 +49,14 @@ LABEL org.opencontainers.image.version="${PYLAI_VERSION}" \
       pylai.role="server" \
       pylai.db-schema="${PYLAI_DB_SCHEMA}"
 
-RUN chmod +x /usr/local/bin/pylai-entrypoint /usr/local/bin/pylai-dev-entrypoint \
+RUN groupadd --system pylai \
+    && useradd --system --gid pylai --home-dir /var/lib/pylai --shell /usr/sbin/nologin pylai \
+    && chmod +x /usr/local/bin/pylai-entrypoint /usr/local/bin/pylai-dev-entrypoint \
     && ln -sf /etc/nginx/sites-available/pylai-dev /etc/nginx/sites-enabled/pylai \
     && rm -f /etc/nginx/sites-enabled/default \
-    && mkdir -p /etc/pylai /var/log/pylai /var/lib/pylai \
-    && chown -R postgres:postgres /var/lib/postgresql
+    && mkdir -p /etc/pylai /var/lib/pylai /var/lib/pylai/log \
+    && chown -R postgres:postgres /var/lib/postgresql \
+    && chown -R pylai:pylai /var/lib/pylai
 
 EXPOSE 80 5000
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \

@@ -16,6 +16,7 @@ public class LoginController : ControllerBase
     private readonly MainConfig _config;
     private readonly ApplicationDbContext _context;
     private readonly IAuditService _auditService;
+    private readonly IMfaService _mfa;
     private readonly ILogger<LoginController> _logger;
 
     public LoginController(
@@ -27,6 +28,7 @@ public class LoginController : ControllerBase
         MainConfig config,
         ApplicationDbContext context,
         IAuditService auditService,
+        IMfaService mfa,
         ILogger<LoginController> logger)
     {
         _passwordHasher = passwordHasher;
@@ -37,6 +39,7 @@ public class LoginController : ControllerBase
         _config = config;
         _context = context;
         _auditService = auditService;
+        _mfa = mfa;
         _logger = logger;
     }
 
@@ -54,7 +57,9 @@ public class LoginController : ControllerBase
             RequireDigit = pwd.RequireDigit,
             RequireLowercase = pwd.RequireLowercase,
             RequireUppercase = pwd.RequireUppercase,
-            RequireNonAlphanumeric = pwd.RequireNonAlphanumeric
+            RequireNonAlphanumeric = pwd.RequireNonAlphanumeric,
+            AdminMinLength = pwd.AdminRequiredLength,
+            CheckBreachedPasswords = pwd.CheckBreachedPasswords
         });
     }
 
@@ -88,6 +93,7 @@ public class LoginController : ControllerBase
         {
             _logger.LogWarning("用户不存在 | {UsernameOrEmail} | IP:{Ip}", request.UsernameOrEmail, ip);
             var fr1 = await _loginRateLimitService.RecordFailureAsync(ip);
+            await Task.Delay(Random.Shared.Next(250, 700));
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginFailure, null, request.UsernameOrEmail, false, "User not found");
             return Unauthorized(new LoginResponse { Success = false, Error = "用户名或密码错误。", ErrorCode = "invalid_credentials", BanId = fr1.BanId });
         }
@@ -98,6 +104,7 @@ public class LoginController : ControllerBase
         {
             _logger.LogWarning("账户状态异常 | uid:{Uid} | 状态:{Status}", user.Uid, user.Status);
             var fr2 = await _loginRateLimitService.RecordFailureAsync(ip);
+            await Task.Delay(Random.Shared.Next(250, 700));
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginFailure, user.Uid.ToString(), user.Email, false, $"Account {user.Status}");
             return Unauthorized(new LoginResponse { Success = false, Error = "用户名或密码错误。", ErrorCode = "invalid_credentials", BanId = fr2.BanId });
         }
@@ -146,22 +153,14 @@ public class LoginController : ControllerBase
         {
             _logger.LogDebug("密码验证失败 | uid:{Uid} | 尝试:{Attempts}", user.Uid, user.AccessFailedCount + 1);
 
-            user.AccessFailedCount++;
-            var lockedNow = user.AccessFailedCount >= _config.Identity.Lockout.MaxFailedAttempts;
-            if (lockedNow)
-            {
-                user.LockoutEnd = DateTimeOffset.UtcNow.AddMinutes(_config.Identity.Lockout.DefaultTimeoutMinutes);
-                await _context.SaveChangesAsync();
-                var fr3 = await _loginRateLimitService.RecordFailureAsync(ip);
-                _logger.LogWarning("账户已锁定 | uid:{Uid} | 解锁:{LockoutEnd}", user.Uid, user.LockoutEnd);
-                await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginLockedOut, user.Uid.ToString(), user.Email, false, "Account locked");
-                var remainingNow = user.LockoutEnd.Value - DateTimeOffset.UtcNow;
-                return Unauthorized(new LoginResponse { Success = false, Error = "用户名或密码错误。", ErrorCode = "locked_out", LockedOut = true, BanId = fr3.BanId, LockoutRemaining = remainingNow.ToString(@"hh\h\ mm\m\ ss\s") });
-            }
-
+            user.AccessFailedCount = Math.Min(user.AccessFailedCount + 1, 31);
+            user.LockoutEnd = null;
             await _context.SaveChangesAsync();
             var fr4 = await _loginRateLimitService.RecordFailureAsync(ip);
-            _logger.LogDebug("密码错误 | 尝试:{Attempts}/{MaxAttempts}", user.AccessFailedCount, _config.Identity.Lockout.MaxFailedAttempts);
+            var delayMs = Math.Min(2000, 100 * (1 << Math.Min(user.AccessFailedCount - 1, 4)))
+                + Random.Shared.Next(0, 100);
+            await Task.Delay(delayMs);
+            _logger.LogDebug("密码错误 | 递增延迟:{DelayMs}ms", delayMs);
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginFailure, user.Uid.ToString(), user.Email, false, "Invalid password");
             return Unauthorized(new LoginResponse { Success = false, Error = "用户名或密码错误。", ErrorCode = "invalid_credentials", BanId = fr4.BanId });
         }
@@ -180,6 +179,19 @@ public class LoginController : ControllerBase
 
 
         await _loginRateLimitService.ClearFailuresAsync(ip);
+
+        var mfaRequirement = await _mfa.BeginLoginAsync(user, request.RememberMe, ip);
+        if (mfaRequirement.Required)
+        {
+            return Unauthorized(new LoginResponse
+            {
+                Success = false,
+                Error = mfaRequirement.SetupRequired ? "高权限账户必须先完成 MFA 设置。" : "请输入 MFA 验证码。",
+                ErrorCode = mfaRequirement.SetupRequired ? "mfa_setup_required" : "mfa_required",
+                MfaTransactionId = mfaRequirement.TransactionId,
+                MfaMethods = mfaRequirement.Methods
+            });
+        }
 
         await _signInManager.SignInAsync(user, isPersistent: request.RememberMe);
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.Login, user.Uid.ToString(), user.Email, true);

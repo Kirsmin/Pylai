@@ -429,3 +429,14 @@ textarea.admin-input {
     min-width: 720px;
   }
 }
+
+.invite-status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.admin-table .small {
+  font-size: 12px;
+}
