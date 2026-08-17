@@ -79,24 +79,29 @@ if [ ! -f "$PG_DATA/PG_VERSION" ]; then
     su postgres -c "$PG_BIN/initdb -D $PG_DATA --auth-local=peer --auth-host=scram-sha-256 --username=postgres"
 fi
 
-if [ -f "$PG_DATA/pg_hba.conf" ]; then
-    if ! grep -q "^host all all 127.0.0.1/32" "$PG_DATA/pg_hba.conf"; then
-        echo "host all all 127.0.0.1/32 scram-sha-256" >> "$PG_DATA/pg_hba.conf"
-    fi
-    if ! grep -q "^host all all ::1/128" "$PG_DATA/pg_hba.conf"; then
-        echo "host all all ::1/128 scram-sha-256" >> "$PG_DATA/pg_hba.conf"
-    fi
-else
-    echo "host all all 127.0.0.1/32 scram-sha-256" > "$PG_DATA/pg_hba.conf"
-    echo "host all all ::1/128 scram-sha-256" >> "$PG_DATA/pg_hba.conf"
-    chown postgres:postgres "$PG_DATA/pg_hba.conf"
+PG_CONF="$PG_DATA/postgresql.conf"
+PG_HBA="$PG_DATA/pg_hba.conf"
+if [ ! -f "$PG_CONF" ] && [ -f "/etc/postgresql/$PG_VER/main/postgresql.conf" ]; then
+    PG_CONF="/etc/postgresql/$PG_VER/main/postgresql.conf"
+fi
+if [ ! -f "$PG_HBA" ] && [ -f "/etc/postgresql/$PG_VER/main/pg_hba.conf" ]; then
+    PG_HBA="/etc/postgresql/$PG_VER/main/pg_hba.conf"
 fi
 
-PG_START_OPTS="-h 127.0.0.1 -p 5432 -k /run/postgresql"
-if [ -f "$PG_DATA/postgresql.conf" ]; then
-    PG_START_OPTS="$PG_START_OPTS -c config_file=$PG_DATA/postgresql.conf"
+if [ -f "$PG_HBA" ]; then
+    if ! grep -q "^host all all 127.0.0.1/32" "$PG_HBA"; then
+        echo "host all all 127.0.0.1/32 scram-sha-256" >> "$PG_HBA"
+    fi
+    if ! grep -q "^host all all ::1/128" "$PG_HBA"; then
+        echo "host all all ::1/128 scram-sha-256" >> "$PG_HBA"
+    fi
+else
+    echo "host all all 127.0.0.1/32 scram-sha-256" > "$PG_HBA"
+    echo "host all all ::1/128 scram-sha-256" >> "$PG_HBA"
+    chown postgres:postgres "$PG_HBA"
 fi
-PG_START_OPTS="$PG_START_OPTS -c hba_file=$PG_DATA/pg_hba.conf"
+
+PG_START_OPTS="-h 127.0.0.1 -p 5432 -k /run/postgresql -c config_file=$PG_CONF -c hba_file=$PG_HBA"
 
 su postgres -c "$PG_BIN/pg_ctl -D $PG_DATA -l /run/postgresql/pg.log -o \"$PG_START_OPTS\" start"
 
