@@ -95,7 +95,7 @@ def build_image() -> None:
     print(f"==> 源码有变化，使用 buildx 重新编译镜像（linux/amd64）...")
     # docker.io 可能被网络策略阻断：buildx 客户端进程不带代理时拉取会失败，
     # 先经 dockerd（带 daemon 代理）预拉取，buildkit 将直接使用本地镜像。
-    for image in ("docker/dockerfile:1.14.2", "node:24.19.0-bookworm-slim"):
+    for image in ("docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32", "node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584"):
         run("docker", "pull", image)
     result = subprocess.run(
         ["docker", "buildx", "build",

@@ -1,9 +1,9 @@
-# syntax=docker/dockerfile:1.14.2
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
 ARG PYLAI_VERSION=0.0.1
 ARG PYLAI_DB_SCHEMA=dev
 
-FROM node:24.19.0-bookworm-slim AS ui
+FROM node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS ui
 WORKDIR /ui
 RUN corepack enable
 COPY UI/package.json UI/pnpm-lock.yaml ./
@@ -11,7 +11,7 @@ RUN pnpm install --frozen-lockfile
 COPY UI/ ./
 RUN pnpm build
 
-FROM node:24.19.0-bookworm-slim AS admin-ui
+FROM node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS admin-ui
 WORKDIR /adminui
 RUN corepack enable
 COPY AdminUI/package.json AdminUI/pnpm-lock.yaml ./
@@ -19,7 +19,7 @@ RUN pnpm install --frozen-lockfile
 COPY AdminUI/ ./
 RUN pnpm build
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0.11 AS backend
+FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS backend
 WORKDIR /src
 COPY OS/ ./
 RUN dotnet publish Pylaios.csproj -c Release -o /app
