@@ -6,7 +6,7 @@ ARG PYLAI_DB_SCHEMA=dev
 FROM node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS ui
 WORKDIR /ui
 RUN corepack enable
-COPY UI/package.json UI/pnpm-lock.yaml ./
+COPY UI/package.json UI/pnpm-lock.yaml UI/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY UI/ ./
 RUN pnpm build
