@@ -1,5 +1,5 @@
 <div align="center">
-# Pylai!
+<h1>Pylai!</h1>
 
 _✨简单单机 Docker 部署的 OAuth2（客户端/服务端）/OIDC 用户系统✨_
 </div>
