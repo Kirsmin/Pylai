@@ -63,10 +63,6 @@ certs/
 **/API.md
 **/AGENTS.md
 
-# 文档不入库
-**/README.md
-**/Usage.md
-
 # pnpm 本地 store（沙箱内安装用，不入库）
 **/.pnpm-store/
 
