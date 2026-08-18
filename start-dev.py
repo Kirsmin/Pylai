@@ -37,6 +37,7 @@ HASH_EXCLUDE_DIRS = {"bin", "obj", "node_modules", "dist", ".git", "__pycache__"
 HASH_PATHS = ("Dockerfile", ".dockerignore", "dev", "deploy", "OS", "UI", "AdminUI")
 
 _exiting = False
+_keep = False
 
 
 def run(*args: str, **kw) -> subprocess.CompletedProcess:
@@ -92,20 +93,29 @@ def image_hash() -> str | None:
 
 def build_image() -> None:
     current = code_hash()
-    print(f"==> 源码有变化，使用 buildx 重新编译镜像（linux/amd64）...")
-    # docker.io 可能被网络策略阻断：buildx 客户端进程不带代理时拉取会失败，
-    # 先经 dockerd（带 daemon 代理）预拉取，buildkit 将直接使用本地镜像。
-    for image in ("docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32", "node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584"):
-        run("docker", "pull", image)
+    print(f"==> 源码有变化，重新编译镜像（linux/amd64）...")
+    # 优先经典构建器（dockerd 直构，不经过 buildkit 客户端拉取 docker/dockerfile:1，
+    # 规避 docker.io 网络策略；amd64 主机产物即为 linux/amd64）。
+    # 失败时回退 buildx：先经 dockerd（带 daemon 代理）预拉取基础镜像，buildkit 直接用本地镜像。
     result = subprocess.run(
-        ["docker", "buildx", "build",
-         "--platform", "linux/amd64",
-         "-t", IMAGE,
-         "--load",
+        ["docker", "build", "-t", IMAGE,
          "--label", f"{HASH_LABEL}={current}",
          "."],
         cwd=ROOT,
     )
+    if result.returncode != 0:
+        print("==> 经典构建器失败，回退 buildx...")
+        for image in ("docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32", "node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584"):
+            run("docker", "pull", image)
+        result = subprocess.run(
+            ["docker", "buildx", "build",
+             "--platform", "linux/amd64",
+             "-t", IMAGE,
+             "--load",
+             "--label", f"{HASH_LABEL}={current}",
+             "."],
+            cwd=ROOT,
+        )
     if result.returncode != 0:
         sys.exit("镜像构建失败，请检查上方错误。")
     print("==> 镜像构建完成。")
@@ -170,7 +180,7 @@ def print_summary(ui_url: str) -> None:
     print(f"  Admin 邀请码 : {secrets.get('INVITE_ADMIN_CODE', '<未知>')}（仅此一次）")
     print(f"  Max 邀请码   : {secrets.get('INVITE_MAX_CODE', '<未知>')}（仅此一次）")
     print()
-    print("  实时日志持续显示中，按 Ctrl+C 优雅退出（停止并删除容器与数据卷）。")
+    print("  实时日志持续显示中，按 Ctrl+C 优雅退出（停止并删除容器与数据卷；--keep 时保留）。")
     print("=" * 72)
     print()
 
@@ -184,6 +194,11 @@ def cleanup() -> None:
     if _exiting:
         return
     _exiting = True
+    if _keep:
+        print()
+        print("==> --keep 模式：容器与数据卷已保留（便于 docker exec 复现/回归验证）。")
+        print(f"    手动清理：docker rm -f {CONTAINER} && docker volume rm {VOLUME_DATA} {VOLUME_PG}")
+        return
     print()
     print("==> 正在优雅退出：停止并删除容器与数据卷...")
     # 先优雅停止（-t 30 给 PG/后端收尾时间），再 rm -f 兜底删除：若容器未在宽限期内
@@ -207,7 +222,13 @@ def main() -> int:
         "--ui-url", metavar="URL", default=None,
         help="前端访问地址（覆盖自动探测的 LAN IP，如 http://192.168.1.10）",
     )
+    parser.add_argument(
+        "--keep", action="store_true",
+        help="退出时保留容器与数据卷（便于 docker exec 手动复现/回归验证），默认恢复初始状况",
+    )
     args = parser.parse_args()
+    global _keep
+    _keep = args.keep
 
     require_docker()
 
@@ -216,10 +237,10 @@ def main() -> int:
     # 构建检测：镜像不存在 / 无哈希 label / 哈希不一致 → 重建
     existing = image_hash()
     if existing is None:
-        print("!! 未找到上次编译的镜像，将使用 buildx 重新编译")
+        print("!! 未找到上次编译的镜像，将重新编译")
         build_image()
     elif existing != code_hash():
-        print("!! 源码与上次编译不一致，将使用 buildx 重新编译")
+        print("!! 源码与上次编译不一致，将重新编译")
         build_image()
     else:
         print("==> 源码无变化，直接使用上次编译的镜像")

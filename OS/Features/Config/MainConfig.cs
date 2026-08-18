@@ -55,6 +55,9 @@ public class DatabaseConfig
 [ConfigFile("pylai.toml")]
 public class IdentityConfig
 {
+    [ConfigRange(1, 60)]
+    [ConfigDescription("邮件验证码有效期（分钟），注册/密码重置/邮箱绑定统一使用")]
+    public int EmailCodeExpireMinutes { get; set; } = 10;
     public PasswordConfig Password { get; set; } = new();
     public LockoutConfig Lockout { get; set; } = new();
 }

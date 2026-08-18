@@ -32,10 +32,18 @@ public class AuditService : IAuditService, IHostedService
 
     public ValueTask LogAsync(AuditLog entry)
     {
-        if (_channel is not null)
-            return _channel.Writer.WriteAsync(entry);
+        if (_channel is null)
+            return new ValueTask(WriteBatchWithRetryAsync([entry], CancellationToken.None));
 
-        return new ValueTask(WriteBatchWithRetryAsync([entry], CancellationToken.None));
+        try
+        {
+            return _channel.Writer.WriteAsync(entry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "审计入队失败（通道已关闭），转文件 fallback | 事件:{EventType}", entry.EventType);
+            return new ValueTask(WriteFallbackAsync([entry], CancellationToken.None));
+        }
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

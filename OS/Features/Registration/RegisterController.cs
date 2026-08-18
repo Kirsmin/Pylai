@@ -11,7 +11,7 @@ public class RegisterController : ControllerBase
 {
     private readonly UserManager<User> _userManager;
     private readonly IPasswordHasher<User> _passwordHasher;
-    private readonly IEmailSender<User> _emailSender;
+    private readonly EmailSender _emailSender;
     private readonly IInviteCodeService _inviteCodeService;
     private readonly IEmailVerificationBlockService _emailBlockService;
     private readonly IpRateLimitService _ipRateLimitService;
@@ -26,7 +26,7 @@ public class RegisterController : ControllerBase
     public RegisterController(
         UserManager<User> userManager,
         IPasswordHasher<User> passwordHasher,
-        IEmailSender<User> emailSender,
+        EmailSender emailSender,
         IInviteCodeService inviteCodeService,
         IEmailVerificationBlockService emailBlockService,
         IpRateLimitService ipRateLimitService,
@@ -142,7 +142,7 @@ public class RegisterController : ControllerBase
         var dummy = new User();
         try
         {
-            await _emailSender.SendConfirmationLinkAsync(dummy, request.Email, code);
+            await _emailSender.SendRegisterCodeAsync(dummy, request.Email, code);
         }
         catch (Exception ex)
         {
@@ -271,7 +271,7 @@ public class RegisterController : ControllerBase
 
         session.PendingEmail = request.NewEmail;
         session.EmailCodeHash = AuthHelper.HashCode(code);
-        session.EmailCodeExpires = DateTimeOffset.UtcNow.AddMinutes(10);
+        session.EmailCodeExpires = DateTimeOffset.UtcNow.AddMinutes(_config.Identity.EmailCodeExpireMinutes);
         session.EmailCodeAttempts = 0;
         session.EmailChangeCount++;
 
@@ -281,7 +281,7 @@ public class RegisterController : ControllerBase
         var dummy = new User();
         try
         {
-            await _emailSender.SendConfirmationLinkAsync(dummy, request.NewEmail, code);
+            await _emailSender.SendRegisterCodeAsync(dummy, request.NewEmail, code);
         }
         catch (Exception ex)
         {
@@ -395,24 +395,45 @@ public class RegisterController : ControllerBase
             UserUid = user.Uid
         };
 
-        await using var transaction = await _context.Database.BeginTransactionAsync();
-        _context.Users.Add(user);
-        _context.RegistrationSessionBindings.Add(binding);
-        try
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            await _context.SaveChangesAsync();
-            await transaction.CommitAsync();
-        }
-        catch (DbUpdateException ex) when (ex.IsUniqueViolation())
-        {
-            await transaction.RollbackAsync();
-            _context.ChangeTracker.Clear();
-            return Conflict(new CreateAccountResponse
+            await using var transaction = await _context.Database.BeginTransactionAsync();
+            _context.Users.Add(user);
+            _context.RegistrationSessionBindings.Add(binding);
+            try
             {
-                Success = false,
-                Error = "用户名或邮箱已被占用。",
-                ErrorCode = "duplicate"
-            });
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
+                break;
+            }
+            catch (DbUpdateException ex) when (ex.IsUniqueViolation())
+            {
+                await transaction.RollbackAsync();
+                _context.ChangeTracker.Clear();
+                return Conflict(new CreateAccountResponse
+                {
+                    Success = false,
+                    Error = "用户名或邮箱已被占用。",
+                    ErrorCode = "duplicate"
+                });
+            }
+            catch (DbUpdateException ex)
+            {
+                await transaction.RollbackAsync();
+                _context.ChangeTracker.Clear();
+                if (attempt == 0 && ex.SqlState() is "40P01" or "40001")
+                {
+                    _logger.LogWarning("注册入库并发冲突（死锁/序列化），重试 | uid:{Uid} | 用户:{Name}", user.Uid, user.Name);
+                    continue;
+                }
+                _logger.LogError(ex, "注册入库最终失败 | uid:{Uid} | 用户:{Name}", user.Uid, user.Name);
+                return Conflict(new CreateAccountResponse
+                {
+                    Success = false,
+                    Error = "用户名或邮箱已被占用。",
+                    ErrorCode = "duplicate"
+                });
+            }
         }
 
         _logger.LogDebug("用户创建 | uid:{Uid} | 用户:{Name} | {Email}", user.Uid, user.Name, user.Email);

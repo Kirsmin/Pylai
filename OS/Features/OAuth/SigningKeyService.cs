@@ -185,7 +185,11 @@ public static class SigningKeyService
             if (key.EncryptedCertificateData is null
                 || key.EncryptionNonce is null
                 || key.EncryptionTag is null)
-                throw new InvalidOperationException($"SigningKey {key.Thumbprint} 仍为明文/未迁移格式，拒绝启动。");
+            {
+                // 遗留明文格式密钥（CertificateData 列已随迁移删除，无法再加密），跳过；
+                // 无任何可用密钥时由下方 count==0 兜底拒绝启动
+                continue;
+            }
 
             var pfx = protector.Unprotect(key.EncryptedCertificateData, key.EncryptionNonce, key.EncryptionTag, key.Thumbprint);
             certificates.Add(X509CertificateLoader.LoadPkcs12(

@@ -51,6 +51,10 @@ ConnectTimeoutMs = 5000
 Directory = "backups"
 
 # ASP.NET Core Identity 密码策略
+# 邮件验证码有效期（分钟）：注册/密码重置/邮箱绑定统一使用，邮件模板 %%ExpireMinutes%% 同步渲染
+[Identity]
+EmailCodeExpireMinutes = 10
+
 [Identity.Password]
 RequiredLength = 12
 AdminRequiredLength = 14

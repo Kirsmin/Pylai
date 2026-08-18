@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using MailKit.Net.Smtp;
 using MailKit.Security;
-using Microsoft.AspNetCore.Identity;
 using MimeKit;
 using Pylaios.Features.Config;
 
@@ -9,10 +8,8 @@ namespace Pylaios.Shared;
 
 public enum MailThemeKind { Register, Bind, Change, PasswordReset }
 
-public class EmailSender : IEmailSender<User>
+public class EmailSender
 {
-    private const int CodeExpireMinutes = 10;
-
     private readonly MainConfig _config;
     private readonly EmailConfig _emailConfig;
     private readonly ILogger<EmailSender> _logger;
@@ -35,14 +32,11 @@ public class EmailSender : IEmailSender<User>
         _ipResolver = ipResolver;
     }
 
-    public Task SendConfirmationLinkAsync(User user, string email, string confirmationLink)
-        => SendThemedAsync(MailThemeKind.Register, email, confirmationLink);
+    public Task SendRegisterCodeAsync(User user, string email, string code)
+        => SendThemedAsync(MailThemeKind.Register, email, code);
 
     public Task SendPasswordResetCodeAsync(User user, string email, string resetCode)
         => SendThemedAsync(MailThemeKind.PasswordReset, email, resetCode);
-
-    public Task SendPasswordResetLinkAsync(User user, string email, string resetLink)
-        => SendThemedAsync(MailThemeKind.PasswordReset, email, resetLink);
 
     public Task SendVerificationCodeAsync(MailThemeKind kind, string email, string code)
         => SendThemedAsync(kind, email, code);
@@ -65,7 +59,7 @@ public class EmailSender : IEmailSender<User>
             .Replace("%%CaptchaCode%%", code)
             .Replace("%%Browser%%", browser)
             .Replace("%%IPAddress%%", ip)
-            .Replace("%%ExpireMinutes%%", CodeExpireMinutes.ToString());
+            .Replace("%%ExpireMinutes%%", _config.Identity.EmailCodeExpireMinutes.ToString());
 
         await SendAsync(email, theme.Title, body);
     }

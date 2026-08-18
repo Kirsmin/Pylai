@@ -9,7 +9,7 @@ namespace Pylaios.Features.PasswordReset;
 [Route("api/auth")]
 public class PasswordResetController : ControllerBase
 {
-    private readonly IEmailSender<User> _emailSender;
+    private readonly EmailSender _emailSender;
     private readonly IpRateLimitService _ipRateLimitService;
     private readonly IpResolutionService _ipResolver;
     private readonly IPasswordHasher<User> _passwordHasher;
@@ -22,7 +22,7 @@ public class PasswordResetController : ControllerBase
     private readonly ILogger<PasswordResetController> _logger;
 
     public PasswordResetController(
-        IEmailSender<User> emailSender,
+        EmailSender emailSender,
         IpRateLimitService ipRateLimitService,
         IpResolutionService ipResolver,
         IPasswordHasher<User> passwordHasher,

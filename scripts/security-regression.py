@@ -119,7 +119,7 @@ def main() -> int:
 
     success = [r for r in results if r[0] == 200 and r[1] and r[1].get("success")]
     conflicts = [r for r in results if r[0] == 409]
-    others = [r for r in results if r not in success and r not in conflicts]
+    others = [r for r in results if r[0] not in (200, 409)]
 
     winner_uid = success[0][1].get("uid") if success else None
     leaked = bool(winner_uid) and any(winner_uid in r[2] for r in conflicts)
@@ -132,6 +132,7 @@ def main() -> int:
         "successCount": len(success),
         "conflictCount": len(conflicts),
         "otherStatuses": sorted({r[0] for r in others}),
+        "failures": [{"status": r[0], "body": r[2][:300]} for r in others],
         "winnerUidLeakedInFailure": leaked,
         "stage": "create-race",
     }, ensure_ascii=False))

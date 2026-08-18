@@ -10,7 +10,10 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenIddict.EntityFrameworkCore;
 using OpenIddict.Quartz;
 using OpenIddict.Server;
+using Npgsql;
 using StackExchange.Redis;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Fido2NetLib;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -29,7 +32,7 @@ public static class AppServices
         services.AddDatabaseFeature(config);
         services.AddOAuthFeature(config, env);
         services.AddAuthFeature(config, env);
-        services.AddSharedFeature(config);
+        services.AddSharedFeature(config, cliOnly);
         services.AddAuditFeature(!cliOnly);
         services.AddClientsFeature();
         services.AddUserTokensFeature();
@@ -55,9 +58,13 @@ public static class AppServices
 
     public static IServiceCollection AddDatabaseFeature(this IServiceCollection services, MainConfig config)
     {
+        var csBuilder = new NpgsqlConnectionStringBuilder(config.Database.ConnectionString);
+        if (!csBuilder.ContainsKey("Max Pool Size"))
+            csBuilder.MaxPoolSize = 200;
+
         services.AddDbContext<ApplicationDbContext>(options =>
         {
-            options.UseNpgsql(config.Database.ConnectionString);
+            options.UseNpgsql(csBuilder.ConnectionString);
             options.UseOpenIddict();
         });
         return services;
@@ -291,7 +298,7 @@ public static class AppServices
 
 
 
-    public static IServiceCollection AddSharedFeature(this IServiceCollection services, MainConfig config)
+    public static IServiceCollection AddSharedFeature(this IServiceCollection services, MainConfig config, bool cliOnly = false)
     {
         services.AddSingleton<IConnectionMultiplexer>(sp =>
         {
@@ -299,6 +306,22 @@ public static class AppServices
             var options = ConfigurationOptions.Parse($"{cfg.Host}:{cfg.Port},defaultDatabase={cfg.Database},connectTimeout={cfg.ConnectTimeoutMs}");
             if (!string.IsNullOrEmpty(cfg.Password))
                 options.Password = cfg.Password;
+            if (cliOnly)
+            {
+                options.AbortOnConnectFail = true;
+                options.ConnectRetry = 0;
+                options.ConnectTimeout = Math.Min(cfg.ConnectTimeoutMs, 2000);
+                var connect = Task.Run(() => ConnectionMultiplexer.Connect(options));
+                Thread.Sleep(4000);
+                if (!connect.IsCompleted)
+                    RedisFail($"Redis 连接超时（{cfg.Host}:{cfg.Port}），检查 [Redis] 配置（地址/密码）。");
+                if (connect.IsFaulted)
+                    RedisFail($"Redis 连接失败（{cfg.Host}:{cfg.Port}）：{connect.Exception?.GetBaseException()?.Message}，检查 [Redis] 配置（地址/密码）。");
+                var mux = connect.Result;
+                if (!mux.IsConnected)
+                    RedisFail($"Redis 连接失败（{cfg.Host}:{cfg.Port}），检查 [Redis] 配置（地址/密码）。");
+                return mux;
+            }
             return ConnectionMultiplexer.Connect(options);
         });
 
@@ -307,11 +330,21 @@ public static class AppServices
         services.AddSingleton<IpRateLimitService>();
         services.AddSingleton<IpResolutionService>();
         services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-        services.AddScoped<IEmailSender<User>, EmailSender>();
         services.AddScoped<EmailSender>();
         services.AddScoped<IUserAccessRevoker, UserAccessRevoker>();
         return services;
     }
+
+    private static void RedisFail(string message)
+    {
+        Console.Error.WriteLine($"错误: {message}");
+        Console.Error.Flush();
+        Console.Out.Flush();
+        LibcExit(2);
+    }
+
+    [DllImport("libc", EntryPoint = "exit")]
+    private static extern void LibcExit(int code);
 
 
 

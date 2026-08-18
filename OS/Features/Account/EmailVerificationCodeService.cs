@@ -21,7 +21,6 @@ public interface IEmailVerificationCodeService
 
 public class EmailVerificationCodeService : IEmailVerificationCodeService
 {
-    private static readonly TimeSpan CodeTtl = TimeSpan.FromMinutes(10);
     private const int MaxAttempts = 5;
 
     private static readonly string VerifyScript = """
@@ -47,11 +46,13 @@ public class EmailVerificationCodeService : IEmailVerificationCodeService
 
     private readonly IRedisStateCache _cache;
     private readonly IDatabase _redis;
+    private readonly TimeSpan _codeTtl;
 
-    public EmailVerificationCodeService(IRedisStateCache cache, IConnectionMultiplexer redis)
+    public EmailVerificationCodeService(IRedisStateCache cache, IConnectionMultiplexer redis, MainConfig config)
     {
         _cache = cache;
         _redis = redis.GetDatabase();
+        _codeTtl = TimeSpan.FromMinutes(config.Identity.EmailCodeExpireMinutes);
     }
 
     public async Task<string> CreateAsync(string key, string? email, Guid? userUid = null)
@@ -62,10 +63,10 @@ public class EmailVerificationCodeService : IEmailVerificationCodeService
             Hash = AuthHelper.HashCode(code),
             Email = email,
             UserUid = userUid,
-            Expires = DateTimeOffset.UtcNow.AddMinutes(10)
-        }, CodeTtl);
-        await _redis.StringSetAsync(CodeHashKey(key), AuthHelper.HashCode(code), CodeTtl);
-        await _redis.StringSetAsync(AttemptsKey(key), 0, CodeTtl);
+            Expires = DateTimeOffset.UtcNow + _codeTtl
+        }, _codeTtl);
+        await _redis.StringSetAsync(CodeHashKey(key), AuthHelper.HashCode(code), _codeTtl);
+        await _redis.StringSetAsync(AttemptsKey(key), 0, _codeTtl);
         return code;
     }
 
@@ -86,7 +87,7 @@ public class EmailVerificationCodeService : IEmailVerificationCodeService
         }, new RedisValue[]
         {
             MaxAttempts,
-            (long)CodeTtl.TotalSeconds,
+            (long)_codeTtl.TotalSeconds,
             AuthHelper.HashCode(code)
         });
 

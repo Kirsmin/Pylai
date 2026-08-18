@@ -258,13 +258,20 @@ static async Task<int> RunCliAsync(string[] args, string[] cliArgs, string? conf
             if (gate != 0) return gate;
         }
         await app.RunAsync();
-        return Environment.ExitCode;
+        Console.Out.Flush();
+        Console.Error.Flush();
+        Environment.Exit(Environment.ExitCode);
+        return 0;
     }
     catch (Exception ex)
     {
         var message = ex.Message.Replace('\r', ' ').Replace('\n', ' ');
         if (message.Length > 300) message = message[..300] + " ...";
-        return await CliHelpers.ErrorAsync(message);
+        var code = await CliHelpers.ErrorAsync(message);
+        Console.Out.Flush();
+        Console.Error.Flush();
+        Environment.Exit(code);
+        return 0;
     }
 }
 

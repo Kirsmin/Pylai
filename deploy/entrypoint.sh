@@ -82,10 +82,13 @@ fi
 PG_CONF="$PG_DATA/postgresql.conf"
 PG_HBA="$PG_DATA/pg_hba.conf"
 if [ ! -f "$PG_CONF" ] && [ -f "/etc/postgresql/$PG_VER/main/postgresql.conf" ]; then
-    PG_CONF="/etc/postgresql/$PG_VER/main/postgresql.conf"
+    cp "/etc/postgresql/$PG_VER/main/postgresql.conf" "$PG_CONF"
+    cp -r "/etc/postgresql/$PG_VER/main/conf.d" "$PG_DATA/conf.d" 2>/dev/null || true
+    chown -R postgres:postgres "$PG_DATA"
 fi
 if [ ! -f "$PG_HBA" ] && [ -f "/etc/postgresql/$PG_VER/main/pg_hba.conf" ]; then
-    PG_HBA="/etc/postgresql/$PG_VER/main/pg_hba.conf"
+    cp "/etc/postgresql/$PG_VER/main/pg_hba.conf" "$PG_HBA"
+    chown postgres:postgres "$PG_HBA"
 fi
 
 if [ -f "$PG_HBA" ]; then
