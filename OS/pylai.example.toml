@@ -158,6 +158,88 @@ Security = "StartTls"
 Username = ""
 Password = ""
 
+# 邮件主题与正文模板（四种场景）
+# 占位符（%% 开头结尾）：%%CaptchaCode%%（必填） / %%Browser%% / %%IPAddress%% / %%ExpireMinutes%%（可选）
+[MailTheme.Register]
+Title = "注册 Pylai！"
+Context = '''
+你正在网页端注册 Pylai 通行证，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.Bind]
+Title = "绑定邮箱"
+Context = '''
+你正在网页端为 Pylai 通行证绑定邮箱，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.Change]
+Title = "更换邮箱"
+Context = '''
+你正在网页端更换 Pylai 通行证的邮箱，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.PasswordReset]
+Title = "密码重置"
+Context = '''
+你正在网页端重置 Pylai 通行证的密码，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
 # 日志级别
 [Logging]
 DefaultLevel = "Debug"

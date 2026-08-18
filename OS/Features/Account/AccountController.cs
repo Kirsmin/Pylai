@@ -14,7 +14,7 @@ public class AccountController : ControllerBase
 {
     private readonly IPasswordHasher<User> _passwordHasher;
     private readonly UserManager<User> _userManager;
-    private readonly IEmailSender<User> _emailSender;
+    private readonly EmailSender _emailSender;
     private readonly ApplicationDbContext _context;
     private readonly IEmailVerificationCodeService _emailCodeService;
     private readonly IAuditService _auditService;
@@ -31,7 +31,7 @@ public class AccountController : ControllerBase
     public AccountController(
         IPasswordHasher<User> passwordHasher,
         UserManager<User> userManager,
-        IEmailSender<User> emailSender,
+        EmailSender emailSender,
         ApplicationDbContext context,
         IEmailVerificationCodeService emailCodeService,
         IAuditService auditService,
@@ -145,7 +145,7 @@ public class AccountController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
 
-        var sendError = await SendEmailCodeSafeAsync(user, request.Email, code, "绑定邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, request.Email, code, MailThemeKind.Bind, "绑定邮箱");
         if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "绑定邮箱码已发送 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
@@ -219,7 +219,7 @@ public class AccountController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {Email}", code, user.Uid, request.NewEmail);
 
-        var sendError = await SendEmailCodeSafeAsync(user, user.Email, code, "更换邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, user.Email, code, MailThemeKind.Change, "更换邮箱");
         if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "更换邮箱验证码已发送 | uid:{Uid} | → {NewEmail}", code, user.Uid, request.NewEmail);
@@ -240,7 +240,7 @@ public class AccountController : ControllerBase
 
         var newCode = await _emailCodeService.CreateAsync($"change-email-final:{user.Uid}", result.Entry!.Email);
 
-        var sendError = await SendEmailCodeSafeAsync(user, result.Entry.Email!, newCode, "确认新邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, result.Entry.Email!, newCode, MailThemeKind.Change, "确认新邮箱");
         if (sendError is not null) return sendError;
         _logger.LogCode(_testMode, LogLevel.Information, "新邮箱验证码已发送 | uid:{Uid} | → {Email}", newCode, user.Uid, result.Entry.Email);
 
@@ -481,11 +481,11 @@ public class AccountController : ControllerBase
         return Ok(new { Success = true });
     }
 
-    private async Task<IActionResult?> SendEmailCodeSafeAsync(User user, string email, string code, string action)
+    private async Task<IActionResult?> SendEmailCodeSafeAsync(User user, string email, string code, MailThemeKind kind, string action)
     {
         try
         {
-            await _emailSender.SendConfirmationLinkAsync(user, email, code);
+            await _emailSender.SendVerificationCodeAsync(kind, email, code);
             return null;
         }
         catch (Exception ex)

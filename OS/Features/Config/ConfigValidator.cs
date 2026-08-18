@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using System.Text.RegularExpressions;
 
 namespace Pylaios.Features.Config;
 
@@ -17,6 +18,7 @@ public static class ConfigValidator
         ValidateCors(config, result);
         ValidateSmtp(config, result);
         ValidateMfa(config, result);
+        ValidateMailTheme(config, result);
         ValidateInviteCodes(config, result, environment);
         ValidateDeployment(config, result);
         if (!environment.Equals("Development", StringComparison.OrdinalIgnoreCase)
@@ -298,6 +300,54 @@ public static class ConfigValidator
                     $"WebAuthn Origin 不合法: {origin}（应为 http(s)://host[:port]）"));
             }
         }
+    }
+
+    private static void ValidateMailTheme(MainConfig config, ConfigLoadResult result)
+    {
+        var placeholders = new[] { "%%CaptchaCode%%", "%%Browser%%", "%%IPAddress%%", "%%ExpireMinutes%%" };
+        var themes = new (string Path, MailTemplateConfig Theme)[]
+        {
+            ("MailTheme.Register", config.MailTheme.Register),
+            ("MailTheme.Bind", config.MailTheme.Bind),
+            ("MailTheme.Change", config.MailTheme.Change),
+            ("MailTheme.PasswordReset", config.MailTheme.PasswordReset)
+        };
+
+        foreach (var (path, theme) in themes)
+        {
+            if (string.IsNullOrWhiteSpace(theme.Title))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<MailThemeConfig>(), path + ".Title", "E004",
+                    $"{path}.Title 不能为空"));
+            }
+
+            if (string.IsNullOrWhiteSpace(theme.Context))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<MailThemeConfig>(), path + ".Context", "E004",
+                    $"{path}.Context 不能为空"));
+                continue;
+            }
+
+            if (!theme.Context.Contains("%%CaptchaCode%%", StringComparison.Ordinal))
+            {
+                result.Errors.Add(new ConfigIssue(FileOf<MailThemeConfig>(), path + ".Context", "E004",
+                    $"{path}.Context 必须包含占位符 %%CaptchaCode%%"));
+            }
+
+            foreach (var token in ExtractPlaceholders(theme.Context))
+            {
+                if (!placeholders.Contains(token, StringComparer.Ordinal))
+                {
+                    result.Warnings.Add($"{path}.Context 包含未知占位符 {token}（可用: %%CaptchaCode%% / %%Browser%% / %%IPAddress%% / %%ExpireMinutes%%）");
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<string> ExtractPlaceholders(string text)
+    {
+        foreach (Match match in Regex.Matches(text, @"%%([^%]+)%%"))
+            yield return match.Value;
     }
 
     private static void ValidateInviteCodes(MainConfig config, ConfigLoadResult result, string environment)

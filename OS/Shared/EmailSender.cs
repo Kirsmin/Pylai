@@ -3,41 +3,71 @@ using MailKit.Net.Smtp;
 using MailKit.Security;
 using Microsoft.AspNetCore.Identity;
 using MimeKit;
+using Pylaios.Features.Config;
 
 namespace Pylaios.Shared;
 
+public enum MailThemeKind { Register, Bind, Change, PasswordReset }
+
 public class EmailSender : IEmailSender<User>
 {
+    private const int CodeExpireMinutes = 10;
+
+    private readonly MainConfig _config;
     private readonly EmailConfig _emailConfig;
     private readonly ILogger<EmailSender> _logger;
     private readonly TestModeOptions _testMode;
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly IpResolutionService _ipResolver;
 
-    public EmailSender(MainConfig config, ILogger<EmailSender> logger, TestModeOptions testMode)
+    public EmailSender(
+        MainConfig config,
+        ILogger<EmailSender> logger,
+        TestModeOptions testMode,
+        IHttpContextAccessor httpContextAccessor,
+        IpResolutionService ipResolver)
     {
+        _config = config;
         _emailConfig = config.Email;
         _logger = logger;
         _testMode = testMode;
+        _httpContextAccessor = httpContextAccessor;
+        _ipResolver = ipResolver;
     }
 
     public Task SendConfirmationLinkAsync(User user, string email, string confirmationLink)
-    {
-        var subject = "邮箱验证码";
-        var body = $"您的验证码是：{confirmationLink}\n\n有效期 10 分钟。";
-        return SendAsync(email, subject, body);
-    }
+        => SendThemedAsync(MailThemeKind.Register, email, confirmationLink);
 
     public Task SendPasswordResetCodeAsync(User user, string email, string resetCode)
-    {
-        var subject = "密码重置验证码";
-        var body = $"您的密码重置验证码是：{resetCode}\n\n有效期 10 分钟。";
-        return SendAsync(email, subject, body);
-    }
+        => SendThemedAsync(MailThemeKind.PasswordReset, email, resetCode);
 
     public Task SendPasswordResetLinkAsync(User user, string email, string resetLink)
+        => SendThemedAsync(MailThemeKind.PasswordReset, email, resetLink);
+
+    public Task SendVerificationCodeAsync(MailThemeKind kind, string email, string code)
+        => SendThemedAsync(kind, email, code);
+
+    private async Task SendThemedAsync(MailThemeKind kind, string email, string code)
     {
-        var subject = "密码重置链接";
-        var body = $"点击以下链接重置密码：{resetLink}\n\n有效期 10 分钟。";
-        return SendAsync(email, subject, body);
+        var theme = kind switch
+        {
+            MailThemeKind.Register => _config.MailTheme.Register,
+            MailThemeKind.Bind => _config.MailTheme.Bind,
+            MailThemeKind.Change => _config.MailTheme.Change,
+            _ => _config.MailTheme.PasswordReset
+        };
+
+        var http = _httpContextAccessor.HttpContext;
+        var ip = http is null ? "" : _ipResolver.GetClientIp(http);
+        var browser = http?.Request.Headers.UserAgent.ToString() ?? "";
+
+        var body = theme.Context
+            .Replace("%%CaptchaCode%%", code)
+            .Replace("%%Browser%%", browser)
+            .Replace("%%IPAddress%%", ip)
+            .Replace("%%ExpireMinutes%%", CodeExpireMinutes.ToString());
+
+        await SendAsync(email, theme.Title, body);
     }
 
     private async Task SendAsync(string to, string subject, string body)

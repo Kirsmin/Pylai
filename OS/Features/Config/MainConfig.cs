@@ -25,6 +25,7 @@ public class MainConfig
     public DataProtectionConfig DataProtection { get; set; } = new();
     public DeploymentConfig Deployment { get; set; } = new();
     public BackupConfig Backup { get; set; } = new();
+    public MailThemeConfig MailTheme { get; set; } = new();
 }
 
 [ConfigFile("pylai.toml")]
@@ -416,4 +417,110 @@ public class BackupConfig
 {
     [ConfigDescription("数据库备份目录（backup 命令产物，pg_dump 快照）")]
     public string Directory { get; set; } = "backups";
+}
+
+[ConfigFile("pylai.toml")]
+public class MailThemeConfig
+{
+    public MailTemplateConfig Register { get; set; } = MailThemeDefaults.Register;
+    public MailTemplateConfig Bind { get; set; } = MailThemeDefaults.Bind;
+    public MailTemplateConfig Change { get; set; } = MailThemeDefaults.Change;
+    public MailTemplateConfig PasswordReset { get; set; } = MailThemeDefaults.PasswordReset;
+}
+
+public class MailTemplateConfig
+{
+    [ConfigNotEmpty]
+    [ConfigDescription("邮件主题")]
+    public string Title { get; set; } = "";
+
+    [ConfigNotEmpty]
+    [ConfigDescription("邮件正文模板；占位符: %%CaptchaCode%%（必填）/ %%Browser%% / %%IPAddress%% / %%ExpireMinutes%%（可选）")]
+    public string Context { get; set; } = "";
+}
+
+public static class MailThemeDefaults
+{
+    private static readonly string Tail = """
+        ------
+        此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+        - 忽略邮件，可能是有人输入了错误的电子邮件地址。
+        - 如果频繁收到此邮件，请联系管理员。
+        """;
+
+    public static MailTemplateConfig Register { get; } = new()
+    {
+        Title = "注册 Pylai！",
+        Context = $"""
+            你正在网页端注册 Pylai 通行证，请仔细核查以下信息，然后输入验证码：
+
+            浏览器：%%Browser%%
+            IP地址：%%IPAddress%%
+
+            你的验证码是：%%CaptchaCode%%
+            验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+            Kirsmax(Bot),
+            Poeat Team.
+
+            {Tail}
+            """
+    };
+
+    public static MailTemplateConfig Bind { get; } = new()
+    {
+        Title = "绑定邮箱",
+        Context = $"""
+            你正在网页端为 Pylai 通行证绑定邮箱，请仔细核查以下信息，然后输入验证码：
+
+            浏览器：%%Browser%%
+            IP地址：%%IPAddress%%
+
+            你的验证码是：%%CaptchaCode%%
+            验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+            Kirsmax(Bot),
+            Poeat Team.
+
+            {Tail}
+            """
+    };
+
+    public static MailTemplateConfig Change { get; } = new()
+    {
+        Title = "更换邮箱",
+        Context = $"""
+            你正在网页端更换 Pylai 通行证的邮箱，请仔细核查以下信息，然后输入验证码：
+
+            浏览器：%%Browser%%
+            IP地址：%%IPAddress%%
+
+            你的验证码是：%%CaptchaCode%%
+            验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+            Kirsmax(Bot),
+            Poeat Team.
+
+            {Tail}
+            """
+    };
+
+    public static MailTemplateConfig PasswordReset { get; } = new()
+    {
+        Title = "密码重置",
+        Context = $"""
+            你正在网页端重置 Pylai 通行证的密码，请仔细核查以下信息，然后输入验证码：
+
+            浏览器：%%Browser%%
+            IP地址：%%IPAddress%%
+
+            你的验证码是：%%CaptchaCode%%
+            验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+            Kirsmax(Bot),
+            Poeat Team.
+
+            {Tail}
+            """
+    };
 }

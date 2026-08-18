@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.HostFiltering;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Console;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenIddict.EntityFrameworkCore;
 using OpenIddict.Quartz;
 using OpenIddict.Server;
@@ -305,7 +306,9 @@ public static class AppServices
         services.AddSingleton<IRedisStateCache, RedisStateCache>();
         services.AddSingleton<IpRateLimitService>();
         services.AddSingleton<IpResolutionService>();
+        services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         services.AddScoped<IEmailSender<User>, EmailSender>();
+        services.AddScoped<EmailSender>();
         services.AddScoped<IUserAccessRevoker, UserAccessRevoker>();
         return services;
     }
