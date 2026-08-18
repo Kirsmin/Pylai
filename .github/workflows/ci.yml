@@ -192,8 +192,10 @@ jobs:
 
           curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
 
-          USER_PW=$(docker logs smoke 2>/dev/null | grep "普通用户:" | awk '{print $NF}')
-          ADMIN_PW=$(docker logs smoke 2>/dev/null | grep "管理员:" | awk '{print $NF}')
+          SECRETS=$(docker exec smoke cat /var/lib/pylai/.secrets)
+          USER_PW=$(awk -F= '/^USER_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")
+          ADMIN_PW=$(awk -F= '/^ADMIN_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")
+          [ -n "$USER_PW" ] && [ -n "$ADMIN_PW" ] || { echo "==> 无法从 .secrets 读取凭据"; exit 1; }
           NORMAL_LOGIN=$(curl -sf --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"usernameOrEmail\":\"user@pylaios.local\",\"password\":\"$USER_PW\"}")
