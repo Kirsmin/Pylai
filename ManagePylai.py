@@ -672,14 +672,17 @@ def collect_install_answers() -> dict:
     }
 
 
-def start_container(image: str, answers: dict) -> None:
+def start_container(image: str, answers: dict, read_only: bool = True) -> None:
     if container_exists():
         docker("rm", "-f", CONTAINER)
     ensure_home()
     cmd = [
         "docker", "run", "-d", "--name", CONTAINER,
         "--restart", "unless-stopped",
-        "--read-only",
+    ]
+    if read_only:
+        cmd.append("--read-only")
+    cmd += [
         "--cap-drop", "ALL",
         "--cap-add", "CHOWN",
         "--cap-add", "DAC_OVERRIDE",
@@ -1141,13 +1144,58 @@ def read_container_env() -> dict[str, str]:
     return env
 
 
+def read_config_credentials() -> dict[str, str]:
+    """从 pylai.toml 解析数据库/Redis 凭据（容器不存在时的回退路径）。"""
+    if not CONFIG_FILE.is_file():
+        return {}
+    text = CONFIG_FILE.read_text(encoding="utf-8")
+    creds: dict[str, str] = {}
+    match = re.search(r'ConnectionString\s*=\s*"([^"]+)"', text)
+    if match:
+        for key, pattern in (
+            ("db_user", r"(?:Username|User ID)=([^;]+)"),
+            ("db_password", r"Password=([^;]+)"),
+            ("db_name", r"Database=([^;]+)"),
+        ):
+            inner = re.search(pattern, match.group(1))
+            if inner:
+                creds[key] = inner.group(1)
+    section = re.search(r"\[Redis\]\s*\n(.*?)(?=\n\[|\Z)", text, re.S)
+    if section:
+        inner = re.search(r'^Password\s*=\s*"([^"]*)"', section.group(1), re.M)
+        if inner:
+            creds["redis_password"] = inner.group(1)
+    return creds
+
+
+def preflight_config(image: str) -> None:
+    """用新镜像对现有 pylai.toml 做四阶段配置校验，提前暴露 E002 等不兼容项。"""
+    if not CONFIG_FILE.is_file():
+        raise ManageError(f"配置文件不存在: {CONFIG_FILE}")
+    out("==> 校验现有配置与新版本兼容性（config validate）...")
+    result = docker(
+        "run", "--rm", "--entrypoint", PYLAIOS_BIN,
+        "-v", f"{CONFIG_DIR}:/etc/pylai",
+        image, "config", "validate", "--config", "/etc/pylai/pylai.toml",
+        check=False, timeout=120,
+    )
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode == 0:
+        out("配置校验通过。")
+        return
+    if output:
+        out(output)
+    raise ManageError(
+        "现有配置不兼容新版本（见上方诊断）。请先修正 ~/.pylai/config/pylai.toml 后重试："
+        "移除过时配置项（E002），补齐新版本必填项（E004），或调整越界值（E005）。"
+        "也可对照镜像模板 `docker run --rm --entrypoint cat {image} /opt/pylai/pylai.example.toml` 逐项核对。"
+    )
+
+
 def update() -> None:
     state = load_state()
     if not state:
         out("尚未安装，请先执行安装。")
-        return
-    if not container_exists():
-        out("未找到容器，请先安装或启动。")
         return
     tars = discover_tars()
     if not tars:
@@ -1159,25 +1207,33 @@ def update() -> None:
     tar_path = Path.cwd() / name
     version, arch = parse_tar(tar_path) or (state.get("version", "0.0.1"), state.get("architecture", "AMD64"))
     old_image = state.get("image", "pylaios:unknown")
-    env = read_container_env()
+    creds = read_config_credentials()
+    env = read_container_env() if container_exists() else {}
+    if not container_exists():
+        out("未找到容器，将从 pylai.toml 读取凭据执行更新。")
     answers = {
         "public_url": state.get("public_url", "http://localhost"),
         "public_port": int(state.get("public_port", 8080)),
         "api_port": int(state.get("api_port", 5000)),
-        "db_user": env.get("PYLAI_DB_USER", "pylai"),
-        "db_name": env.get("PYLAI_DB_NAME", "pylai"),
-        "db_password": env.get("PYLAI_DB_PASSWORD", ""),
-        "redis_password": env.get("PYLAI_REDIS_PASSWORD", ""),
+        "db_user": env.get("PYLAI_DB_USER") or creds.get("db_user") or "pylai",
+        "db_name": env.get("PYLAI_DB_NAME") or creds.get("db_name") or "pylai",
+        "db_password": env.get("PYLAI_DB_PASSWORD") or creds.get("db_password") or "",
+        "redis_password": env.get("PYLAI_REDIS_PASSWORD") or creds.get("redis_password") or "",
     }
     if not answers["db_password"] or not answers["redis_password"]:
-        raise ManageError("无法读取现有容器环境变量，请使用安装或手动迁移。")
+        raise ManageError("无法读取数据库/Redis 凭据（容器环境变量与 pylai.toml 均缺失）。")
 
     out("更新前建议先导出数据库。")
     if ask_yes_no("是否现在导出数据库备份？", True) and container_running():
         export_database()
 
     image = load_image_tar(tar_path)
-    docker("stop", "-t", "30", CONTAINER, timeout=120)
+    preflight_config(image)
+
+    if container_exists():
+        docker("stop", "-t", "30", CONTAINER, timeout=120)
+    else:
+        out("容器不存在，跳过停止步骤。")
     try:
         start_container(image, answers)
         state["version"] = version
@@ -1190,7 +1246,12 @@ def update() -> None:
         try:
             start_container(old_image, answers)
         except Exception:
-            out("回滚失败，请检查 docker logs pylai。")
+            out("旧镜像以只读容器启动失败，尝试去掉 --read-only 重试...")
+            try:
+                start_container(old_image, answers, read_only=False)
+                out("回滚完成（旧镜像以非只读容器运行，容器安全性已降低）。")
+            except Exception:
+                out("回滚失败，请检查 docker logs pylai。")
         save_state(state)
         raise
 
