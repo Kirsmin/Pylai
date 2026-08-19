@@ -10,20 +10,15 @@ namespace Pylaios.Features.Database.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropColumn(
-                name: "CertificateData",
-                table: "SigningKeys");
+            // 幂等：v0.0.2 的 key reencrypt 曾用直接 SQL 删除该列（不记录迁移历史），
+            // 已删除过的库再 DROP 会 42703 失败；IF EXISTS 兼容两种状态。
+            migrationBuilder.Sql("ALTER TABLE \"SigningKeys\" DROP COLUMN IF EXISTS \"CertificateData\"");
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.AddColumn<byte[]>(
-                name: "CertificateData",
-                table: "SigningKeys",
-                type: "bytea",
-                nullable: false,
-                defaultValue: new byte[0]);
+            migrationBuilder.Sql("ALTER TABLE \"SigningKeys\" ADD COLUMN IF NOT EXISTS \"CertificateData\" bytea");
         }
     }
 }
