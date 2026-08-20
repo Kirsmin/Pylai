@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -151,7 +152,7 @@ public class ExternalLoginController : ControllerBase
         if (info is null)
         {
             _logger.LogWarning("外部登录信息获取失败");
-            return Redirect($"{_config.Frontend.Url}/login?error=external_failed");
+            return RedirectToLogin("external_failed");
         }
 
         if (!string.Equals(info.LoginProvider, state.Provider, StringComparison.Ordinal))
@@ -185,17 +186,17 @@ public class ExternalLoginController : ControllerBase
                 {
                     _logger.LogWarning("外部登录绑定失败：凭据已被其他账户绑定 | uid:{Uid} | Provider:{Provider}",
                         currentUser.Uid, provider);
-                    return Redirect($"{_config.Frontend.Url}/login");
+                    return RedirectToLogin();
                 }
 
-                return Redirect($"{_config.Frontend.Url}/login");
+                return RedirectToLogin();
             }
 
             if (!await _mfa.HasRecentStepUpAsync(currentUser.Uid))
             {
                 _logger.LogWarning("外部登录绑定拒绝：未通过近期 Step-Up | uid:{Uid} | Provider:{Provider}",
                     currentUser.Uid, provider);
-                return Redirect($"{_config.Frontend.Url}/login?error=mfa_step_up_required&provider={provider}");
+                return RedirectToLogin("mfa_step_up_required", provider);
             }
 
             var result = await _userManager.AddLoginAsync(currentUser, info);
@@ -203,7 +204,7 @@ public class ExternalLoginController : ControllerBase
             {
                 _logger.LogWarning("外部登录绑定失败 | uid:{Uid} | Provider:{Provider} | 错误:{Errors}",
                     currentUser.Uid, provider, string.Join(";", result.Errors.Select(e => e.Description)));
-                return Redirect($"{_config.Frontend.Url}/login");
+                return RedirectToLogin();
             }
 
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.ExternalLoginBound,
@@ -212,20 +213,20 @@ public class ExternalLoginController : ControllerBase
 
             _logger.LogInformation("外部登录绑定成功 | uid:{Uid} | Provider:{Provider}", currentUser.Uid, provider);
 
-            return Redirect($"{_config.Frontend.Url}/login");
+            return RedirectToLogin();
         }
 
         var user = await _userManager.FindByLoginAsync(provider, providerKey);
         if (user is null)
         {
             _logger.LogWarning("外部登录拒绝：凭据未绑定任何账户 | Provider:{Provider} | Key:{Key}", provider, providerKey);
-            return Redirect($"{_config.Frontend.Url}/login?error=external_login_requires_account");
+            return RedirectToLogin("external_login_requires_account");
         }
 
         if (user.Status != UserStatus.Active)
         {
             _logger.LogWarning("外部登录拒绝：账户状态异常 | uid:{Uid} | 状态:{Status}", user.Uid, user.Status);
-            return Redirect($"{_config.Frontend.Url}/login?error=external_failed");
+            return RedirectToLogin("external_failed");
         }
 
         user.LastLoginAt = DateTimeOffset.UtcNow;
@@ -242,8 +243,26 @@ public class ExternalLoginController : ControllerBase
         return Redirect($"{_config.Frontend.Url}/");
     }
 
-    private IActionResult InvalidStateRedirect() =>
-        Redirect($"{_config.Frontend.Url}/login?error=invalid_state");
+    private IActionResult RedirectToLogin(string? error = null, string? provider = null)
+    {
+        var url = new StringBuilder($"{_config.Frontend.Url.TrimEnd('/')}/login");
+        var separator = '?';
+
+        void Append(string key, string value)
+        {
+            url.Append(separator)
+                .Append(Uri.EscapeDataString(key))
+                .Append('=')
+                .Append(Uri.EscapeDataString(value));
+            separator = '&';
+        }
+
+        if (!string.IsNullOrWhiteSpace(error)) Append("error", error);
+        if (!string.IsNullOrWhiteSpace(provider)) Append("provider", provider);
+        return Redirect(url.ToString());
+    }
+
+    private IActionResult InvalidStateRedirect() => RedirectToLogin("invalid_state");
 
 }
 

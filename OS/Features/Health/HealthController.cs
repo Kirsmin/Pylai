@@ -1,48 +1,53 @@
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 
 namespace Pylaios.Features.Health;
 
-
 [ApiController]
-public class HealthLiveController : ControllerBase
-{
-    [HttpGet("/health/live")]
-    public IActionResult Live()
-        => Ok(new { status = "alive", timestamp = DateTimeOffset.UtcNow });
-}
-
-
-[ApiController]
+[Route("health")]
+[AllowAnonymous]
 public class HealthController : ControllerBase
 {
-    private readonly ApplicationDbContext _context;
+    private readonly ApplicationDbContext _db;
     private readonly IConnectionMultiplexer _redis;
+    private readonly MainConfig _config;
     private readonly ILogger<HealthController> _logger;
 
-    public HealthController(ApplicationDbContext context, IConnectionMultiplexer redis, ILogger<HealthController> logger)
+    public HealthController(
+        ApplicationDbContext db,
+        IConnectionMultiplexer redis,
+        MainConfig config,
+        ILogger<HealthController> logger)
     {
-        _context = context;
+        _db = db;
         _redis = redis;
+        _config = config;
         _logger = logger;
     }
 
-    [HttpGet("/health")]
-    [HttpGet("/health/ready")]
+    [HttpGet("live")]
+    public IActionResult Live()
+        => Ok(new { status = "alive", timestamp = DateTimeOffset.UtcNow });
+
+    [HttpGet("ready")]
+    [HttpGet("")]
     public async Task<IActionResult> Ready()
     {
-        var checks = new Dictionary<string, string>();
+        var checks = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
-            await _context.Database.ExecuteSqlRawAsync("SELECT 1");
+            await _db.Database.ExecuteSqlRawAsync("SELECT 1");
             checks["database"] = "ok";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "健康检查数据库失败");
             checks["database"] = "error";
+            _logger.LogWarning(ex, "健康检查：PostgreSQL 不可用");
         }
 
         try
@@ -52,17 +57,52 @@ public class HealthController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "健康检查 Redis 失败");
             checks["redis"] = "error";
+            _logger.LogWarning(ex, "健康检查：Redis 不可用");
         }
 
-        var healthy = checks.Values.All(v => v == "ok");
-        var body = new
+        if (string.IsNullOrWhiteSpace(_config.Email.Smtp.Host))
         {
-            status = healthy ? "healthy" : "unhealthy",
-            timestamp = DateTimeOffset.UtcNow,
-            checks
-        };
-        return healthy ? Ok(body) : StatusCode(503, body);
+            checks["smtp"] = "disabled";
+        }
+        else
+        {
+            try
+            {
+                using var client = new SmtpClient { Timeout = 5000 };
+                await client.ConnectAsync(
+                    _config.Email.Smtp.Host,
+                    _config.Email.Smtp.Port,
+                    ResolveSecurity(_config.Email.Smtp.Security));
+
+                if (!string.IsNullOrWhiteSpace(_config.Email.Smtp.Username))
+                    await client.AuthenticateAsync(_config.Email.Smtp.Username, _config.Email.Smtp.Password);
+
+                await client.DisconnectAsync(true);
+                checks["smtp"] = "ok";
+            }
+            catch (Exception ex)
+            {
+                checks["smtp"] = "error";
+                _logger.LogWarning(ex, "健康检查：SMTP 不可用");
+            }
+        }
+
+        var hardHealthy = checks["database"] == "ok" && checks["redis"] == "ok";
+        var smtpDegraded = checks["smtp"] == "error";
+        var status = !hardHealthy ? "unhealthy" : smtpDegraded ? "degraded" : "healthy";
+        var body = new { status, timestamp = DateTimeOffset.UtcNow, checks };
+
+        return hardHealthy ? Ok(body) : StatusCode(StatusCodes.Status503ServiceUnavailable, body);
     }
+
+    private static SecureSocketOptions ResolveSecurity(string? security)
+        => security?.Trim().ToLowerInvariant() switch
+        {
+            "none" => SecureSocketOptions.None,
+            "starttls" => SecureSocketOptions.StartTls,
+            "sslonconnect" => SecureSocketOptions.SslOnConnect,
+            _ => throw new InvalidOperationException(
+                $"无效 SMTP 加密方式: {security}（可用: None / StartTls / SslOnConnect）")
+        };
 }

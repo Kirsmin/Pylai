@@ -1,5 +1,7 @@
 using System.Reflection;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.FileProviders;
 using Cocona;
@@ -87,13 +89,40 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     if (!string.IsNullOrWhiteSpace(dataProtectionPath))
     {
         Directory.CreateDirectory(dataProtectionPath);
-        builder.Services.AddDataProtection()
-            .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
+
+        var dataDir = Environment.GetEnvironmentVariable("PYLAI_DATA_DIR");
+        var dpKekPath = Environment.GetEnvironmentVariable(AesGcmXmlEncryptor.KeyFileEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(dpKekPath) && !string.IsNullOrWhiteSpace(dataDir))
+            dpKekPath = Path.Combine(dataDir, "dp-kek");
+
+        if (string.IsNullOrWhiteSpace(dpKekPath) || !File.Exists(dpKekPath))
+        {
+            Console.Error.WriteLine(
+                $"错误  Pylaios       DataProtection KEK 缺失，拒绝以明文密钥环启动。请通过 {AesGcmXmlEncryptor.KeyFileEnvironmentVariable} 注入 32 字节独立密钥文件");
+            return 3;
+        }
+
+        try
+        {
+            // EncryptedXmlInfo stores the decryptor type; DataProtection later constructs it
+            // with the parameterless constructor, so publish the resolved path for decryption too.
+            Environment.SetEnvironmentVariable(AesGcmXmlEncryptor.KeyFileEnvironmentVariable, dpKekPath);
+            var xmlEncryptor = new AesGcmXmlEncryptor(dpKekPath);
+            builder.Services.AddDataProtection()
+                .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionPath));
+            builder.Services.Configure<KeyManagementOptions>(options => options.XmlEncryptor = xmlEncryptor);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"错误  Pylaios       DataProtection KEK 无效，拒绝启动: {ex.Message}");
+            return 3;
+        }
     }
 
     try
     {
         builder.Services.AddPylaios(config, builder.Environment);
+        builder.Services.Configure<MvcOptions>(options => options.Filters.Add<ApiEnvelopeResultFilter>());
     }
     catch (Exception ex)
     {

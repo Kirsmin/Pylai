@@ -5,6 +5,7 @@ namespace Pylaios.Shared;
 
 /// <summary>
 /// Normalizes uncaught API failures without exposing exception details.
+/// The HTTP status is the transport-level success/failure signal; the body carries error details only.
 /// Non-API exceptions are deliberately rethrown to the existing ASP.NET Core handler.
 /// </summary>
 public sealed class GlobalExceptionMiddleware(
@@ -27,11 +28,10 @@ public sealed class GlobalExceptionMiddleware(
         {
             logger.LogError(ex, "未处理 API 异常 | {Method} {Path} | TraceId:{TraceId}",
                 context.Request.Method, context.Request.Path, context.TraceIdentifier);
-
             context.Response.Clear();
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
             await context.Response.WriteAsJsonAsync(
-                ApiResponse.Fail("服务器内部错误。", "internal_error"),
+                new { error = "服务器内部错误。", errorCode = "internal_error" },
                 context.RequestAborted);
         }
     }

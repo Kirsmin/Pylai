@@ -128,7 +128,7 @@ public class RegisterController : ControllerBase
 
         session.PendingEmail = request.Email;
         session.EmailCodeHash = AuthHelper.HashCode(code);
-        session.EmailCodeExpires = DateTimeOffset.UtcNow.AddMinutes(10);
+        session.EmailCodeExpires = DateTimeOffset.UtcNow.AddMinutes(_config.Identity.EmailCodeExpireMinutes);
         session.EmailCodeAttempts = 0;
         session.Step = 2;
         await _sessionService.UpdateSessionAsync(request.SessionToken, session);

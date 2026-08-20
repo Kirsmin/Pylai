@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api, apiFetch } from '@/utils/api'
+import { api } from '@/utils/api'
+export { API_BASE, apiFetch } from '@/utils/api'
 
 export interface User {
   uid: string
@@ -10,44 +11,30 @@ export interface User {
   email: string
 }
 
+interface CurrentAccountResponse {
+  user: User
+}
+
 export const useAuthStore = defineStore('auth', () => {
+  // Identity data is intentionally memory-only. The authoritative session is the HttpOnly cookie.
   const user = ref<User | null>(null)
   const isAuthenticated = computed(() => user.value !== null)
 
-  function persistToSession(u: User) {
-    sessionStorage.setItem('pylai_auth_user', JSON.stringify(u))
-  }
-
-  function persistToLocal(u: User | null, remember: boolean) {
-    if (remember && u) {
-      localStorage.setItem('pylai_auth_user', JSON.stringify(u))
-    } else {
-      localStorage.removeItem('pylai_auth_user')
-    }
-  }
-
-  function clearStorage() {
-    sessionStorage.removeItem('pylai_auth_user')
-    localStorage.removeItem('pylai_auth_user')
-  }
-
   function clearSession() {
     user.value = null
-    clearStorage()
   }
 
-  function login(userData: User, remember: boolean) {
+  // Keep the legacy second argument for source compatibility; remember-me is enforced server-side
+  // by the authentication cookie and never by local/sessionStorage.
+  function login(userData: User, _remember = false) {
     user.value = userData
-    persistToSession(userData)
-    persistToLocal(userData, remember)
   }
 
   async function logout() {
     try {
       await api('/api/auth/logout', { method: 'POST' })
     } catch (err) {
-      // 本地状态仍必须清除，但网络/服务端失败不能静默吞掉。
-      console.warn('[Auth] 服务端登出失败，本地会话仍将清除', err)
+      console.warn('[Auth] 服务端登出失败，本地内存状态仍将清除', err)
     } finally {
       clearSession()
     }
@@ -56,20 +43,14 @@ export const useAuthStore = defineStore('auth', () => {
   async function validateSession(): Promise<boolean> {
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 3000)
-
     try {
-      const res = await apiFetch('/api/auth/account/sessions', {
+      const data = await api<CurrentAccountResponse>('/api/auth/account', {
         signal: controller.signal
       })
-
-      if (!res.ok) {
-        clearSession()
-        return false
-      }
-
+      user.value = data.user
       return true
     } catch (err) {
-      // Fail Closed：网络异常、超时或浏览器 fetch 失败都不能当作“会话有效”。
+      // Fail Closed: network errors, timeout, 401, and revoked cookies all become signed-out state.
       console.warn('[Auth] 会话校验失败，按未登录处理', err)
       clearSession()
       return false
@@ -79,22 +60,6 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function init() {
-    const savedUser =
-      sessionStorage.getItem('pylai_auth_user') ??
-      localStorage.getItem('pylai_auth_user')
-
-    if (!savedUser) return
-
-    let parsed: User
-    try {
-      parsed = JSON.parse(savedUser) as User
-    } catch (err) {
-      console.warn('[Auth] 本地用户缓存损坏，已清除', err)
-      clearSession()
-      return
-    }
-
-    user.value = parsed
     await validateSession()
   }
 

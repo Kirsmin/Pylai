@@ -15,9 +15,10 @@ export class ApiError extends Error {
 }
 
 export interface ApiEnvelope {
-  success: boolean
   error?: string
   errorCode?: string
+  /** @deprecated Compatibility-only; successful api() calls synthesize true in memory. */
+  success?: boolean
   [key: string]: unknown
 }
 
@@ -32,7 +33,6 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
 async function readEnvelope(res: Response): Promise<ApiEnvelope | null> {
   const text = await res.text()
   if (!text) return null
-
   try {
     return JSON.parse(text) as ApiEnvelope
   } catch (err) {
@@ -46,10 +46,17 @@ export async function api<T = ApiEnvelope>(path: string, init?: RequestInit): Pr
   if (init?.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-
   const res = await apiFetch(path, { ...init, headers })
+
+  // Keep explicit redirect semantics for OAuth/external-login flows when fetch() uses redirect=manual.
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+    const location = res.headers.get('location') ?? ''
+    throw new ApiError('需要重定向', res.status, 'redirect_required', { location })
+  }
+
   const data = await readEnvelope(res)
 
+  // HTTP status is the single transport-level success/failure signal.
   if (!res.ok) {
     throw new ApiError(
       data?.error || `请求失败 (${res.status})`,
@@ -59,5 +66,10 @@ export async function api<T = ApiEnvelope>(path: string, init?: RequestInit): Pr
     )
   }
 
+  // Transitional source compatibility for views not migrated in this change. The value is never
+  // received from the wire and is deliberately non-enumerable.
+  if (data && typeof data === 'object' && !Object.prototype.hasOwnProperty.call(data, 'success')) {
+    Object.defineProperty(data, 'success', { value: true, enumerable: false, configurable: true })
+  }
   return data as T
 }

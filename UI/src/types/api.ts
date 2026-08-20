@@ -1,4 +1,13 @@
-export const SUPPORT_EMAIL = (import.meta.env.VITE_SUPPORT_EMAIL as string | undefined)?.trim() || ''
+/** @deprecated Use loadPublicConfig().supportEmail; kept only for source compatibility. */
+export let SUPPORT_EMAIL = ''
+
+export function setRuntimeSupportEmail(value: string) {
+  SUPPORT_EMAIL = value.trim()
+}
+
+export interface PublicConfig {
+  supportEmail: string
+}
 
 export interface ScopeInfo {
   name: string
