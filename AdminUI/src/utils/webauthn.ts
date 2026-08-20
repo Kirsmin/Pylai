@@ -15,7 +15,21 @@ function encode(value: ArrayBuffer | null): string | null {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
 }
 
+export function isWebAuthnAvailable(): boolean {
+  return typeof navigator !== 'undefined' &&
+    navigator.credentials !== undefined &&
+    typeof navigator.credentials.create === 'function' &&
+    typeof navigator.credentials.get === 'function'
+}
+
+export function assertWebAuthnAvailable(): void {
+  if (!isWebAuthnAvailable()) {
+    throw new Error('当前浏览器环境不支持 WebAuthn / Passkey。请使用 HTTPS 或 localhost 访问，或改用 TOTP 验证。')
+  }
+}
+
 export async function getAssertion(options: any) {
+  assertWebAuthnAvailable()
   const publicKey = {
     ...options,
     challenge: decode(options.challenge),
@@ -41,6 +55,7 @@ export async function getAssertion(options: any) {
 }
 
 export async function createCredential(options: any) {
+  assertWebAuthnAvailable()
   const publicKey = {
     ...options,
     challenge: decode(options.challenge),

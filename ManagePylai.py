@@ -423,6 +423,9 @@ def generate_config(image: str, answers: dict) -> None:
         smtp_block = smtp_block.replace('Password = ""', f'Password = {toml_string(answers["smtp_password"])}', 1)
         text = text[:smtp_start] + smtp_block + text[smtp_end:]
 
+    text = _replace_toml_block_value(text, "[Mfa]", "RequireForAdmin", "true" if answers.get("mfa_for_admin", False) else "false")
+    text = _replace_toml_block_value(text, "[Mfa]", "RequireWebAuthnForMax", "true" if answers.get("mfa_webauthn_for_max", False) else "false")
+
     ensure_home()
     # Fail Closed：写出前用 tomllib 校验整体为合法 TOML，避免结构错误带病落地
     try:
@@ -648,6 +651,14 @@ def collect_install_answers() -> dict:
     if extra_cors:
         cors_origins.extend(x.strip() for x in extra_cors.split(",") if x.strip())
 
+    out("\n-- 高权限账户 MFA --")
+    out("MFA 可保护 Admin/Max 账户安全。HTTP/局域网部署时 WebAuthn 不可用，建议关闭或仅使用 TOTP。")
+    mfa_for_admin = ask_yes_no("Admin 及以上角色登录时强制要求 MFA？", False)
+    if mfa_for_admin:
+        mfa_webauthn_for_max = ask_yes_no("Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？", False)
+    else:
+        mfa_webauthn_for_max = False
+
     return {
         "public_url": public_url,
         "origin": public_url.rstrip("/"),
@@ -678,6 +689,8 @@ def collect_install_answers() -> dict:
         "trusted_proxies": [x.strip() for x in trusted_proxies.split(",") if x.strip()],
         "trusted_networks": [x.strip() for x in trusted_networks.split(",") if x.strip()],
         "cors_origins": cors_origins,
+        "mfa_for_admin": mfa_for_admin,
+        "mfa_webauthn_for_max": mfa_webauthn_for_max,
     }
 
 
@@ -974,6 +987,36 @@ def action_reset_password(kind: str) -> None:
     out("密码已重置，该用户全部会话与 token 已吊销。")
 
 
+def action_change_mfa() -> None:
+    if not CONFIG_FILE.is_file():
+        out("配置文件不存在")
+        return
+    text = CONFIG_FILE.read_text(encoding="utf-8")
+    mfa_for_admin = False
+    mfa_webauthn_for_max = False
+    try:
+        parsed = tomllib.loads(text)
+        mfa = parsed.get("Mfa", {})
+        mfa_for_admin = bool(mfa.get("RequireForAdmin", False))
+        mfa_webauthn_for_max = bool(mfa.get("RequireWebAuthnForMax", False))
+    except tomllib.TOMLDecodeError as exc:
+        out(f"配置解析失败: {exc}")
+        return
+    out("当前 MFA 配置：")
+    out(f"  RequireForAdmin = {'true' if mfa_for_admin else 'false'}")
+    out(f"  RequireWebAuthnForMax = {'true' if mfa_webauthn_for_max else 'false'}")
+    new_mfa_for_admin = ask_yes_no("Admin 及以上角色登录时强制要求 MFA？", mfa_for_admin)
+    if new_mfa_for_admin:
+        new_mfa_webauthn_for_max = ask_yes_no("Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？", mfa_webauthn_for_max)
+    else:
+        new_mfa_webauthn_for_max = False
+    text = _replace_toml_block_value(text, "[Mfa]", "RequireForAdmin", "true" if new_mfa_for_admin else "false")
+    text = _replace_toml_block_value(text, "[Mfa]", "RequireWebAuthnForMax", "true" if new_mfa_webauthn_for_max else "false")
+    CONFIG_FILE.write_text(text, encoding="utf-8")
+    CONFIG_FILE.chmod(0o600)
+    out("MFA 配置已更新，注意：需要手动重启实例才能生效")
+
+
 def submenu_config() -> None:
     state = load_state()
     if not state:
@@ -986,6 +1029,7 @@ def submenu_config() -> None:
         ("修改公开地址", action_change_url),
         ("修改端口", action_change_ports),
         ("修改 SMTP 邮件配置", action_change_smtp),
+        ("修改 MFA 配置", action_change_mfa),
         ("修改 Max 账号密码", lambda: action_reset_password("max")),
         ("修改 Admin 账号密码", lambda: action_reset_password("admin")),
     ]

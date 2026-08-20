@@ -373,8 +373,10 @@ public class MfaConfig
     public string[] Origins { get; set; } = ["http://localhost:5173"];
     [ConfigRange(1, 30)]
     public int ChallengeLifetimeMinutes { get; set; } = 5;
-    public bool RequireForAdmin { get; set; } = true;
-    public bool RequireWebAuthnForMax { get; set; } = true;
+    [ConfigDescription("Admin 及以上角色登录时是否强制要求 MFA（默认关闭，生产环境建议开启）")]
+    public bool RequireForAdmin { get; set; } = false;
+    [ConfigDescription("Max 角色是否强制使用 WebAuthn（需 HTTPS 环境；HTTP/局域网部署请关闭）")]
+    public bool RequireWebAuthnForMax { get; set; } = false;
 }
 
 [ConfigFile("pylai.toml")]

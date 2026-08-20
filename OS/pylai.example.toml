@@ -305,10 +305,14 @@ MaxFailures = 10
 BanDurationHours = 24
 
 # 高权限账户 MFA
+# 注意：WebAuthn / Passkey 仅在安全上下文（HTTPS 或 localhost）可用。
+# HTTP/局域网 IP 部署时，Max 强制 WebAuthn 会导致无法登录，请关闭 RequireWebAuthnForMax。
 [Mfa]
 RelyingPartyId = "localhost"
 RelyingPartyName = "Pylaios"
 Origins = ["http://localhost:5173"]
 ChallengeLifetimeMinutes = 5
-RequireForAdmin = true
-RequireWebAuthnForMax = true
+# Admin 及以上角色登录时是否强制要求 MFA（默认关闭，生产环境建议开启）
+RequireForAdmin = false
+# Max 角色是否强制使用 WebAuthn（需 HTTPS 环境；HTTP/局域网部署请关闭）
+RequireWebAuthnForMax = false
