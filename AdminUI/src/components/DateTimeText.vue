@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { formatUtc8 } from '@/utils/time'
-
-const props = withDefaults(defineProps<{
-  value?: string | number | Date | null
+defineProps<{
+  value: string | null | undefined
   empty?: string
-}>(), {
-  empty: '—'
-})
+}>()
 
-const text = computed(() => formatUtc8(props.value) ?? props.empty)
+function fmt(v: string | null | undefined): string {
+  if (!v) return ''
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  return d.toLocaleString('zh-CN', { hour12: false })
+}
 </script>
 
 <template>
-  <span class="mono time-text">{{ text }}</span>
+  <span class="mono small muted">{{ value ? fmt(value) : (empty || '—') }}</span>
 </template>

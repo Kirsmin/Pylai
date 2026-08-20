@@ -11,22 +11,21 @@ const themeStore = useThemeStore()
 
 const themeOverrides = {
   common: {
-    fontFamily: "'AppFont', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
-    fontFamilyMono: "'AppFont', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+    fontFamily: "'AppFont', system-ui, -apple-system, sans-serif",
+    fontFamilyMono: "'AppFont', ui-monospace, monospace",
+    primaryColor: '#18a058',
+    primaryColorHover: '#0e7a3d',
+    primaryColorPressed: '#0a5c2e',
   }
 }
 
 const userGroup = computed(() => authStore.group)
 
-watch(
-  userGroup,
-  (group, prev) => {
-    const root = document.documentElement
-    if (prev) root.classList.remove(`user-group-${prev}`)
-    if (group) root.classList.add(`user-group-${group}`)
-  },
-  { immediate: true }
-)
+watch(userGroup, (group, prev) => {
+  const root = document.documentElement
+  if (prev) root.classList.remove(`user-group-${prev}`)
+  if (group) root.classList.add(`user-group-${group}`)
+}, { immediate: true })
 </script>
 
 <template>
@@ -35,7 +34,7 @@ watch(
       <NDialogProvider>
         <template v-if="!authStore.initialized">
           <div class="boot-loading">
-            <NSpin />
+            <NSpin size="medium" />
           </div>
         </template>
         <template v-else-if="!authStore.isAuthenticated">
@@ -43,7 +42,11 @@ watch(
         </template>
         <template v-else>
           <AdminLayout>
-            <router-view />
+            <router-view v-slot="{ Component }">
+              <transition name="page" mode="out-in">
+                <component :is="Component" />
+              </transition>
+            </router-view>
           </AdminLayout>
         </template>
       </NDialogProvider>
@@ -53,11 +56,17 @@ watch(
 
 <style scoped>
 .boot-loading {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
   background: var(--page-bg);
+}
+.page-enter-active, .page-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.page-enter-from {
+  opacity: 0; transform: translateY(6px);
+}
+.page-leave-to {
+  opacity: 0; transform: translateY(-4px);
 }
 </style>
