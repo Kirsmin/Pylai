@@ -248,10 +248,10 @@ def main() -> None:
 
     remap_config()
     setup_dp_kek()
+    run(["chown", "-R", "pylai:pylai", "/var/lib/pylai"])
+
     setup_postgres()
     setup_redis()
-
-    run(["chown", "-R", "pylai:pylai", "/var/lib/pylai"])
 
     bootstrap()
 
