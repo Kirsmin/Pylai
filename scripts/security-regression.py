@@ -4,6 +4,8 @@
 真实发起 100 个并发 /api/auth/register/create 请求，验收：
   1 个成功，99 个 HTTP 409 duplicate；
   所有失败响应体不得包含成功者 UID。
+
+适配新 API 响应协议（已移除顶层 success 字段，以 HTTP 状态码表达结果）。
 """
 from __future__ import annotations
 
@@ -86,8 +88,9 @@ def main() -> int:
         return 1
     token = init_data["sessionToken"]
 
+    # 新 API：成功返回 200，不再包含 success 字段
     status, data, body = post(base, "/api/auth/register/send-email-code", {"sessionToken": token, "email": email})
-    if status != 200 or not data or not data.get("success"):
+    if status != 200:
         print(json.dumps({"success": False, "stage": "send-email-code", "status": status, "body": body[:300]}, ensure_ascii=False))
         return 1
 
@@ -97,12 +100,12 @@ def main() -> int:
         return 1
 
     status, data, body = post(base, "/api/auth/register/verify-email", {"sessionToken": token, "code": code})
-    if status != 200 or not data or not data.get("success"):
+    if status != 200:
         print(json.dumps({"success": False, "stage": "verify-email", "status": status, "body": body[:300]}, ensure_ascii=False))
         return 1
 
     status, data, body = post(base, "/api/auth/register/check-username", {"sessionToken": token, "username": username})
-    if status != 200 or not data or not data.get("success"):
+    if status != 200:
         print(json.dumps({"success": False, "stage": "check-username", "status": status, "body": body[:300]}, ensure_ascii=False))
         return 1
 
@@ -117,7 +120,8 @@ def main() -> int:
         for future in as_completed(futures):
             results.append(future.result())
 
-    success = [r for r in results if r[0] == 200 and r[1] and r[1].get("success")]
+    # 新 API：成功返回 200 + { uid, ... }，冲突返回 409
+    success = [r for r in results if r[0] == 200 and r[1] and r[1].get("uid")]
     conflicts = [r for r in results if r[0] == 409]
     others = [r for r in results if r[0] not in (200, 409)]
 
@@ -141,3 +145,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

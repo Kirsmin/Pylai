@@ -1,6 +1,5 @@
 name: CI — 构建 + Dev 镜像
 
-
 on:
   push:
     branches: [main, master]
@@ -51,6 +50,8 @@ jobs:
           set -euo pipefail
           cp pylai.example.toml /tmp/pylai-valid.toml
           printf '%064d' 1 > /tmp/pylai-signing-kek
+          openssl rand 32 > /tmp/pylai-dp-kek
+          export PYLAI_DP_KEK_FILE=/tmp/pylai-dp-kek
           CI_PEPPER=$(openssl rand -hex 32)
           CI_PFX_PASS=$(openssl rand -hex 16)
           export CI_PEPPER CI_PFX_PASS
@@ -127,7 +128,7 @@ jobs:
         working-directory: UI
         run: |
           pnpm install --frozen-lockfile
-          pnpm build
+          VITE_SUPPORT_EMAIL="ci@pylaios.local" pnpm build
 
       - name: Build AdminUI
         working-directory: AdminUI
@@ -196,11 +197,14 @@ jobs:
           USER_PW=$(awk -F= '/^USER_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")
           ADMIN_PW=$(awk -F= '/^ADMIN_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")
           [ -n "$USER_PW" ] && [ -n "$ADMIN_PW" ] || { echo "==> 无法从 .secrets 读取凭据"; exit 1; }
+
+          # 普通用户登录：新 API 格式返回 200 + { uid, name, ... }，不再包含 success 字段
           NORMAL_LOGIN=$(curl -sf --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"usernameOrEmail\":\"user@pylaios.local\",\"password\":\"$USER_PW\"}")
-          echo "$NORMAL_LOGIN" | grep -q '"success":true' || { echo "普通用户登录失败"; echo "$NORMAL_LOGIN"; exit 1; }
+          echo "$NORMAL_LOGIN" | grep -q '"uid"' || { echo "普通用户登录失败"; echo "$NORMAL_LOGIN"; exit 1; }
 
+          # Admin 登录应被 MFA 门禁拦截（返回 422 + errorCode）
           ADMIN_LOGIN=$(curl -s --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"usernameOrEmail\":\"admin@pylaios.local\",\"password\":\"$ADMIN_PW\"}")
@@ -211,3 +215,4 @@ jobs:
           python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
 
           docker rm -f smoke >/dev/null 2>&1
+
