@@ -41,6 +41,7 @@ public sealed class SigningKeyCommands
         [Option("rotation-days", Description = "轮换周期（天）")] int rotationDays = 90,
         [Option("validation-days", Description = "旧密钥保留验证天数")] int validationDays = 180,
         [Option("if-empty", Description = "仅当没有可用密钥时创建/轮换")] bool ifEmpty = false,
+        [Option("force", Description = "强制轮换，忽略现有可用密钥（用于 KEK 更换后重建密钥库）")] bool force = false,
         [Option("mfa-user", Description = "已配置 MFA 的高权限账户（用户名或邮箱）")] string? mfaUser = null,
         [Option("mfa-code", Description = "该账户 TOTP 验证码")] string? mfaCode = null)
     {
@@ -50,7 +51,7 @@ public sealed class SigningKeyCommands
             return await CliHelpers.ErrorAsync("--validation-days 必须在 1-7300 之间。");
 
         var status = await SigningKeyService.GetStatusAsync(_ctx.Db);
-        if (ifEmpty && status.Any(k => k.UsableNow))
+        if (!force && ifEmpty && status.Any(k => k.UsableNow))
         {
             return await CliHelpers.OkAsync(new { success = true, rotated = false, message = "已有可用签名密钥，无需轮换。" });
         }
@@ -72,7 +73,7 @@ public sealed class SigningKeyCommands
                 return await CliHelpers.ErrorAsync("MFA 验证失败，签名密钥未轮换。");
         }
 
-        var rotated = await SigningKeyService.RotateIfDueAsync(_ctx.Db, _ctx.Config, rotationDays, validationDays);
+        var rotated = await SigningKeyService.RotateIfDueAsync(_ctx.Db, _ctx.Config, rotationDays, validationDays, force);
 
         await CliHelpers.LogAsync(_ctx, "cli:key rotate", true,
             rotated ? $"签名密钥已轮换 rotationDays={rotationDays} validationDays={validationDays}" : "签名密钥未到期，未轮换",

@@ -28,7 +28,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        postgresql redis-server nginx supervisor openssl \
+        postgresql redis-server nginx supervisor openssl python3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ui /ui/dist /opt/pylai/ui
@@ -40,7 +40,7 @@ COPY OS/pylai.example.toml /opt/pylai/pylai.example.toml
 COPY dev/entrypoint.sh /usr/local/bin/pylai-dev-entrypoint
 COPY dev/nginx.conf /etc/nginx/sites-available/pylai-dev
 COPY dev/supervisord.conf /etc/supervisor/conf.d/pylai.conf
-COPY deploy/entrypoint.sh /usr/local/bin/pylai-entrypoint
+COPY deploy/entrypoint.py /usr/local/bin/pylai-entrypoint
 COPY deploy/nginx.conf /etc/nginx/sites-available/pylai-server
 COPY deploy/supervisord.conf /etc/supervisor/conf.d/pylai-server.conf
 

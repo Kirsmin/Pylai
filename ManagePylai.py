@@ -1326,6 +1326,11 @@ def uninstall() -> None:
     if container_exists():
         docker("stop", "-t", "30", CONTAINER, check=False, timeout=120)
         docker("rm", "-f", CONTAINER, check=False)
+
+    # 强制清理命名卷，防止旧数据库残留导致新安装 KEK 不匹配
+    for vol in ("pylai_data", "pylai_pgdata"):
+        docker("volume", "rm", "-f", vol, check=False)
+
     image = state.get("image")
     if image:
         docker("rmi", image, check=False)

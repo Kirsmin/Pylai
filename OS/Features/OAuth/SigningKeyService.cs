@@ -48,6 +48,11 @@ public static class SigningKeyService
 
         if (certificates.Count == 0)
         {
+            var hasEncryptedKeys = db.SigningKeys.Any(k => k.EncryptedCertificateData != null);
+            if (hasEncryptedKeys)
+                throw new InvalidOperationException(
+                    "数据库中存在签名密钥记录，但均无法被当前 KEK 解密。可能原因：KEK 文件已被更换，但数据库来自旧实例。请执行 key rotate --force 或清理数据库后重试。");
+
             throw new InvalidOperationException(
                 "数据库中没有可用的加密签名密钥，拒绝启动。请先执行: Pylaios key reencrypt 或 key rotate --if-empty");
         }
@@ -75,7 +80,7 @@ public static class SigningKeyService
     }
 
     public static async Task<bool> RotateIfDueAsync(
-        ApplicationDbContext db, MainConfig config, int rotationDays, int validationDays)
+        ApplicationDbContext db, MainConfig config, int rotationDays, int validationDays, bool force = false)
     {
         var protector = SigningKeyProtector.Load(config);
         var now = DateTimeOffset.UtcNow;
@@ -84,7 +89,7 @@ public static class SigningKeyService
             .OrderByDescending(k => k.CreatedAt)
             .FirstOrDefaultAsync();
 
-        if (newest is not null && (now - newest.CreatedAt).TotalDays < rotationDays)
+        if (!force && newest is not null && (now - newest.CreatedAt).TotalDays < rotationDays)
             return false;
 
         await using var tx = await db.Database.BeginTransactionAsync();
@@ -93,7 +98,7 @@ public static class SigningKeyService
             .OrderByDescending(k => k.CreatedAt)
             .FirstOrDefaultAsync();
 
-        if (currentNewest is not null && (now - currentNewest.CreatedAt).TotalDays < rotationDays)
+        if (!force && currentNewest is not null && (now - currentNewest.CreatedAt).TotalDays < rotationDays)
             return false;
 
         var certificate = GenerateSelfSignedCertificate();
@@ -191,9 +196,18 @@ public static class SigningKeyService
                 continue;
             }
 
-            var pfx = protector.Unprotect(key.EncryptedCertificateData, key.EncryptionNonce, key.EncryptionTag, key.Thumbprint);
-            certificates.Add(X509CertificateLoader.LoadPkcs12(
-                pfx, null, X509KeyStorageFlags.EphemeralKeySet));
+            try
+            {
+                var pfx = protector.Unprotect(key.EncryptedCertificateData, key.EncryptionNonce, key.EncryptionTag, key.Thumbprint);
+                certificates.Add(X509CertificateLoader.LoadPkcs12(
+                    pfx, null, X509KeyStorageFlags.EphemeralKeySet));
+            }
+            catch (CryptographicException)
+            {
+                // 当前 KEK 与加密该记录时的 KEK 不匹配（常见原因：重新安装后命名卷残留旧数据库）。
+                // 静默跳过，由上层区分"无密钥"和"有密钥但全部解密失败"并给出清晰错误。
+                continue;
+            }
         }
 
         return certificates;
