@@ -111,12 +111,6 @@ public class RegisterController : ControllerBase
             return BadRequest(new SendEmailCodeResponse { Success = false, Error = "邮箱地址格式不正确。", ErrorCode = "invalid_format" });
         }
 
-        if (await _context.IsEmailTakenAsync(request.Email))
-        {
-            _logger.LogWarning("邮箱已被占用 | {Email}", request.Email);
-            return StatusCode(403, new SendEmailCodeResponse { Success = false, Error = "邮箱验证已被限制，请稍后重试。", ErrorCode = "banned" });
-        }
-
         if (session.EmailChangeCount >= 2)
         {
             _logger.LogWarning("邮箱更换已达上限 | 次数:{Changes}", session.EmailChangeCount);
@@ -138,6 +132,17 @@ public class RegisterController : ControllerBase
         session.EmailCodeAttempts = 0;
         session.Step = 2;
         await _sessionService.UpdateSessionAsync(request.SessionToken, session);
+
+        if (await _context.IsEmailTakenAsync(request.Email))
+        {
+            _logger.LogWarning("邮箱已被占用 | {Email}（等效正常流程处理，不触发真实发送）", request.Email);
+            await Task.Delay(Random.Shared.Next(150, 300));
+            return Ok(new SendEmailCodeResponse
+            {
+                Success = true,
+                ChangesRemaining = 2 - session.EmailChangeCount
+            });
+        }
 
         var dummy = new User();
         try

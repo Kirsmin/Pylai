@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 
 namespace Pylaios.Features.Auth;
 
@@ -151,13 +152,33 @@ public class LoginController : ControllerBase
         var passwordResult = _passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
         if (passwordResult == PasswordVerificationResult.Failed)
         {
-            _logger.LogDebug("密码验证失败 | uid:{Uid} | 尝试:{Attempts}", user.Uid, user.AccessFailedCount + 1);
+            var now = DateTimeOffset.UtcNow;
+            var lockout = _config.Identity.Lockout;
+            var lockoutEnd = now.Add(TimeSpan.FromMinutes(lockout.DefaultTimeoutMinutes));
 
-            user.AccessFailedCount = Math.Min(user.AccessFailedCount + 1, 31);
-            user.LockoutEnd = null;
-            await _context.SaveChangesAsync();
+            await _context.Users
+                .Where(x => x.Uid == user.Uid)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(u => u.AccessFailedCount,
+                        u => u.LockoutEnd != null && u.LockoutEnd <= now ? 1 : u.AccessFailedCount + 1)
+                    .SetProperty(u => u.LockoutEnd,
+                        u => u.LockoutEnd != null && u.LockoutEnd <= now ? (DateTimeOffset?)null : u.LockoutEnd));
+
+            var currentCount = await _context.Users.AsNoTracking()
+                .Where(x => x.Uid == user.Uid)
+                .Select(x => x.AccessFailedCount)
+                .FirstAsync();
+
+            if (currentCount >= lockout.MaxFailedAttempts)
+            {
+                await _context.Users
+                    .Where(x => x.Uid == user.Uid && (x.LockoutEnd == null || x.LockoutEnd <= now))
+                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.LockoutEnd, lockoutEnd));
+            }
+
+            _logger.LogDebug("密码验证失败 | uid:{Uid} | 尝试:{Attempts}", user.Uid, currentCount);
             var fr4 = await _loginRateLimitService.RecordFailureAsync(ip);
-            var delayMs = Math.Min(2000, 100 * (1 << Math.Min(user.AccessFailedCount - 1, 4)))
+            var delayMs = Math.Min(2000, 100 * (1 << Math.Min(currentCount - 1, 4)))
                 + Random.Shared.Next(0, 100);
             await Task.Delay(delayMs);
             _logger.LogDebug("密码错误 | 递增延迟:{DelayMs}ms", delayMs);
@@ -171,12 +192,16 @@ public class LoginController : ControllerBase
             _logger.LogDebug("密码重哈希完成 | uid:{Uid}", user.Uid);
         }
 
-        user.AccessFailedCount = 0;
-        user.LockoutEnd = null;
         user.LastLoginAt = DateTimeOffset.UtcNow;
 
         await _context.SaveChangesAsync();
 
+        await _context.Users
+            .Where(x => x.Uid == user.Uid)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(u => u.AccessFailedCount, 0)
+                .SetProperty(u => u.LockoutEnd, (DateTimeOffset?)null)
+                .SetProperty(u => u.LastLoginAt, DateTimeOffset.UtcNow));
 
         await _loginRateLimitService.ClearFailuresAsync(ip);
 

@@ -270,6 +270,7 @@ public class AccountController : ControllerBase
         }
         await _emailCodeService.RemoveAsync(key);
         await _emailCodeService.RemoveAsync($"change-email:{user.Uid}");
+        await _userAccessRevoker.RevokeUserAccessAsync(user.Uid, revokeUserToken: true);
 
         _logger.LogInformation("邮箱更换成功 | uid:{Uid} | {Email}", user.Uid, result.Entry.Email);
 

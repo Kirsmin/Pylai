@@ -115,6 +115,8 @@ public class ApplicationDbContext : DbContext
                   .IsUnique()
                   .HasDatabaseName("UX_UserToken_ActiveUser")
                   .HasFilter("\"RevokedAt\" IS NULL");
+            // 注意：该过滤索引为 PostgreSQL 专有语法（部分索引 + 双引号标识符），
+            // 项目只支持 PostgreSQL，不支持其他数据库。
         });
 
         builder.Entity<UserTokenUsage>(entity =>
@@ -255,6 +257,8 @@ public class ApplicationDbContext : DbContext
                   .IsUnique()
                   .HasDatabaseName("UX_OpenIddictAuthorizations_ActiveUserClient")
                   .HasFilter("\"Status\" = 'valid' AND \"Type\" = 'permanent'");
+            // 注意：该过滤索引为 PostgreSQL 专有语法（部分索引 + 双引号标识符），
+            // 项目只支持 PostgreSQL，不支持其他数据库。
         });
     }
 }

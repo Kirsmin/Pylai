@@ -205,6 +205,10 @@ function openPassword(user: AdminUserListItem) {
 
 async function savePassword() {
   if (!newPassword.value) return
+  if (newPassword.value.length < 12) {
+    message.warning('新密码至少 12 个字符')
+    return
+  }
   passwordSaving.value = true
   try {
     await authStore.request(`/api/admin/users/${encodeURIComponent(passwordUid.value)}/reset-password`, {

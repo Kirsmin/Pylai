@@ -12,6 +12,8 @@ public class AuditService : IAuditService, IHostedService
 {
     private static readonly TimeSpan[] RetryDelays = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30)];
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
+    private const long MaxFallbackFileBytes = 100L * 1024 * 1024;
+    private static readonly TimeSpan FallbackRetention = TimeSpan.FromDays(30);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AuditService> _logger;
@@ -131,7 +133,8 @@ public class AuditService : IAuditService, IHostedService
         {
             var dir = Path.Combine(AppContext.BaseDirectory, "Logs");
             Directory.CreateDirectory(dir);
-            var file = Path.Combine(dir, $"audit-failed-{DateTimeOffset.UtcNow:yyyyMMdd}.jsonl");
+            CleanupOldFallbackFiles(dir);
+            var file = SelectFallbackFile(dir);
 
             await using var writer = new StreamWriter(file, append: true);
             foreach (var entry in batch)
@@ -144,6 +147,50 @@ public class AuditService : IAuditService, IHostedService
         catch (Exception ex)
         {
             _logger.LogError(ex, "审计日志文件 fallback 写入失败（{Count} 条）", batch.Count);
+        }
+    }
+
+    /// <summary>
+    /// 单个 fallback 文件达到 100MB 时滚动：先写 audit-failed-yyyyMMdd.jsonl，
+    /// 写满后依次滚动为 audit-failed-yyyyMMdd-1.jsonl、-2.jsonl …（seq 从 1 递增）。
+    /// </summary>
+    private static string SelectFallbackFile(string dir)
+    {
+        var today = DateTimeOffset.UtcNow.ToString("yyyyMMdd");
+        var baseFile = Path.Combine(dir, $"audit-failed-{today}.jsonl");
+        if (!File.Exists(baseFile) || new FileInfo(baseFile).Length < MaxFallbackFileBytes)
+            return baseFile;
+
+        for (var seq = 1; ; seq++)
+        {
+            var file = Path.Combine(dir, $"audit-failed-{today}-{seq}.jsonl");
+            if (!File.Exists(file) || new FileInfo(file).Length < MaxFallbackFileBytes)
+                return file;
+        }
+    }
+
+    /// <summary>保留最近 30 天的 fallback 文件（audit-failed-*.jsonl），更旧的自动删除。</summary>
+    private static void CleanupOldFallbackFiles(string dir)
+    {
+        var cutoff = DateTimeOffset.UtcNow - FallbackRetention;
+        foreach (var file in Directory.EnumerateFiles(dir, "audit-failed-*.jsonl"))
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (!name.StartsWith("audit-failed-", StringComparison.Ordinal))
+                continue;
+            var datePart = name["audit-failed-".Length..];
+            var dash = datePart.IndexOf('-');
+            if (dash > 0)
+                datePart = datePart[..dash];
+            if (!DateTimeOffset.TryParseExact(datePart, "yyyyMMdd",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var date))
+                continue;
+            if (date < cutoff)
+            {
+                try { File.Delete(file); }
+                catch (Exception ex) { /* 删除失败不阻断写入 */ _ = ex; }
+            }
         }
     }
 }

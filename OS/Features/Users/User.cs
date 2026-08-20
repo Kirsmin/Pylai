@@ -26,6 +26,8 @@ public class User
     [MaxLength(256)]
     public string? NormalizedEmail { get; set; }
 
+    public bool EmailConfirmed { get; set; } = true;
+
     [Required]
     [MaxLength(32)]
     public string Group { get; set; } = AuthConstants.Roles.Normal;

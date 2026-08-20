@@ -187,9 +187,13 @@ public sealed class MfaService : IMfaService
             return false;
 
         var secret = _protector.Unprotect(settings.EncryptedTotpSecret);
-        if (!VerifyTotp(secret, code, DateTimeOffset.UtcNow))
+        var matchedCounter = VerifyTotp(secret, code, DateTimeOffset.UtcNow);
+        if (matchedCounter is null)
+            return false;
+        if (settings.LastTotpCounter.HasValue && matchedCounter.Value <= settings.LastTotpCounter.Value)
             return false;
 
+        settings.LastTotpCounter = matchedCounter;
         settings.LastVerifiedAt = DateTimeOffset.UtcNow;
         settings.UpdatedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
@@ -217,7 +221,7 @@ public sealed class MfaService : IMfaService
     public async Task<(bool Success, string? LoginTransactionId)> ConfirmTotpEnrollmentAsync(string enrollmentId, string code)
     {
         var enrollment = await _cache.GetAsync<MfaTotpEnrollment>(TotpPrefix + enrollmentId);
-        if (enrollment is null || !VerifyTotp(enrollment.Secret, code, DateTimeOffset.UtcNow))
+        if (enrollment is null || VerifyTotp(enrollment.Secret, code, DateTimeOffset.UtcNow) is null)
             return (false, null);
 
         var settings = await _context.UserMfaSettings.FirstOrDefaultAsync(x => x.UserUid == enrollment.UserUid);
@@ -422,10 +426,10 @@ public sealed class MfaService : IMfaService
         return result.ToString();
     }
 
-    private static bool VerifyTotp(string secret, string code, DateTimeOffset now)
+    private static long? VerifyTotp(string secret, string code, DateTimeOffset now)
     {
         if (code.Length != 6 || !int.TryParse(code, out _))
-            return false;
+            return null;
         var key = DecodeBase32(secret);
         var counter = now.ToUnixTimeSeconds() / 30;
         for (long offset = -1; offset <= 1; offset++)
@@ -433,9 +437,9 @@ public sealed class MfaService : IMfaService
             var expected = GenerateTotp(key, counter + offset);
             if (CryptographicOperations.FixedTimeEquals(
                     Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(code)))
-                return true;
+                return counter + offset;
         }
-        return false;
+        return null;
     }
 
     private static string GenerateTotp(byte[] key, long counter)

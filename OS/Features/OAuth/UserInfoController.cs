@@ -30,12 +30,12 @@ public class UserInfoController : Controller
         }
 
         var subject = result.Principal.GetClaim(Claims.Subject);
-        if (subject is not null && Guid.TryParse(subject, out var uid))
-        {
-            var active = await _context.Users.AnyAsync(u => u.Uid == uid && u.Status == UserStatus.Active);
-            if (!active)
-                return Challenge(OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
-        }
+        if (subject is null || !Guid.TryParse(subject, out var uid))
+            return await UnauthorizedJsonAsync();
+
+        var active = await _context.Users.AnyAsync(u => u.Uid == uid && u.Status == UserStatus.Active);
+        if (!active)
+            return await UnauthorizedJsonAsync();
 
         var claims = new Dictionary<string, object>(StringComparer.Ordinal)
         {
@@ -68,5 +68,13 @@ public class UserInfoController : Controller
         }
 
         return Ok(claims);
+    }
+
+    private async Task<IActionResult> UnauthorizedJsonAsync()
+    {
+        Response.StatusCode = 401;
+        Response.ContentType = "application/json";
+        await Response.WriteAsync("""{"success":false,"error":"Unauthorized","errorCode":"unauthorized"}""");
+        return new EmptyResult();
     }
 }

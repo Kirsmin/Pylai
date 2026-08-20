@@ -33,6 +33,11 @@ export async function api<T = ApiEnvelope>(path: string, init?: RequestInit): Pr
     redirect: 'manual'
   })
 
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+    const location = res.headers.get('location')
+    throw new ApiError('需要重定向', res.status, 'redirect_required', { success: false, location: location ?? '' })
+  }
+
   const data = (await res.json().catch(() => null)) as ApiEnvelope | null
   if (!res.ok) {
     throw new ApiError(data?.error || `请求失败 (${res.status})`, res.status, data?.errorCode, data ?? undefined)

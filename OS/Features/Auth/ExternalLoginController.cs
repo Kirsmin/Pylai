@@ -14,6 +14,7 @@ public class ExternalLoginController : ControllerBase
     private readonly IAuditService _auditService;
     private readonly MainConfig _config;
     private readonly IpResolutionService _ipResolver;
+    private readonly IMfaService _mfa;
     private readonly ILogger<ExternalLoginController> _logger;
 
     public ExternalLoginController(
@@ -23,6 +24,7 @@ public class ExternalLoginController : ControllerBase
         IAuditService auditService,
         MainConfig config,
         IpResolutionService ipResolver,
+        IMfaService mfa,
         ILogger<ExternalLoginController> logger)
     {
         _signInManager = signInManager;
@@ -31,6 +33,7 @@ public class ExternalLoginController : ControllerBase
         _auditService = auditService;
         _config = config;
         _ipResolver = ipResolver;
+        _mfa = mfa;
         _logger = logger;
     }
 
@@ -114,6 +117,13 @@ public class ExternalLoginController : ControllerBase
                 }
 
                 return Redirect($"{_config.Frontend.Url}/login");
+            }
+
+            if (!await _mfa.HasRecentStepUpAsync(currentUser.Uid))
+            {
+                _logger.LogWarning("外部登录绑定拒绝：未通过近期 Step-Up | uid:{Uid} | Provider:{Provider}",
+                    currentUser.Uid, provider);
+                return Redirect($"{_config.Frontend.Url}/login?error=mfa_step_up_required&provider={provider}");
             }
 
             var result = await _userManager.AddLoginAsync(currentUser, info);

@@ -6,6 +6,7 @@ public sealed class UserMfaSettings
     public bool TotpEnabled { get; set; }
     public string? EncryptedTotpSecret { get; set; }
     public DateTimeOffset? LastVerifiedAt { get; set; }
+    public long? LastTotpCounter { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

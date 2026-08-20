@@ -20,7 +20,7 @@ public interface IInviteCodeService
 
 public sealed class InviteCodeService : IpBanServiceBase<InviteCodeFailure>, IInviteCodeService
 {
-    private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*+-_";
+    private const string Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     private const int CodeLength = 10;
 
     private readonly InviteCodeConfig _config;

@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
-import { api } from '@/utils/api'
+import { api, ApiError } from '@/utils/api'
 
 
 
@@ -33,32 +33,9 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const isAuthenticated = computed(() => user.value !== null)
 
-
-  function persistToSession(u: User) {
-    sessionStorage.setItem('pylai_auth_user', JSON.stringify(u))
-  }
-
-
-  function persistToLocal(u: User | null, remember: boolean) {
-    if (remember && u) {
-      localStorage.setItem('pylai_auth_user', JSON.stringify(u))
-    } else {
-      localStorage.removeItem('pylai_auth_user')
-    }
-  }
-
-
-  function clearStorage() {
-    sessionStorage.removeItem('pylai_auth_user')
-    localStorage.removeItem('pylai_auth_user')
-  }
-
-  function login(userData: User, remember: boolean) {
+  function login(userData: User) {
     user.value = userData
-    persistToSession(userData)
-    persistToLocal(userData, remember)
   }
-
 
   async function logout() {
     try {
@@ -67,9 +44,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     }
     user.value = null
-    clearStorage()
   }
-
 
   async function validateSession(): Promise<boolean> {
     const controller = new AbortController()
@@ -78,49 +53,36 @@ export const useAuthStore = defineStore('auth', () => {
       const res = await apiFetch('/api/auth/account/sessions', {
         signal: controller.signal
       })
+      if (res.status === 401 || res.status === 403) {
+        user.value = null
+      }
       return res.ok
-    } catch {
-
-
-      return true
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        user.value = null
+      }
+      return false
     } finally {
       clearTimeout(timeoutId)
     }
   }
 
-
   async function init() {
-    let savedUser: string | null = null
-
-
-    savedUser = sessionStorage.getItem('pylai_auth_user')
-
-
-    if (!savedUser) {
-      savedUser = localStorage.getItem('pylai_auth_user')
-    }
-
-    if (!savedUser) return
-
-
-    let parsed: User
     try {
-      parsed = JSON.parse(savedUser)
+      const data = await api<{ authenticated?: boolean; name?: string; displayName?: string; uid?: string; group?: string; email?: string }>('/')
+      if (data.authenticated) {
+        user.value = {
+          uid: data.uid ?? '',
+          name: data.name ?? '',
+          displayName: data.displayName ?? data.name ?? '',
+          group: data.group ?? '',
+          email: data.email ?? ''
+        }
+        return
+      }
     } catch {
-      clearStorage()
-      return
     }
-
-
-    user.value = parsed
-
-
-    const valid = await validateSession()
-    if (!valid) {
-
-      user.value = null
-      clearStorage()
-    }
+    user.value = null
   }
 
   return { user, isAuthenticated, login, logout, init }

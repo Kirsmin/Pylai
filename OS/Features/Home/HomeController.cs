@@ -23,8 +23,11 @@ public class HomeController : Controller
             return Ok(new
             {
                 authenticated = true,
+                uid = user?.Uid,
                 name = User.Identity.Name,
-                displayName = user?.DisplayName ?? User.Identity.Name
+                displayName = user?.DisplayName ?? User.Identity.Name,
+                group = user?.Group,
+                email = user?.Email
             });
         }
 

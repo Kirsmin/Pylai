@@ -27,6 +27,9 @@ const returnUrl = ref('')
 
 function isSafeReturnUrl(url: string): boolean {
   if (url.startsWith('//')) return false
+  if (url.startsWith('\\')) return false
+  if (url.startsWith('javascript:')) return false
+  if (url.startsWith('data:')) return false
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) return false
   return url.startsWith('/')
 }
@@ -41,6 +44,8 @@ onMounted(() => {
       externalLoginError.value = '该第三方账号未绑定任何 Pylaios 账户，请先使用本地账户登录并绑定。'
     } else if (route.query.error === 'external_failed') {
       externalLoginError.value = '第三方登录失败，请重试。'
+    } else if (route.query.error === 'mfa_step_up_required') {
+      externalLoginError.value = '绑定第三方账号需要先完成安全验证，请先通过 MFA 验证后再试。'
     }
   }
   loadExternalProviders()
@@ -276,10 +281,10 @@ function finishLogin(data: any) {
     displayName: data.displayName as string,
     group: data.group as string,
     email: data.email as string
-  }, rememberMe.value)
+  })
   lockedOut.value = false
-  if (returnUrl.value) window.location.href = returnUrl.value
-  else router.push('/')
+  if (returnUrl.value) window.location.assign(returnUrl.value)
+  else window.location.assign('/')
 }
 
 async function beginTotpEnrollment() {

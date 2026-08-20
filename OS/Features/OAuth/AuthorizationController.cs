@@ -121,15 +121,14 @@ public class AuthorizationController : Controller
         {
             var authTime = User.FindFirst("auth_time")?.Value;
 
-            if (authTime is not null
-                && long.TryParse(authTime, out var authTimeEpoch))
+            var tooOld = authTime is null
+                || !long.TryParse(authTime, out var authTimeEpoch)
+                || DateTimeOffset.UtcNow.ToUnixTimeSeconds() - authTimeEpoch > request.MaxAge.Value;
+
+            if (tooOld)
             {
-                var authAge = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - authTimeEpoch;
-                if (authAge > request.MaxAge.Value)
-                {
-                    await _signInManager.SignOutAsync();
-                    return Redirect(BuildFrontendLoginUrl(request));
-                }
+                await _signInManager.SignOutAsync();
+                return Redirect(BuildFrontendLoginUrl(request));
             }
         }
 
@@ -318,7 +317,7 @@ public class AuthorizationController : Controller
         principal.SetResources(await _scopeManager.ListResourcesAsync(principal.GetScopes()).ToListAsync());
 
         ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(Claims.PreferredUsername, user.DisplayName ?? user.Name));
-        if (!string.IsNullOrEmpty(user.Email))
+        if (!string.IsNullOrEmpty(user.Email) && user.EmailConfirmed)
             ((ClaimsIdentity)principal.Identity!).AddClaim(new Claim(Claims.EmailVerified, "true"));
 
         var subject = await _userManager.GetUserIdAsync(user);

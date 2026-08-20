@@ -141,12 +141,13 @@ public class UserStore :
     public Task<bool> GetEmailConfirmedAsync(User user, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(true);
+        return Task.FromResult(user.EmailConfirmed);
     }
 
     public Task SetEmailConfirmedAsync(User user, bool confirmed, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        user.EmailConfirmed = confirmed;
         return Task.CompletedTask;
     }
 

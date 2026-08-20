@@ -24,13 +24,14 @@ public class AdminApiIpBanMiddleware
         }
 
         var ip = ipResolver.GetClientIp(context);
-        var (banned, _) = await rateLimit.IsIpBannedAsync(ip);
+        var (banned, banId) = await rateLimit.IsIpBannedAsync(ip);
         if (banned)
         {
             logger.LogWarning("管理 API IP 已封禁 | IP:{Ip} | Path:{Path}", ip, context.Request.Path);
-            context.Response.StatusCode = 401;
+            context.Response.StatusCode = 403;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync("""{"success":false,"error":"Unauthorized","errorCode":"unauthorized"}""");
+            var banIdJson = banId is null ? "null" : $"\"{banId}\"";
+            await context.Response.WriteAsync($$"""{"success":false,"error":"Forbidden","errorCode":"forbidden","banId":{{banIdJson}}}""");
             return;
         }
 

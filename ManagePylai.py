@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from urllib.parse import urlparse
@@ -163,7 +164,7 @@ def ensure_docker() -> None:
 def ensure_home() -> None:
     for path in (CONFIG_DIR, CERT_DIR, DATA_DIR, PG_DATA_DIR, BACKUP_DIR):
         path.mkdir(parents=True, exist_ok=True)
-    PG_DATA_DIR.chmod(0o777)
+    PG_DATA_DIR.chmod(0o700)
 
 
 def load_state() -> dict:
@@ -361,7 +362,7 @@ def generate_config(image: str, answers: dict) -> None:
     text = replace_one(text, 'AllowedHosts = ["localhost", "127.0.0.1"]',
                        f'AllowedHosts = {toml_string_list(allowed_hosts)}')
     text = replace_one(text, 'RelyingPartyId = "localhost"', f'RelyingPartyId = "{external_host}"')
-    text = replace_one(text, 'Origins = ["http://localhost:5173"]', f'Origins = {toml_string_list(cors_origins)}')
+    text = replace_one(text, 'Origins = ["http://localhost:5173"]', f'Origins = {toml_string_list(answers["cors_origins"])}')
 
     if answers["public_url"].startswith("https://"):
         text = replace_one(text, "RequireHttps = false", "RequireHttps = true") if "RequireHttps = false" in text else text
@@ -372,15 +373,12 @@ def generate_config(image: str, answers: dict) -> None:
         text = replace_one(text, 'SecurePolicy = "Always"', 'SecurePolicy = "SameAsRequest"')
 
     if answers["signing_pfx"]:
-        text = replace_one(text, '[OpenIddict.Certificates.Signing]\nPath = ""',
-                           f'[OpenIddict.Certificates.Signing]\nPath = "{answers["signing_pfx"]}"')
-        text = replace_one(text, f'[OpenIddict.Certificates.Signing]\nPath = "{answers["signing_pfx"]}"\nPassword = ""',
-                           f'[OpenIddict.Certificates.Signing]\nPath = "{answers["signing_pfx"]}"\nPassword = "{answers["signing_pfx_password"]}"')
+        # 段内键值替换（容忍段首行与键之间存在的注释行）
+        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Signing]", "Path", toml_string(answers["signing_pfx"]))
+        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Signing]", "Password", toml_string(answers["signing_pfx_password"]))
     if answers["encryption_pfx"]:
-        text = replace_one(text, '[OpenIddict.Certificates.Encryption]\nPath = ""',
-                           f'[OpenIddict.Certificates.Encryption]\nPath = "{answers["encryption_pfx"]}"')
-        text = replace_one(text, f'[OpenIddict.Certificates.Encryption]\nPath = "{answers["encryption_pfx"]}"\nPassword = ""',
-                           f'[OpenIddict.Certificates.Encryption]\nPath = "{answers["encryption_pfx"]}"\nPassword = "{answers["encryption_pfx_password"]}"')
+        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Encryption]", "Path", toml_string(answers["encryption_pfx"]))
+        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Encryption]", "Password", toml_string(answers["encryption_pfx_password"]))
 
     seed_blocks = [
         ("Seeds.DefaultAdmin", "admin_email", "admin_password", "Administrator"),
@@ -420,6 +418,11 @@ def generate_config(image: str, answers: dict) -> None:
         text = text[:smtp_start] + smtp_block + text[smtp_end:]
 
     ensure_home()
+    # Fail Closed：写出前用 tomllib 校验整体为合法 TOML，避免结构错误带病落地
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ManageError(f"生成的 pylai.toml 不是合法 TOML（模板或生成逻辑问题）: {exc}") from exc
     CONFIG_FILE.write_text(text, encoding="utf-8")
     CONFIG_FILE.chmod(0o600)
 
@@ -685,6 +688,10 @@ def start_container(image: str, answers: dict, read_only: bool = True) -> None:
     cmd += [
         "--cap-drop", "ALL",
         "--cap-add", "CHOWN",
+        # 单容器回退形态：容器 root 需要读取宿主 ~/.pylai/config（0600/0700）的
+        # 配置与证书 bind 挂载（无 DAC_OVERRIDE 时容器 root 按 other 位无法读取），
+        # 且 postgres 需对命名 volume 执行 chown。DAC_OVERRIDE/FOWNER 是单容器
+        # 部署的代价（生产升级为 compose 拆分后可移除）。
         "--cap-add", "DAC_OVERRIDE",
         "--cap-add", "FOWNER",
         "--cap-add", "SETGID",
@@ -698,8 +705,10 @@ def start_container(image: str, answers: dict, read_only: bool = True) -> None:
         "-p", f"{answers['public_port']}:80",
         "-p", f"127.0.0.1:{answers['api_port']}:5000",
         "-v", f"{CONFIG_DIR}:/etc/pylai",
-        "-v", f"{DATA_DIR}:/var/lib/pylai",
-        "-v", f"{PG_DATA_DIR}:/var/lib/postgresql",
+        # 写目录改用命名 volume（宿主目录为 0700 时容器内 root 无 DAC_OVERRIDE 无法写入；
+        # 命名 volume 由 Docker 管理，owner 随镜像内目录，可正常 chown/写入）
+        "-v", "pylai_data:/var/lib/pylai",
+        "-v", "pylai_pgdata:/var/lib/postgresql",
         "-e", "PYLAI_ROLE=server",
         "-e", f"PYLAI_UI_URL={answers['public_url']}",
         "-e", f"PYLAI_DB_USER={answers['db_user']}",

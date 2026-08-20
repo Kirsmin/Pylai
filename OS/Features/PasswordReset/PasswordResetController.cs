@@ -90,8 +90,7 @@ public class PasswordResetController : ControllerBase
         }
         else
         {
-            // Keep the response and Redis shape identical for unknown accounts.
-            await _emailCodeService.CreateAsync(transactionKey, null);
+            // 邮箱不存在：不创建验证码条目、不发送邮件，仅保持响应形状一致（防时序侧信道）。
         }
 
         return Ok(new ForgotPasswordResponse { Success = true, TransactionId = transactionId });

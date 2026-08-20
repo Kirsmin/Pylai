@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using System.Net;
+using System.Xml;
+using System.Xml.Linq;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -26,9 +28,36 @@ public class ClientService : IClientService
     private readonly ApplicationDbContext _context;
 
     private const long MaxLogoSize = 2 * 1024 * 1024;
+    private const string SvgContentType = "image/svg+xml";
     private static readonly HashSet<string> AllowedLogoTypes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "image/svg+xml", "image/png"
+        SvgContentType, "image/png"
+    };
+
+    private static readonly HashSet<string> SafeSvgElements = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+        "text", "textPath", "tspan", "defs", "linearGradient", "radialGradient", "stop",
+        "pattern", "clipPath", "mask", "use", "image", "marker", "symbol", "title", "desc"
+    };
+
+    private static readonly HashSet<string> SafeSvgAttributes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "d", "x", "y", "cx", "cy", "r", "rx", "ry", "width", "height", "points",
+        "viewBox", "transform", "preserveAspectRatio",
+        "fill", "fill-rule", "fill-opacity",
+        "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+        "stroke-dasharray", "stroke-dashoffset", "stroke-miterlimit", "stroke-opacity",
+        "opacity", "clip-rule",
+        "font-size", "font-family", "font-weight", "font-style", "text-anchor",
+        "letter-spacing", "word-spacing", "textLength", "lengthAdjust",
+        "dominant-baseline", "text-decoration", "startOffset",
+        "stop-color", "stop-opacity", "offset",
+        "gradientUnits", "gradientTransform", "spreadMethod",
+        "patternUnits", "patternTransform", "patternContentUnits",
+        "clipPathUnits", "maskUnits", "maskContentUnits",
+        "refX", "refY", "markerWidth", "markerHeight", "markerUnits", "orient",
+        "id", "version", "href"
     };
 
 
@@ -309,11 +338,8 @@ public class ClientService : IClientService
         if (actualType is null)
             throw new InvalidOperationException("Logo 文件内容不是有效的 SVG 或 PNG 图片。");
 
-        if (actualType == "image/svg+xml"
-            && !IsSafeSvg(System.Text.Encoding.UTF8.GetString(bytes)))
-        {
-            throw new InvalidOperationException("Logo SVG 包含脚本或事件处理器，已拒绝。");
-        }
+        if (actualType == SvgContentType)
+            bytes = SanitizeSvg(bytes);
 
         meta.Logo = bytes;
         meta.LogoContentType = actualType;
@@ -322,15 +348,88 @@ public class ClientService : IClientService
         return true;
     }
 
-    private static readonly System.Text.RegularExpressions.Regex SvgEventAttrRegex =
-        new(@"\son\w+\s*=", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex UrlRefRegex = new(
+        @"url\(\s*['""]?([^'""\)]+)['""]?\s*\)",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    private static readonly HashSet<string> SafeSvgTags = new(StringComparer.OrdinalIgnoreCase)
+    private static byte[] SanitizeSvg(byte[] bytes)
     {
-        "svg", "g", "defs", "symbol", "use", "path", "rect", "circle", "ellipse",
-        "line", "polyline", "polygon", "text", "tspan", "title", "desc",
-        "linearGradient", "radialGradient", "stop", "clipPath", "mask", "pattern"
-    };
+        try
+        {
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                IgnoreComments = true,
+                IgnoreProcessingInstructions = true,
+                MaxCharactersInDocument = MaxLogoSize
+            };
+
+            using var stream = new MemoryStream(bytes);
+            using var reader = XmlReader.Create(stream, settings);
+            var doc = XDocument.Load(reader);
+
+            var root = doc.Root;
+            if (root is null || !root.Name.LocalName.Equals("svg", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Logo SVG 根元素必须是 <svg>。");
+
+            foreach (var element in root.DescendantsAndSelf())
+            {
+                if (!SafeSvgElements.Contains(element.Name.LocalName))
+                    throw new InvalidOperationException($"Logo SVG 包含不允许的元素 <{element.Name.LocalName}>。");
+
+                foreach (var attr in element.Attributes())
+                {
+                    if (attr.IsNamespaceDeclaration)
+                        continue;
+                    if (!SafeSvgAttributes.Contains(attr.Name.LocalName))
+                        throw new InvalidOperationException($"Logo SVG 包含不允许的属性 {attr.Name.LocalName}。");
+                    if (!IsSafeSvgAttributeValue(attr))
+                        throw new InvalidOperationException($"Logo SVG 属性 {attr.Name.LocalName} 包含不允许的值。");
+                }
+            }
+
+            using var output = new MemoryStream();
+            using (var writer = XmlWriter.Create(output, new XmlWriterSettings
+            {
+                Encoding = new System.Text.UTF8Encoding(false),
+                Indent = false,
+                OmitXmlDeclaration = true
+            }))
+            {
+                doc.Save(writer);
+            }
+            return output.ToArray();
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (XmlException ex)
+        {
+            throw new InvalidOperationException($"Logo SVG 内容解析失败，已拒绝: {ex.Message}");
+        }
+    }
+
+    private static bool IsSafeSvgAttributeValue(XAttribute attr)
+    {
+        var value = attr.Value.Trim();
+
+        if (attr.Name.LocalName.Equals("href", StringComparison.OrdinalIgnoreCase))
+        {
+            return value.StartsWith('#')
+                || value.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        foreach (System.Text.RegularExpressions.Match match in UrlRefRegex.Matches(value))
+        {
+            var target = match.Groups[1].Value.Trim();
+            if (!target.StartsWith('#') && !target.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
 
     private static string? DetectImageType(byte[] bytes)
     {
@@ -343,50 +442,10 @@ public class ClientService : IClientService
         {
             var head = System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(512, bytes.Length));
             if (head.Contains("<svg", StringComparison.OrdinalIgnoreCase))
-                return "image/svg+xml";
+                return SvgContentType;
         }
 
         return null;
-    }
-
-    private static bool IsSafeSvg(string content)
-    {
-        if (content.Contains("<script", StringComparison.OrdinalIgnoreCase)
-            || content.Contains("javascript:", StringComparison.OrdinalIgnoreCase)
-            || SvgEventAttrRegex.IsMatch(content))
-        {
-            return false;
-        }
-
-        try
-        {
-            var doc = System.Xml.Linq.XDocument.Parse(content);
-            foreach (var element in doc.Descendants())
-            {
-                if (!SafeSvgTags.Contains(element.Name.LocalName))
-                    return false;
-
-                foreach (var attr in element.Attributes())
-                {
-                    var name = attr.Name.LocalName;
-                    if (name.StartsWith("on", StringComparison.OrdinalIgnoreCase)
-                        || name.Equals("style", StringComparison.OrdinalIgnoreCase))
-                        return false;
-
-                    if (name is "href" or "src")
-                    {
-                        var trimmed = attr.Value.Trim();
-                        if (!trimmed.StartsWith('#'))
-                            return false;
-                    }
-                }
-            }
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     public async Task<bool> DeleteLogoAsync(string id, CancellationToken ct = default)

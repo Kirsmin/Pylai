@@ -9,9 +9,6 @@ public class UserTokenOptions : AuthenticationSchemeOptions { }
 
 public class UserTokenAuthHandler : AuthenticationHandler<UserTokenOptions>
 {
-    private const string Prefix = "UserToken";
-    private const int ExpectedKeyLength = 128;
-
     private readonly IUserTokenService _tokenService;
     private readonly IpResolutionService _ipResolver;
     private readonly ILogger<UserTokenAuthHandler> _logger;
@@ -40,7 +37,8 @@ public class UserTokenAuthHandler : AuthenticationHandler<UserTokenOptions>
             return AuthenticateResult.Fail("Unauthorized");
 
         var token = parts[1];
-        if (!token.StartsWith(Prefix, StringComparison.Ordinal) || token.Length != Prefix.Length + ExpectedKeyLength)
+        if (!token.StartsWith(AuthHelper.UserTokenPrefix, StringComparison.Ordinal)
+            || token.Length != AuthHelper.UserTokenPrefix.Length + AuthHelper.UserTokenKeyLength)
             return AuthenticateResult.Fail("Unauthorized");
 
         var ip = _ipResolver.GetClientIp(Context);

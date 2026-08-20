@@ -38,16 +38,21 @@ public class UserTokenValidationResult
 public class UserTokenService : IUserTokenService
 {
     private const string Prefix = "UserToken";
-    private const int KeyLength = 128;
 
     private readonly ApplicationDbContext _context;
     private readonly MainConfig _config;
+    private readonly ILoginRateLimitService _loginRateLimit;
     private readonly ILogger<UserTokenService> _logger;
 
-    public UserTokenService(ApplicationDbContext context, MainConfig config, ILogger<UserTokenService> logger)
+    public UserTokenService(
+        ApplicationDbContext context,
+        MainConfig config,
+        ILoginRateLimitService loginRateLimit,
+        ILogger<UserTokenService> logger)
     {
         _context = context;
         _config = config;
+        _loginRateLimit = loginRateLimit;
         _logger = logger;
     }
 
@@ -172,14 +177,14 @@ public class UserTokenService : IUserTokenService
             .FirstOrDefaultAsync(t => t.TokenHash == hash && t.RevokedAt == null);
 
         if (entry is null)
-            return new UserTokenValidationResult { Valid = false };
+            return await RejectInvalidAsync(token, ipAddress, "未找到对应令牌");
 
         if (entry.ExpiresAt is not null && entry.ExpiresAt <= DateTimeOffset.UtcNow)
-            return new UserTokenValidationResult { Valid = false };
+            return await RejectInvalidAsync(token, ipAddress, $"令牌已过期 | TokenId:{entry.Id}");
 
         var user = await _context.Users.FindAsync(entry.UserUid);
         if (user is null || user.Status != UserStatus.Active)
-            return new UserTokenValidationResult { Valid = false };
+            return await RejectInvalidAsync(token, ipAddress, $"用户无效或非活跃 | TokenId:{entry.Id} | uid:{entry.UserUid}");
 
         var now = DateTimeOffset.UtcNow;
         entry.LastUsedAt = now;
@@ -205,6 +210,26 @@ public class UserTokenService : IUserTokenService
         }
 
         return new UserTokenValidationResult { Valid = true, Token = entry, User = user };
+    }
+
+    private async Task<UserTokenValidationResult> RejectInvalidAsync(string token, string? ipAddress, string reason)
+    {
+        _logger.LogWarning("UserToken 验证失败 | {Reason} | prefix:{Prefix}", reason,
+            token.Length > 5 ? token[..5] : token);
+
+        if (!string.IsNullOrEmpty(ipAddress))
+        {
+            try
+            {
+                await _loginRateLimit.RecordFailureAsync(ipAddress);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "UserToken 失败限流记录失败 | IP:{Ip}", ipAddress);
+            }
+        }
+
+        return new UserTokenValidationResult { Valid = false };
     }
 
     public async Task<(List<UserTokenUsage> Items, int Total)> GetUsageAsync(long tokenId, int skip, int take)

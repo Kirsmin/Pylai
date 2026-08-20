@@ -59,7 +59,18 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
 
     builder.Services.AddSingleton(new TestModeOptions { Enabled = testMode });
     if (testMode)
+    {
+        try
+        {
+            AuthHelper.EnsureTestModeAllowed(builder.Environment);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"错误  Pylaios       {ex.Message}");
+            return 3;
+        }
         Console.Error.WriteLine($"\x1b[93m{DateTimeOffset.Now:yyyy/MM/dd HH:mm:ss}  \u26A0\uFE0F  Pylaios       TestMode \u2014 邮件不会实际发送，验证码将输出到控制台\x1b[0m");
+    }
 
     if (!string.IsNullOrEmpty(config.Server.Url))
         builder.WebHost.UseUrls(config.Server.Url);
@@ -102,7 +113,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"错误  Pylaios       迁移状态查询失败，拒绝启动: {ex.Message}");
+        app.Logger.LogError(ex, "迁移状态查询失败，拒绝启动");
         Console.Out.WriteLine(CliHelpers.SerializeJson(new
         {
             success = false,
@@ -113,7 +124,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     }
     if (migrationCheck.Pending is { Length: > 0 })
     {
-        Console.Error.WriteLine("错误  Pylaios       检测到未应用的数据库迁移，拒绝启动。请先执行: Pylaios db migrate");
+        app.Logger.LogError("检测到未应用的数据库迁移，拒绝启动。请先执行: Pylaios db migrate");
         Console.Out.WriteLine(CliHelpers.SerializeJson(new
         {
             success = false,
@@ -124,7 +135,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     }
     if (migrationCheck.Ahead.Length > 0)
     {
-        Console.Error.WriteLine("错误  Pylaios       数据库迁移超前于当前程序（databaseAhead），拒绝启动");
+        app.Logger.LogError("数据库迁移超前于当前程序（databaseAhead），拒绝启动");
         Console.Out.WriteLine(CliHelpers.SerializeJson(new
         {
             success = false,
@@ -134,7 +145,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
         return 3;
     }
     if (migrationCheck.Pending is null)
-        Console.Error.WriteLine("警告  Pylaios       数据库连接失败，无法确认迁移状态（/health/ready 将反映数据库状态）");
+        app.Logger.LogWarning("数据库连接失败，无法确认迁移状态（/health/ready 将反映数据库状态）");
 
     if (migrationCheck.Pending is not null)
     {
@@ -144,7 +155,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"错误  Pylaios       生产安全启动门禁失败，拒绝启动: {ex.Message}");
+            app.Logger.LogError(ex, "生产安全启动门禁失败，拒绝启动");
             return 3;
         }
     }
@@ -152,7 +163,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
     if (!testMode
         && (string.IsNullOrEmpty(config.Email.Smtp.Host) || string.IsNullOrEmpty(config.Email.FromAddress)))
     {
-        Console.Error.WriteLine("\x1b[93m警告  Pylaios       邮件服务未配置（[Email.Smtp.Host] / [Email.FromAddress]）— 注册/重置密码等验证码邮件将不会发送\x1b[0m");
+        app.Logger.LogWarning("邮件服务未配置（[Email.Smtp.Host] / [Email.FromAddress]）— 注册/重置密码等验证码邮件将不会发送");
     }
 
 

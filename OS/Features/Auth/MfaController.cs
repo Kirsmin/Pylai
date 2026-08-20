@@ -84,6 +84,9 @@ public sealed class MfaController : ControllerBase
     [HttpPost("totp/enroll")]
     public async Task<IActionResult> BeginTotp([FromBody] MfaEnrollmentRequest request)
     {
+        if (!Request.IsHttps)
+            return BadRequest(new ApiResponse { Success = false, Error = "MFA 设置必须在 HTTPS 下进行。", ErrorCode = "invalid_request" });
+
         var user = await ResolveUserAsync(request.TransactionId);
         if (user is null)
             return Unauthorized(new ApiResponse { Success = false, Error = "MFA 事务无效或未登录。", ErrorCode = "mfa_required" });
@@ -262,10 +265,12 @@ public sealed class MfaController : ControllerBase
         if (user is null || user.Status != UserStatus.Active)
             return Unauthorized(new ApiResponse { Success = false, Error = "登录失败。", ErrorCode = "invalid_credentials" });
 
-        user.LastLoginAt = DateTimeOffset.UtcNow;
-        user.AccessFailedCount = 0;
-        user.LockoutEnd = null;
-        await _context.SaveChangesAsync();
+        await _context.Users
+            .Where(x => x.Uid == user.Uid)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(u => u.AccessFailedCount, 0)
+                .SetProperty(u => u.LockoutEnd, (DateTimeOffset?)null)
+                .SetProperty(u => u.LastLoginAt, DateTimeOffset.UtcNow));
         await _accessRevoker.RevokeUserAccessAsync(user.Uid);
         await _signInManager.SignInAsync(user, state.RememberMe);
         await this.CreateUserSessionAsync(_context, user, state.IpAddress, _config.Cookie.SessionName);

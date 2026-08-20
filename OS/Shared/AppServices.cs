@@ -13,7 +13,6 @@ using OpenIddict.Server;
 using Npgsql;
 using StackExchange.Redis;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Fido2NetLib;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
@@ -340,11 +339,8 @@ public static class AppServices
         Console.Error.WriteLine($"错误: {message}");
         Console.Error.Flush();
         Console.Out.Flush();
-        LibcExit(2);
+        Environment.Exit(2);
     }
-
-    [DllImport("libc", EntryPoint = "exit")]
-    private static extern void LibcExit(int code);
 
 
 
@@ -427,7 +423,7 @@ public static class AppServices
         {
             options.AllowedHosts = config.Server.AllowedHosts.Length > 0
                 ? config.Server.AllowedHosts
-                : ["*"];
+                : [];
             options.AllowEmptyHosts = false;
         });
 
