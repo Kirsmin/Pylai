@@ -6,7 +6,6 @@ Pylai-<version>-Linux-<arch>.tar 与本脚本，下载后放在同一目录运�
 """
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import platform as host_platform
@@ -75,12 +74,18 @@ def ask(
     否则提示“该项不能为空。”并重新询问。
     """
     suffix = f" [{default}]" if default else ""
+    prompt_line = f"{prompt}{suffix}: "
     while True:
         try:
-            value = getpass.getpass(f"{prompt}{suffix}: ") if secret else input(f"{prompt}{suffix}: ")
+            value = input(prompt_line)
         except (EOFError, KeyboardInterrupt):
             out("\n已退出。")
             raise SystemExit(0)
+        if secret and sys.stdout.isatty():
+            # 输入时明文显示；回车后回退一行清除整行并重印提示（密码从屏幕消失）
+            sys.stdout.write("\033[1A\033[2K")
+            sys.stdout.write(prompt_line + "\n")
+            sys.stdout.flush()
         value = value.strip()
         if value:
             return value
@@ -339,14 +344,15 @@ def generate_config(image: str, answers: dict) -> None:
     text = read_template(image)
 
     text = replace_one(text, 'Url = "http://localhost:5000"', 'Url = "http://0.0.0.0:5000"')
-    text = replace_one(text, 'Url = "http://localhost:5173"', f'Url = "{answers["public_url"]}"')
+    text = replace_one(text, 'Url = "http://localhost:5173"', f'Url = {toml_string(answers["public_url"])}')
+    cs = f'Host=127.0.0.1;Port=5432;Database={answers["db_name"]};Username={answers["db_user"]};Password={answers["db_password"]}'
     text = replace_one(
         text,
         'ConnectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password="',
-        f'ConnectionString = "Host=127.0.0.1;Port=5432;Database={answers["db_name"]};Username={answers["db_user"]};Password={answers["db_password"]}"',
+        f'ConnectionString = {toml_string(cs)}',
     )
-    text = replace_one(text, 'Password = ""', f'Password = "{answers["redis_password"]}"', 1)
-    text = replace_one(text, 'ServerPepper = ""', f'ServerPepper = "{answers["invite_pepper"]}"')
+    text = replace_one(text, 'Password = ""', f'Password = {toml_string(answers["redis_password"])}', 1)
+    text = replace_one(text, 'ServerPepper = ""', f'ServerPepper = {toml_string(answers["invite_pepper"])}')
     text = replace_one(text, 'Directory = "backups"', 'Directory = "/var/lib/pylai/backups"')
     text = replace_one(text, 'ForwardedHeadersEnabled = true', "ForwardedHeadersEnabled = true")
     text = replace_one(text, 'TrustedProxies = ["127.0.0.1", "::1"]', f'TrustedProxies = {toml_string_list(answers["trusted_proxies"])}')
@@ -354,14 +360,14 @@ def generate_config(image: str, answers: dict) -> None:
     text = replace_one(text, 'KeyFile = ""', 'KeyFile = "/etc/pylai/certs/signing-kek"')
     text = replace_one(text, 'AllowedOrigins = ["http://localhost:5173"]',
                        f'AllowedOrigins = {toml_string_list(answers["cors_origins"])}')
-    text = replace_one(text, 'Issuer = "http://localhost:5000"', f'Issuer = "{answers["origin"]}"')
+    text = replace_one(text, 'Issuer = "http://localhost:5000"', f'Issuer = {toml_string(answers["origin"])}')
     external_host = urlparse(answers["public_url"]).hostname or "localhost"
     allowed_hosts = [external_host]
     if external_host not in ("localhost", "127.0.0.1", "::1"):
         allowed_hosts.extend(("localhost", "127.0.0.1"))
     text = replace_one(text, 'AllowedHosts = ["localhost", "127.0.0.1"]',
                        f'AllowedHosts = {toml_string_list(allowed_hosts)}')
-    text = replace_one(text, 'RelyingPartyId = "localhost"', f'RelyingPartyId = "{external_host}"')
+    text = replace_one(text, 'RelyingPartyId = "localhost"', f'RelyingPartyId = {toml_string(external_host)}')
     text = replace_one(text, 'Origins = ["http://localhost:5173"]', f'Origins = {toml_string_list(answers["cors_origins"])}')
 
     if answers["public_url"].startswith("https://"):
@@ -393,10 +399,10 @@ def generate_config(image: str, answers: dict) -> None:
         end = text.find("\n\n", start)
         end = len(text) if end < 0 else end
         block = text[start:end]
-        block = block.replace('Email = "admin@pylaios.local"', f'Email = "{answers[email_key]}"')
-        block = block.replace('Email = "user@pylaios.local"', f'Email = "{answers[email_key]}"')
-        block = block.replace('Email = "max@pylaios.local"', f'Email = "{answers[email_key]}"')
-        block = block.replace('Password = ""', f'Password = "{answers[password_key]}"', 1)
+        block = block.replace('Email = "admin@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
+        block = block.replace('Email = "user@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
+        block = block.replace('Email = "max@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
+        block = block.replace('Password = ""', f'Password = {toml_string(answers[password_key])}', 1)
         block = block.replace('DisplayName = "Administrator"', f'DisplayName = "{display_name}"')
         block = block.replace('DisplayName = "Test User"', f'DisplayName = "{display_name}"')
         block = block.replace('DisplayName = "Max User"', f'DisplayName = "{display_name}"')
@@ -404,17 +410,17 @@ def generate_config(image: str, answers: dict) -> None:
 
     if answers["smtp_enabled"]:
         text = replace_one(text, '[Email]\nFromName = "Pylaios"\nFromAddress = ""',
-                           f'[Email]\nFromName = "Pylaios"\nFromAddress = "{answers["smtp_from"]}"')
+                           f'[Email]\nFromName = "Pylaios"\nFromAddress = {toml_string(answers["smtp_from"])}')
         smtp_marker = "[Email.Smtp]"
         smtp_start = text.index(smtp_marker)
         smtp_end = text.find("\n\n", smtp_start)
         smtp_end = len(text) if smtp_end < 0 else smtp_end
         smtp_block = text[smtp_start:smtp_end]
-        smtp_block = replace_one(smtp_block, 'Host = ""', f'Host = "{answers["smtp_host"]}"')
+        smtp_block = replace_one(smtp_block, 'Host = ""', f'Host = {toml_string(answers["smtp_host"])}')
         smtp_block = replace_one(smtp_block, "Port = 587", f"Port = {answers['smtp_port']}")
-        smtp_block = replace_one(smtp_block, 'Security = "StartTls"', f'Security = "{answers["smtp_security"]}"')
-        smtp_block = replace_one(smtp_block, 'Username = ""', f'Username = "{answers["smtp_user"]}"')
-        smtp_block = smtp_block.replace('Password = ""', f'Password = "{answers["smtp_password"]}"', 1)
+        smtp_block = replace_one(smtp_block, 'Security = "StartTls"', f'Security = {toml_string(answers["smtp_security"])}')
+        smtp_block = replace_one(smtp_block, 'Username = ""', f'Username = {toml_string(answers["smtp_user"])}')
+        smtp_block = smtp_block.replace('Password = ""', f'Password = {toml_string(answers["smtp_password"])}', 1)
         text = text[:smtp_start] + smtp_block + text[smtp_end:]
 
     ensure_home()

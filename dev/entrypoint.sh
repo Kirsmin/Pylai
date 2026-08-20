@@ -91,8 +91,12 @@ export ADMIN_PASSWORD USER_PASSWORD MAX_PASSWORD CLIENT_SECRET INVITE_PEPPER SIG
 python3 - <<'PY'
 import os
 import re
+import json
 from pathlib import Path
 from urllib.parse import urlparse
+
+def q(s):
+    return json.dumps(s, ensure_ascii=False)
 
 text = Path('/opt/pylai/pylai.example.toml').read_text(encoding='utf-8')
 ui_origin = os.environ['UI_URL'].rstrip('/')
@@ -101,7 +105,7 @@ ui_origins = list(dict.fromkeys([ui_origin, 'http://localhost:5173', 'http://loc
 allowed_hosts = ['localhost', '127.0.0.1']
 if ui_host not in allowed_hosts:
     allowed_hosts.append(ui_host)
-allowed_hosts_toml = '[' + ', '.join(f'"{host}"' for host in allowed_hosts) + ']'
+allowed_hosts_toml = json.dumps(allowed_hosts, ensure_ascii=False)
 
 def block(name):
     start = text.index(f'[{name}]')
@@ -111,18 +115,18 @@ text = re.sub(r'^ConnectionString = ".*"$',
     'ConnectionString = "Host=/run/postgresql;Database=pylai;Username=pylai"',
     text, count=1, flags=re.M)
 text = re.sub(r'^Url = "http://localhost:5000"$', 'Url = "http://0.0.0.0:5000"', text, count=1, flags=re.M)
-text = re.sub(r'^Url = "http://localhost:5173"$', f'Url = "{os.environ["UI_URL"]}"', text, count=1, flags=re.M)
-text = re.sub(r'^Issuer = "http://localhost:5000"$', f'Issuer = "{os.environ["UI_URL"]}"', text, count=1, flags=re.M)
+text = re.sub(r'^Url = "http://localhost:5173"$', f'Url = {q(os.environ["UI_URL"])}', text, count=1, flags=re.M)
+text = re.sub(r'^Issuer = "http://localhost:5000"$', f'Issuer = {q(os.environ["UI_URL"])}', text, count=1, flags=re.M)
 text = re.sub(r'^AllowedHosts = \["localhost", "127.0.0.1"\]$', f'AllowedHosts = {allowed_hosts_toml}', text, count=1, flags=re.M)
 text = re.sub(r'^TrustedProxies = \["127.0.0.1", "::1"\]$', 'TrustedProxies = ["127.0.0.1", "::1"]', text, count=1, flags=re.M)
 text = re.sub(r'^TrustedNetworks = \[\]$', 'TrustedNetworks = ["172.16.0.0/12"]', text, count=1, flags=re.M)
-text = re.sub(r'^ServerPepper = ""$', f'ServerPepper = "{os.environ["INVITE_PEPPER"]}"', text, count=1, flags=re.M)
+text = re.sub(r'^ServerPepper = ""$', f'ServerPepper = {q(os.environ["INVITE_PEPPER"])}', text, count=1, flags=re.M)
 text = re.sub(r'^KeyFile = ""$', 'KeyFile = "/var/lib/pylai/signing-kek"', text, count=1, flags=re.M)
-text = re.sub(r'^RelyingPartyId = "localhost"$', f'RelyingPartyId = "{ui_host}"', text, count=1, flags=re.M)
-text = re.sub(r'^Origins = \["http://localhost:5173"\]$', f'Origins = {ui_origins!r}'.replace("'", '"'), text, count=1, flags=re.M)
+text = re.sub(r'^RelyingPartyId = "localhost"$', f'RelyingPartyId = {q(ui_host)}', text, count=1, flags=re.M)
+text = re.sub(r'^Origins = \["http://localhost:5173"\]$', f'Origins = {json.dumps(ui_origins, ensure_ascii=False)}', text, count=1, flags=re.M)
 for section, env in (("Seeds.DefaultAdmin", "ADMIN_PASSWORD"), ("Seeds.DefaultUser", "USER_PASSWORD"), ("Seeds.DefaultMax", "MAX_PASSWORD")):
     seg = block(section)
-    seg = seg.replace('Password = ""', f'Password = "{os.environ[env]}"', 1)
+    seg = seg.replace('Password = ""', f'Password = {q(os.environ[env])}', 1)
     text = text[:text.index(f'[{section}]')] + seg
 
 Path('/var/lib/pylai/pylai.toml').write_text(text, encoding='utf-8')
