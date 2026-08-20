@@ -10,41 +10,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # ═════════════════════════════════════════════════════════════════
+  # Job 1: 后端构建 + 配置校验（与前端并行）
+  # ═════════════════════════════════════════════════════════════════
+  build-backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@v4
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.400"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: "24.19.0"
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
-        with:
-          version: "10.15.1"
-          run_install: false
-
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@v4
         with:
           python-version: "3.14.0"
 
       - name: Build backend
         working-directory: OS
-        run: |
-          dotnet build Pylaios.csproj -c Release
+        run: dotnet build Pylaios.csproj -c Release
 
-      - name: Config validate（生产安全配置）
+      - name: Config validate（生产安全配置 + DataProtection KEK）
         working-directory: OS
         run: |
           set -euo pipefail
@@ -124,7 +115,32 @@ jobs:
           PY
           assert_invalid "缺失 OpenIddict 加密证书" "OpenIddict.Certificates.Encryption.Path"
 
-      - name: Build frontend
+      - name: .NET dependency vulnerability scan
+        run: dotnet list OS/Pylaios.csproj package --vulnerable --include-transitive
+
+  # ═════════════════════════════════════════════════════════════════
+  # Job 2: 前端构建 + 依赖审计（与后端并行）
+  # ═════════════════════════════════════════════════════════════════
+  build-frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.15.1"
+          run_install: false
+
+      - name: Build UI
         working-directory: UI
         run: |
           pnpm install --frozen-lockfile
@@ -136,22 +152,40 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Dependency vulnerability scan
+      - name: Frontend dependency vulnerability scan
         run: |
           set -euo pipefail
-          dotnet list OS/Pylaios.csproj package --vulnerable --include-transitive
           pnpm --dir UI audit --audit-level high
           pnpm --dir AdminUI audit --audit-level high
+
+  # ═════════════════════════════════════════════════════════════════
+  # Job 3: Docker 构建 + 容器加固 + Smoke Test（依赖前两个 Job）
+  # ═════════════════════════════════════════════════════════════════
+  build-docker-and-test:
+    needs: [build-backend, build-frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.14.0"
 
       - name: Build Dev Docker image (linux/amd64)
         run: |
           docker buildx build --platform linux/amd64 \
             -t pylai-dev:latest \
             --load .
-          docker save pylai-dev:latest -o pylai-dev-amd64.tar
+
+      - name: Save Docker image
+        run: docker save pylai-dev:latest -o pylai-dev-amd64.tar
 
       - name: Upload Dev image artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: pylai-dev-amd64
           path: pylai-dev-amd64.tar
@@ -177,7 +211,7 @@ jobs:
 
       - name: Smoke test — 完整实例启动 + 健康检查 + MFA 门禁 + 并发注册
         run: |
-          docker load < pylai-dev-amd64.tar
+          set -euo pipefail
           docker run -d --name smoke -p 8080:80 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
 
           for i in $(seq 1 30); do
@@ -198,7 +232,7 @@ jobs:
           ADMIN_PW=$(awk -F= '/^ADMIN_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")
           [ -n "$USER_PW" ] && [ -n "$ADMIN_PW" ] || { echo "==> 无法从 .secrets 读取凭据"; exit 1; }
 
-          # 普通用户登录：新 API 格式返回 200 + { uid, name, ... }，不再包含 success 字段
+          # 新 API 格式：成功返回 200 + { uid, ... }，不再包含 success 字段
           NORMAL_LOGIN=$(curl -sf --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"usernameOrEmail\":\"user@pylaios.local\",\"password\":\"$USER_PW\"}")
@@ -215,4 +249,3 @@ jobs:
           python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
 
           docker rm -f smoke >/dev/null 2>&1
-
