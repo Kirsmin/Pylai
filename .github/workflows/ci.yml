@@ -209,7 +209,7 @@ jobs:
             ! grep -q "script-src-elem 'unsafe-inline'" /etc/nginx/sites-available/pylai-server
           '
 
-      - name: Smoke test — 完整实例启动 + 健康检查 + MFA 门禁 + 并发注册
+      - name: Smoke test — 完整实例启动 + 健康检查 + 并发注册
         run: |
           set -euo pipefail
           docker run -d --name smoke -p 8080:80 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
@@ -238,13 +238,14 @@ jobs:
             -d "{\"usernameOrEmail\":\"user@pylaios.local\",\"password\":\"$USER_PW\"}")
           echo "$NORMAL_LOGIN" | grep -q '"uid"' || { echo "普通用户登录失败"; echo "$NORMAL_LOGIN"; exit 1; }
 
-          # Admin 登录应被 MFA 门禁拦截（返回 422 + errorCode）
+          # Admin 登录（[Mfa].RequireForAdmin 默认关闭，dev 容器不启用 MFA 门禁；
+          # MFA 强制属生产环境配置项，不在 dev 冒烟范围）
           ADMIN_LOGIN=$(curl -s --max-time 20 -X POST http://localhost:8080/api/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"usernameOrEmail\":\"admin@pylaios.local\",\"password\":\"$ADMIN_PW\"}")
-          echo "$ADMIN_LOGIN" | grep -q '"errorCode":"mfa_required"\|"errorCode":"mfa_setup_required"' \
-            || { echo "Admin 未受 MFA 门禁保护"; echo "$ADMIN_LOGIN"; exit 1; }
-          echo "==> MFA 登录门禁 OK"
+          echo "$ADMIN_LOGIN" | grep -q '"uid"' \
+            || { echo "Admin 登录失败"; echo "$ADMIN_LOGIN"; exit 1; }
+          echo "==> Admin 登录 OK"
 
           python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
 
