@@ -3,8 +3,8 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { NButton, NInput, NAlert, NIcon, NPopconfirm, NSpin, NDivider } from 'naive-ui'
 import { Account } from '@vicons/carbon'
-import { apiFetch, useAuthStore } from '@/stores/auth'
-import { api, ApiError } from '@/utils/api'
+import { useAuthStore } from '@/stores/auth'
+import { api, apiFetch, ApiError } from '@/utils/api'
 import { SUPPORT_EMAIL, type ScopeInfo } from '@/types/api'
 import { getAssertion, createCredential } from '@/utils/webauthn'
 import Dock from '@/components/Dock.vue'
@@ -281,7 +281,7 @@ function finishLogin(data: any) {
     displayName: data.displayName as string,
     group: data.group as string,
     email: data.email as string
-  })
+  }, rememberMe.value)
   lockedOut.value = false
   if (returnUrl.value) window.location.assign(returnUrl.value)
   else window.location.assign('/')

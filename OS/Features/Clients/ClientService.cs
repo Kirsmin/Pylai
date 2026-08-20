@@ -4,6 +4,7 @@ using System.Xml;
 using System.Xml.Linq;
 using OpenIddict.Abstractions;
 using static OpenIddict.Abstractions.OpenIddictConstants;
+using Pylaios.Features.Database;
 
 namespace Pylaios.Features.Clients;
 
@@ -103,13 +104,13 @@ public class ClientService : IClientService
         skip = Math.Max(0, skip);
         take = Math.Clamp(take, 1, 100);
 
-        var all = new List<object>();
-        await foreach (var app in _manager.ListAsync(null, null, ct))
+        var total = await _manager.CountAsync(ct);
+        var page = new List<object>(take);
+        await foreach (var app in _manager.ListAsync(take, skip, ct))
         {
-            all.Add(app);
+            page.Add(app);
         }
 
-        var page = all.Skip(skip).Take(take).ToList();
         var appIds = new List<string>();
         foreach (var app in page)
         {
@@ -131,7 +132,7 @@ public class ClientService : IClientService
         return new ClientListResponse
         {
             Items = items.OrderBy(i => i.ClientId, StringComparer.Ordinal).ToList(),
-            Total = all.Count
+            Total = total > int.MaxValue ? int.MaxValue : (int)total
         };
     }
 

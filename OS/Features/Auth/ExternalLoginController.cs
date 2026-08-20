@@ -1,6 +1,13 @@
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Pylaios.Features.Account;
+using Pylaios.Features.Audit;
+using Pylaios.Features.Config;
+using Pylaios.Features.Database;
+using Pylaios.Features.Users;
+using Pylaios.Shared;
 
 namespace Pylaios.Features.Auth;
 
@@ -8,6 +15,9 @@ namespace Pylaios.Features.Auth;
 [Route("api/auth")]
 public class ExternalLoginController : ControllerBase
 {
+    private const string ExternalStatePrefix = "oauth:external:";
+    private static readonly TimeSpan ExternalStateTtl = TimeSpan.FromMinutes(5);
+
     private readonly SignInManager<User> _signInManager;
     private readonly UserManager<User> _userManager;
     private readonly ApplicationDbContext _context;
@@ -15,6 +25,7 @@ public class ExternalLoginController : ControllerBase
     private readonly MainConfig _config;
     private readonly IpResolutionService _ipResolver;
     private readonly IMfaService _mfa;
+    private readonly IRedisStateCache _stateCache;
     private readonly ILogger<ExternalLoginController> _logger;
 
     public ExternalLoginController(
@@ -25,6 +36,7 @@ public class ExternalLoginController : ControllerBase
         MainConfig config,
         IpResolutionService ipResolver,
         IMfaService mfa,
+        IRedisStateCache stateCache,
         ILogger<ExternalLoginController> logger)
     {
         _signInManager = signInManager;
@@ -34,15 +46,16 @@ public class ExternalLoginController : ControllerBase
         _config = config;
         _ipResolver = ipResolver;
         _mfa = mfa;
+        _stateCache = stateCache;
         _logger = logger;
     }
 
     [AllowAnonymous]
     [HttpPost("external-login")]
-    public IActionResult ExternalLogin([FromBody] ExternalLoginRequest request)
+    public async Task<IActionResult> ExternalLogin([FromBody] ExternalLoginRequest request)
     {
         if (string.IsNullOrEmpty(request.Provider))
-            return BadRequest(new { Success = false, Error = "Provider is required." });
+            return BadRequest(new { Success = false, Error = "Provider is required.", ErrorCode = "invalid_request" });
 
         var provider = request.Provider.ToLowerInvariant() switch
         {
@@ -53,7 +66,7 @@ public class ExternalLoginController : ControllerBase
         };
 
         if (provider is null)
-            return BadRequest(new { Success = false, Error = "Unsupported provider." });
+            return BadRequest(new { Success = false, Error = "Unsupported provider.", ErrorCode = "invalid_request" });
 
         var configured = provider switch
         {
@@ -63,9 +76,35 @@ public class ExternalLoginController : ControllerBase
             _ => false
         };
         if (!configured)
-            return BadRequest(new { Success = false, Error = "Provider is not configured." });
+            return BadRequest(new { Success = false, Error = "Provider is not configured.", ErrorCode = "invalid_request" });
 
-        var redirectUrl = Url.Action(nameof(ExternalLoginCallback), null, null, Request.Scheme)!;
+        string? initiatorUid = null;
+        if (User.Identity?.IsAuthenticated == true)
+        {
+            var initiator = await _userManager.GetUserAsync(User);
+            if (initiator is null)
+            {
+                _logger.LogWarning("外部登录启动失败：认证 Cookie 无法解析用户");
+                await _signInManager.SignOutAsync();
+                return Unauthorized(ApiResponse.Fail("登录状态无效。", "session_invalid"));
+            }
+            initiatorUid = initiator.Uid.ToString();
+        }
+
+        var flowId = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        await _stateCache.SetAsync(
+            ExternalStatePrefix + flowId,
+            new ExternalLoginState(provider, initiatorUid),
+            ExternalStateTtl);
+
+        // ASP.NET Core OAuth handler still owns its protected state/correlation cookie.
+        // The opaque flow id is embedded in the protected RedirectUri and additionally
+        // checked against Redis to make the application-level login/bind flow single-use.
+        var redirectUrl = Url.Action(
+            nameof(ExternalLoginCallback),
+            null,
+            new { flow = flowId },
+            Request.Scheme)!;
         var properties = _signInManager.ConfigureExternalAuthenticationProperties(provider, redirectUrl);
         return Challenge(properties, provider);
     }
@@ -83,8 +122,31 @@ public class ExternalLoginController : ControllerBase
 
     [HttpGet("external-login-callback")]
     [AllowAnonymous]
-    public async Task<IActionResult> ExternalLoginCallback()
+    public async Task<IActionResult> ExternalLoginCallback([FromQuery] string? flow)
     {
+        if (string.IsNullOrWhiteSpace(flow) || flow.Length != 64)
+        {
+            _logger.LogWarning("OAuth 外部登录 state 缺失或格式无效");
+            return InvalidStateRedirect();
+        }
+
+        ExternalLoginState? state;
+        try
+        {
+            state = await _stateCache.TakeAsync<ExternalLoginState>(ExternalStatePrefix + flow);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OAuth 外部登录 state 校验失败：Redis 不可用");
+            return InvalidStateRedirect();
+        }
+
+        if (state is null)
+        {
+            _logger.LogWarning("OAuth 外部登录 state 已过期、已使用或不存在");
+            return InvalidStateRedirect();
+        }
+
         var info = await _signInManager.GetExternalLoginInfoAsync();
         if (info is null)
         {
@@ -92,20 +154,30 @@ public class ExternalLoginController : ControllerBase
             return Redirect($"{_config.Frontend.Url}/login?error=external_failed");
         }
 
+        if (!string.Equals(info.LoginProvider, state.Provider, StringComparison.Ordinal))
+        {
+            _logger.LogWarning("OAuth 外部登录 Provider 与 state 不匹配 | StateProvider:{StateProvider} | Provider:{Provider}",
+                state.Provider, info.LoginProvider);
+            return InvalidStateRedirect();
+        }
+
+        User? currentUser = null;
+        if (User.Identity?.IsAuthenticated == true)
+            currentUser = await _userManager.GetUserAsync(User);
+
+        var callbackUid = currentUser?.Uid.ToString();
+        if (!string.Equals(state.InitiatorUid, callbackUid, StringComparison.Ordinal))
+        {
+            _logger.LogWarning("OAuth 外部登录发起身份与回调身份不匹配 | Provider:{Provider}", info.LoginProvider);
+            return InvalidStateRedirect();
+        }
+
         var providerKey = info.ProviderKey;
         var provider = info.LoginProvider;
         var ip = this.GetClientIp(_ipResolver);
 
-
-        if (User.Identity?.IsAuthenticated == true)
+        if (currentUser is not null)
         {
-            var currentUser = await _userManager.GetUserAsync(User);
-            if (currentUser is null)
-            {
-                await _signInManager.SignOutAsync();
-                return Redirect($"{_config.Frontend.Url}/login?error=external_failed");
-            }
-
             var boundUser = await _userManager.FindByLoginAsync(provider, providerKey);
             if (boundUser is not null)
             {
@@ -143,7 +215,6 @@ public class ExternalLoginController : ControllerBase
             return Redirect($"{_config.Frontend.Url}/login");
         }
 
-
         var user = await _userManager.FindByLoginAsync(provider, providerKey);
         if (user is null)
         {
@@ -170,4 +241,10 @@ public class ExternalLoginController : ControllerBase
 
         return Redirect($"{_config.Frontend.Url}/");
     }
+
+    private IActionResult InvalidStateRedirect() =>
+        Redirect($"{_config.Frontend.Url}/login?error=invalid_state");
+
 }
+
+internal sealed record ExternalLoginState(string Provider, string? InitiatorUid);

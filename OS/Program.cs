@@ -184,6 +184,7 @@ static async Task<int> RunWebAsync(bool testMode, string? configFlag)
         app.UseOpenApi();
         app.UseSwaggerUi();
     }
+    app.UseMiddleware<GlobalExceptionMiddleware>();
     app.UseMiddleware<AuditMiddleware>();
     app.UseMiddleware<AdminApiIpBanMiddleware>();
     app.UseAuthentication();
