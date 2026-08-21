@@ -59,7 +59,7 @@ public static class AppServices
     {
         var csBuilder = new NpgsqlConnectionStringBuilder(config.Database.ConnectionString);
         if (!csBuilder.ContainsKey("Max Pool Size"))
-            csBuilder.MaxPoolSize = 200;
+            csBuilder.MaxPoolSize = 80;
 
         services.AddDbContext<ApplicationDbContext>(options =>
         {

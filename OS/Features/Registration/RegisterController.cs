@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace Pylaios.Features.Registration;
 
@@ -402,18 +403,17 @@ public class RegisterController : ControllerBase
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            await using var transaction = await _context.Database.BeginTransactionAsync();
-            _context.Users.Add(user);
-            _context.RegistrationSessionBindings.Add(binding);
             try
             {
+                await using var transaction = await _context.Database.BeginTransactionAsync();
+                _context.Users.Add(user);
+                _context.RegistrationSessionBindings.Add(binding);
                 await _context.SaveChangesAsync();
                 await transaction.CommitAsync();
                 break;
             }
             catch (DbUpdateException ex) when (ex.IsUniqueViolation())
             {
-                await transaction.RollbackAsync();
                 _context.ChangeTracker.Clear();
                 return Conflict(new CreateAccountResponse
                 {
@@ -424,7 +424,6 @@ public class RegisterController : ControllerBase
             }
             catch (DbUpdateException ex)
             {
-                await transaction.RollbackAsync();
                 _context.ChangeTracker.Clear();
                 if (attempt == 0 && ex.SqlState() is "40P01" or "40001")
                 {
@@ -437,6 +436,16 @@ public class RegisterController : ControllerBase
                     Success = false,
                     Error = "用户名或邮箱已被占用。",
                     ErrorCode = "duplicate"
+                });
+            }
+            catch (PostgresException ex) when (ex.SqlState is "53300" or "08006" or "08001" or "08004")
+            {
+                _logger.LogError("数据库连接不可用（{SqlState}），注册暂时拒绝 | uid:{Uid}", ex.SqlState, user.Uid);
+                return StatusCode(503, new CreateAccountResponse
+                {
+                    Success = false,
+                    Error = "服务器繁忙，请稍后重试。",
+                    ErrorCode = "server_busy"
                 });
             }
         }
