@@ -572,15 +572,15 @@ def collect_install_answers() -> dict:
 
     out("\n-- 初始账号 --")
     max_email = ask("Max 账号邮箱/登录名", "max@pylai.local")
-    max_password = secrets.token_urlsafe(12)
+    max_password = ask("Max 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
     if ask_yes_no("创建初始 Admin 账号？", True):
         admin_email = ask("Admin 账号邮箱/登录名", "admin@pylai.local")
-        admin_password = random_password(14)
+        admin_password = ask("Admin 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
     else:
         admin_email, admin_password = "", ""
     if ask_yes_no("创建初始 Normal 测试账号？", False):
         user_email = ask("Normal 账号邮箱/登录名", "user@pylai.local")
-        user_password = random_password(12)
+        user_password = ask("Normal 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
     else:
         user_email, user_password = "", ""
 
@@ -750,13 +750,24 @@ def print_install_summary(answers: dict) -> None:
     out(f"  前端:     {answers['public_url']}/")
     out(f"  管理台:   {answers['public_url']}/admin/")
     out(f"  健康检查: http://127.0.0.1:{answers['api_port']}/health/ready")
-    if answers["max_password"]:
-        out(f"  Max 账号: {answers['max_email']} / {answers['max_password']}")
-    if answers["admin_password"]:
-        out(f"  Admin 账号: {answers['admin_email']} / {answers['admin_password']}")
-    if answers["user_password"]:
-        out(f"  Normal 账号: {answers['user_email']} / {answers['user_password']}")
+    if answers.get("max_email"):
+        if answers.get("max_password"):
+            out(f"  Max 账号: {answers['max_email']} / {answers['max_password']}")
+        else:
+            out(f"  Max 账号: {answers['max_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
+    if answers.get("admin_email"):
+        if answers.get("admin_password"):
+            out(f"  Admin 账号: {answers['admin_email']} / {answers['admin_password']}")
+        else:
+            out(f"  Admin 账号: {answers['admin_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
+    if answers.get("user_email"):
+        if answers.get("user_password"):
+            out(f"  Normal 账号: {answers['user_email']} / {answers['user_password']}")
+        else:
+            out(f"  Normal 账号: {answers['user_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
     out("  以上初始密码仅在本次安装时显示，请妥善保存。")
+    if not answers.get("max_password") or (answers.get("admin_email") and not answers.get("admin_password")) or (answers.get("user_email") and not answers.get("user_password")):
+        out("  提示: 自动生成的密码已在容器启动日志中打印（[DbSeeder] 标记），也可执行 docker logs 查看。")
     out("=" * 64)
 
 
