@@ -16,6 +16,7 @@ public interface IEmailVerificationCodeService
 {
     Task<string> CreateAsync(string key, string? email, Guid? userUid = null);
     Task<EmailCodeResult> VerifyAsync(string key, string code);
+    Task<EmailVerificationEntry?> PeekAsync(string key);
     Task RemoveAsync(string key);
 }
 
@@ -102,6 +103,17 @@ public class EmailVerificationCodeService : IEmailVerificationCodeService
                 AttemptsRemaining = RemainingAttempts(await _redis.StringGetAsync(AttemptsKey(key)))
             }
         };
+    }
+
+    public async Task<EmailVerificationEntry?> PeekAsync(string key)
+    {
+        var entry = await _cache.GetAsync<EmailVerificationEntry>(key);
+        if (entry is null || entry.Expires < DateTimeOffset.UtcNow)
+        {
+            await RemoveAsync(key);
+            return null;
+        }
+        return entry;
     }
 
     public async Task RemoveAsync(string key)

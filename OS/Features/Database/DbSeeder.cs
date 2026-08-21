@@ -110,7 +110,7 @@ public static class DbSeeder
                 var detail = lastErrors is not null && lastErrors.Count > 0 ? lastErrors[0].Description : "未知原因";
                 throw new InvalidOperationException($"种子用户 {email} 自动生成密码失败：{detail}");
             }
-            Console.Error.WriteLine($"[DbSeeder] 种子用户 {email} 未提供密码，已自动生成符合当前策略的密码: {password}");
+            Console.Error.WriteLine($"[DbSeeder] 种子用户 {email} 未提供密码，已自动生成符合当前策略的密码（请在安装脚本输出中查看）。");
         }
         else
         {

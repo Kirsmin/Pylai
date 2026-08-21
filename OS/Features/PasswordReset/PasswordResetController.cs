@@ -110,22 +110,30 @@ public class PasswordResetController : ControllerBase
         await _ipRateLimitService.RecordAttempt(ip, "reset-password", TimeSpan.FromMinutes(10));
 
         var key = TransactionKey(request.TransactionId);
-        var result = await _emailCodeService.VerifyAsync(key, request.Code);
-        if (result.Status != EmailCodeStatus.Ok || result.Entry?.UserUid is null)
+
+        // 1. 先只读查询验证码条目（不消费），确认事务有效并获取关联用户
+        var entry = await _emailCodeService.PeekAsync(key);
+        if (entry is null || entry.UserUid is null)
             return BadRequest(InvalidOrExpired());
 
         var user = await _context.Users.FirstOrDefaultAsync(u =>
-            u.Uid == result.Entry.UserUid.Value && u.Status != UserStatus.Deleted);
+            u.Uid == entry.UserUid.Value && u.Status != UserStatus.Deleted);
         if (user is null)
             return BadRequest(InvalidOrExpired());
 
+        // 2. 校验密码策略（此时验证码仍未被消费，允许用户修正密码后重试）
         var pwErrors = await AuthHelper.ValidatePasswordAsync(_userManager, user, request.NewPassword);
         if (pwErrors.Count > 0)
             return BadRequest(new PasswordResponse { Success = false, Error = pwErrors[0].Description, ErrorCode = "invalid_password" });
 
+        // 3. 密码策略通过后，才真正校验并消费验证码
+        var verifyResult = await _emailCodeService.VerifyAsync(key, request.Code);
+        if (verifyResult.Status != EmailCodeStatus.Ok)
+            return BadRequest(InvalidOrExpired());
+
+        // 4. 执行重置
         user.PasswordHash = _passwordHasher.HashPassword(user, request.NewPassword);
         await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
-        await _emailCodeService.RemoveAsync(key);
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.PasswordReset, user.Uid.ToString(), null, true);
 
         _logger.LogInformation("密码重置完成 | uid:{Uid}", user.Uid);

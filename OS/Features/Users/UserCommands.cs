@@ -1,4 +1,5 @@
 using Cocona;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
 namespace Pylaios.Features.Users;
@@ -82,6 +83,124 @@ public sealed class UserCommands
                 externalLogins = logins
             }
         });
+    }
+
+    [Command("create", Description = "创建用户（密码仅从 stdin 读取）")]
+    public async Task<int> CreateAsync(
+        [Argument("email")] string email,
+        [Option("name", Description = "登录名（留空则使用邮箱前缀）")] string? name = null,
+        [Option("display-name", Description = "显示名（留空则使用登录名）")] string? displayName = null,
+        [Option("group", Description = "用户组（normal/admin/max，默认 normal）")] string group = "normal",
+        [Option("password-stdin", Description = "从 stdin 读取密码（禁止 argv 传参）")] bool passwordStdin = false)
+    {
+        if (!AuthHelper.IsValidEmail(email))
+            return await CliHelpers.ErrorAsync("邮箱地址格式不正确。");
+
+        var targetGroup = group.ToLowerInvariant();
+        if (!AuthConstants.Groups.IsValid(targetGroup))
+            return await CliHelpers.ErrorAsync($"无效的用户组: {group}（可用: {string.Join("/", AuthConstants.Groups.All)}）");
+
+        var normalizedEmail = UsernameNormalizer.Normalize(email);
+        var normalizedName = string.IsNullOrEmpty(name) ? normalizedEmail : UsernameNormalizer.Normalize(name);
+
+        var existing = await _ctx.Db.Users.FirstOrDefaultAsync(u =>
+            u.Name == normalizedName || (u.NormalizedEmail != null && u.NormalizedEmail == normalizedEmail));
+        if (existing is not null)
+            return await CliHelpers.ErrorAsync("用户名或邮箱已被占用。");
+
+        string password;
+        if (passwordStdin)
+        {
+            password = CliHelpers.ReadSecretFromStdin() ?? "";
+            if (string.IsNullOrEmpty(password))
+                return await CliHelpers.ErrorAsync("密码不能为空（从 stdin 读取）");
+        }
+        else
+        {
+            password = GeneratePolicyCompliantPassword();
+        }
+
+        var user = new User
+        {
+            Status = UserStatus.Active,
+            Name = normalizedName,
+            DisplayName = string.IsNullOrEmpty(displayName) ? (name ?? email) : displayName,
+            Email = email,
+            NormalizedEmail = normalizedEmail,
+            Group = targetGroup,
+            SecurityStamp = Guid.NewGuid().ToString(),
+            RegisterTime = DateTimeOffset.UtcNow
+        };
+
+        var userManager = _ctx.Services.GetRequiredService<UserManager<User>>();
+        var passwordErrors = await AuthHelper.ValidatePasswordAsync(userManager, user, password);
+        if (passwordErrors.Count > 0)
+            return await CliHelpers.ErrorAsync(passwordErrors[0].Description);
+
+        user.PasswordHash = _ctx.PasswordHasher.HashPassword(user, password);
+        _ctx.Db.Users.Add(user);
+
+        try
+        {
+            await _ctx.Db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (ex.IsUniqueViolation())
+        {
+            return await CliHelpers.ErrorAsync("用户名或邮箱已被占用。");
+        }
+
+        await CliHelpers.LogAsync(_ctx, "cli:user create", true,
+            $"CLI created user {user.Name} (uid:{user.Uid}) group:{targetGroup}",
+            userId: user.Uid.ToString(), userEmail: user.Email);
+
+        var response = new Dictionary<string, object>
+        {
+            ["success"] = true,
+            ["message"] = $"已创建用户 {user.Name}（uid:{user.Uid}）。",
+            ["uid"] = user.Uid,
+            ["name"] = user.Name,
+            ["group"] = targetGroup
+        };
+        if (!passwordStdin)
+            response["generatedPassword"] = password;
+
+        return await CliHelpers.OkAsync(response);
+    }
+
+    [Command("delete", Description = "软删除用户（吊销全部会话）")]
+    public async Task<int> DeleteAsync([Argument("uid|name|email")] string target)
+    {
+        var user = await CliHelpers.FindUserAsync(_ctx, target);
+        if (user is null)
+            return await CliHelpers.ErrorAsync($"用户不存在: {target}");
+
+        if (user.Status == UserStatus.Deleted)
+            return await CliHelpers.ErrorAsync($"用户 {user.Name} 已被删除。");
+
+        user.Status = UserStatus.Deleted;
+        await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
+
+        await CliHelpers.LogAsync(_ctx, "cli:user delete", true,
+            $"CLI deleted user {user.Name} (uid:{user.Uid})",
+            userId: user.Uid.ToString(), userEmail: user.Email);
+
+        return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name}（uid:{user.Uid}）已删除。" });
+    }
+
+    [Command("revoke-sessions", Description = "强制吊销用户全部活跃会话")]
+    public async Task<int> RevokeSessionsAsync([Argument("uid|name|email")] string target)
+    {
+        var user = await CliHelpers.FindUserAsync(_ctx, target);
+        if (user is null)
+            return await CliHelpers.ErrorAsync($"用户不存在: {target}");
+
+        await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
+
+        await CliHelpers.LogAsync(_ctx, "cli:user revoke-sessions", true,
+            $"CLI revoked all sessions for {user.Name} (uid:{user.Uid})",
+            userId: user.Uid.ToString(), userEmail: user.Email);
+
+        return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name}（uid:{user.Uid}）的全部会话已吊销。" });
     }
 
     [Command("set-group", Description = "设置用户组（normal/admin/max，变更后吊销全部会话）")]
@@ -176,5 +295,45 @@ public sealed class UserCommands
             userId: user.Uid.ToString(), userEmail: user.Email);
 
         return await CliHelpers.OkAsync(new { success = true, message = $"已重置用户 {user.Name}（uid:{user.Uid}）的密码。" });
+    }
+
+    private string GeneratePolicyCompliantPassword()
+    {
+        var opts = _ctx.Services.GetRequiredService<UserManager<User>>().Options.Password;
+        var config = _ctx.Config;
+        var requiredLength = config.Identity.Password.RequiredLength;
+        var length = Math.Max(requiredLength, opts.RequiredLength);
+        var requiredCount = 0;
+        if (opts.RequireLowercase) requiredCount++;
+        if (opts.RequireUppercase) requiredCount++;
+        if (opts.RequireDigit) requiredCount++;
+        if (opts.RequireNonAlphanumeric) requiredCount++;
+        if (length < requiredCount) length = requiredCount;
+
+        const string lower = "abcdefghijklmnopqrstuvwxyz";
+        const string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const string digits = "0123456789";
+        const string special = "!@#$%^&*()_+-=[]{}|;:,.<>?";
+
+        var passwordChars = new List<char>(length);
+
+        if (opts.RequireLowercase) passwordChars.Add(lower[System.Security.Cryptography.RandomNumberGenerator.GetInt32(lower.Length)]);
+        if (opts.RequireUppercase) passwordChars.Add(upper[System.Security.Cryptography.RandomNumberGenerator.GetInt32(upper.Length)]);
+        if (opts.RequireDigit) passwordChars.Add(digits[System.Security.Cryptography.RandomNumberGenerator.GetInt32(digits.Length)]);
+        if (opts.RequireNonAlphanumeric) passwordChars.Add(special[System.Security.Cryptography.RandomNumberGenerator.GetInt32(special.Length)]);
+
+        var allChars = lower + upper + digits;
+        if (opts.RequireNonAlphanumeric) allChars += special;
+
+        while (passwordChars.Count < length)
+            passwordChars.Add(allChars[System.Security.Cryptography.RandomNumberGenerator.GetInt32(allChars.Length)]);
+
+        for (var i = passwordChars.Count - 1; i > 0; i--)
+        {
+            var j = System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1);
+            (passwordChars[i], passwordChars[j]) = (passwordChars[j], passwordChars[i]);
+        }
+
+        return new string(passwordChars.ToArray());
     }
 }

@@ -519,6 +519,57 @@ def mask_config_text(text: str) -> str:
     return "\n".join(masked_lines) + ("\n" if text.endswith("\n") else "")
 
 
+def read_password_policy() -> dict:
+    """从本地 pylai.toml 读取密码策略，失败则返回默认值。"""
+    defaults = {
+        "RequiredLength": 12,
+        "AdminRequiredLength": 14,
+        "RequireDigit": True,
+        "RequireLowercase": False,
+        "RequireUppercase": False,
+        "RequireNonAlphanumeric": False,
+        "CheckBreachedPasswords": True,
+    }
+    if not CONFIG_FILE.is_file():
+        return defaults
+    try:
+        with open(CONFIG_FILE, "rb") as f:
+            data = tomllib.load(f)
+        pwd = data.get("Identity", {}).get("Password", {}) if isinstance(data.get("Identity"), dict) else {}
+        # 兼容部分配置直接扁平的情况，但主要走嵌套
+        for key in list(defaults.keys()):
+            if key in pwd:
+                defaults[key] = pwd[key]
+            # TOML 中键可能为驼峰，保持一致
+        return defaults
+    except (OSError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+        return defaults
+
+
+def validate_password_local(password: str, policy: dict, is_privileged: bool) -> list[str]:
+    """本地密码策略预校验，返回错误描述列表（空列表表示通过）。"""
+    errs: list[str] = []
+    if not password:
+        errs.append("密码不能为空。")
+        return errs
+    required = policy.get("AdminRequiredLength", 14) if is_privileged else policy.get("RequiredLength", 12)
+    try:
+        required = int(required)
+    except (TypeError, ValueError):
+        required = 14 if is_privileged else 12
+    if len(password) < required:
+        errs.append(f"密码长度至少为 {required} 个字符。")
+    if policy.get("RequireDigit") and not any(c.isdigit() for c in password):
+        errs.append("密码必须包含数字。")
+    if policy.get("RequireLowercase") and not any(c.islower() for c in password):
+        errs.append("密码必须包含小写字母。")
+    if policy.get("RequireUppercase") and not any(c.isupper() for c in password):
+        errs.append("密码必须包含大写字母。")
+    if policy.get("RequireNonAlphanumeric") and all(c.isalnum() for c in password):
+        errs.append("密码必须包含非字母数字字符。")
+    return errs
+
+
 def _replace_toml_block_value(text: str, marker: str, key: str, value: str) -> str:
     """替换 TOML 段内指定键值；键不存在时插到段首行之后。"""
     start = text.index(marker)
@@ -573,16 +624,21 @@ def collect_install_answers() -> dict:
     out("\n-- 初始账号 --")
     max_email = ask("Max 账号邮箱/登录名", "max@pylai.local")
     max_password = ask("Max 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+    max_password_input = bool(max_password)
     if ask_yes_no("创建初始 Admin 账号？", True):
         admin_email = ask("Admin 账号邮箱/登录名", "admin@pylai.local")
         admin_password = ask("Admin 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+        admin_password_input = bool(admin_password)
     else:
         admin_email, admin_password = "", ""
+        admin_password_input = False
     if ask_yes_no("创建初始 Normal 测试账号？", False):
         user_email = ask("Normal 账号邮箱/登录名", "user@pylai.local")
         user_password = ask("Normal 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+        user_password_input = bool(user_password)
     else:
         user_email, user_password = "", ""
+        user_password_input = False
 
     out("\n-- 邮件 --")
     smtp = configure_smtp_interactive()
@@ -671,10 +727,13 @@ def collect_install_answers() -> dict:
         "invite_pepper": secrets.token_hex(32),
         "max_email": max_email,
         "max_password": max_password,
+        "max_password_input": max_password_input,
         "admin_email": admin_email,
         "admin_password": admin_password,
+        "admin_password_input": admin_password_input,
         "user_email": user_email,
         "user_password": user_password,
+        "user_password_input": user_password_input,
         "smtp_enabled": smtp_enabled,
         "smtp_host": smtp_host,
         "smtp_port": smtp_port,
@@ -981,7 +1040,7 @@ def action_change_smtp() -> None:
     out("注意：需要手动重启实例才能生效")
 
 
-def action_reset_password(kind: str) -> None:
+def action_reset_password(kind: str, target_email: str | None = None) -> None:
     state = load_state()
     if not state:
         out("尚未安装。")
@@ -989,9 +1048,18 @@ def action_reset_password(kind: str) -> None:
     if not container_running():
         out("容器未运行，无法重置密码。")
         return
-    default_email = state.get("max_email") if kind == "max" else state.get("admin_email")
+    default_email = target_email or (state.get("max_email") if kind == "max" else state.get("admin_email"))
     email = ask("账号邮箱/登录名", default_email or (f"{kind}@pylai.local"))
-    password = ask("新密码", "", secret=True)
+    policy = read_password_policy()
+    is_privileged = kind in ("max", "admin")
+    while True:
+        password = ask("新密码", "", secret=True)
+        errs = validate_password_local(password, policy, is_privileged)
+        if not errs:
+            break
+        out(f"密码不符合策略: {', '.join(errs)}")
+        if not ask_yes_no("重新输入？"):
+            return
     run(["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", "reset-password", email,
          "--password-stdin", "--config", "/etc/pylai/pylai.toml"],
         input_text=password + "\n", timeout=120)
@@ -1026,6 +1094,175 @@ def action_change_mfa() -> None:
     CONFIG_FILE.write_text(text, encoding="utf-8")
     CONFIG_FILE.chmod(0o600)
     out("MFA 配置已更新，注意：需要手动重启实例才能生效")
+
+
+def _cli_user_cmd(*args: str, input_text: str | None = None) -> dict:
+    """执行 Pylaios user CLI 并解析 JSON 输出。"""
+    cmd = ["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", *args,
+           "--config", "/etc/pylai/pylai.toml"]
+    result = run(cmd, check=False, timeout=120, input_text=input_text)
+    try:
+        return json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        out(result.stdout.strip() or result.stderr.strip())
+        return {"success": False}
+
+
+def action_user_list() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    data = _cli_user_cmd("list")
+    if not data.get("success"):
+        out("获取用户列表失败。")
+        return
+    users = data.get("users", [])
+    total = data.get("total", 0)
+    out(f"共 {total} 位用户：")
+    out(f"{'UID':<36} {'用户名':<20} {'显示名':<20} {'邮箱':<30} {'组':<8} {'状态':<8}")
+    out("-" * 120)
+    for u in users:
+        out(f"{u.get('uid',''):<36} {u.get('name',''):<20} {u.get('displayName','') or '-':<20} "
+            f"{u.get('email',''):<30} {u.get('group',''):<8} {u.get('status',''):<8}")
+
+
+def action_user_show() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    target = ask("用户标识（uid/用户名/邮箱）")
+    data = _cli_user_cmd("show", target)
+    if not data.get("success"):
+        out("用户不存在或查询失败。")
+        return
+    u = data.get("user", {})
+    out(f"UID:         {u.get('uid')}")
+    out(f"用户名:      {u.get('name')}")
+    out(f"显示名:      {u.get('displayName')}")
+    out(f"邮箱:        {u.get('email')}")
+    out(f"组:          {u.get('group')}")
+    out(f"状态:        {u.get('status')}")
+    out(f"注册时间:    {u.get('registerTime')}")
+    out(f"最后登录:    {u.get('lastLoginAt') or '从未登录'}")
+    out(f"活跃会话数:  {u.get('activeSessions', 0)}")
+    if u.get("externalLogins"):
+        out("外部登录绑定:")
+        for login in u["externalLogins"]:
+            out(f"  - {login['provider']} ({login['boundAt']})")
+
+
+def action_user_create() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    email = ask("邮箱")
+    name = ask("登录名（留空使用邮箱前缀）", "", allow_blank=True)
+    display_name = ask("显示名（留空使用登录名）", "", allow_blank=True)
+    group = choose([
+        ("normal — 普通用户", "normal"),
+        ("admin — 管理员", "admin"),
+        ("max — 超级管理员", "max"),
+    ], "请选择用户组") or "normal"
+    policy = read_password_policy()
+    is_privileged = group in ("admin", "max")
+    if ask_yes_no("手动指定密码？（留空则自动生成）", False):
+        while True:
+            password = ask("密码", "", secret=True)
+            errs = validate_password_local(password, policy, is_privileged)
+            if not errs:
+                break
+            out(f"密码不符合策略: {', '.join(errs)}")
+            if not ask_yes_no("重新输入？"):
+                return
+        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
+                             "--group", group, "--password-stdin", input_text=password + "\n")
+    else:
+        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
+                             "--group", group)
+    if data.get("success"):
+        out(f"创建成功: {data.get('message')}")
+        if "generatedPassword" in data:
+            out(f"自动生成的密码: {data['generatedPassword']}")
+            out("请立即保存，该密码不会再次显示。")
+    else:
+        out(f"创建失败: {data.get('message', '未知错误')}")
+
+
+def action_user_delete() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    target = ask("要删除的用户标识（uid/用户名/邮箱）")
+    if not confirm_danger(f"将软删除用户 {target}，其全部会话将被吊销。", required_word="DELETE"):
+        out("已取消。")
+        return
+    data = _cli_user_cmd("delete", target)
+    if data.get("success"):
+        out(data.get("message"))
+    else:
+        out(f"删除失败: {data.get('message', '未知错误')}")
+
+
+def action_user_set_group() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    target = ask("用户标识（uid/用户名/邮箱）")
+    group = choose([
+        ("normal — 普通用户", "normal"),
+        ("admin — 管理员", "admin"),
+        ("max — 超级管理员", "max"),
+    ], "请选择新用户组") or "normal"
+    data = _cli_user_cmd("set-group", target, group)
+    if data.get("success"):
+        out(data.get("message"))
+    else:
+        out(f"设置失败: {data.get('message', '未知错误')}")
+
+
+def action_user_set_status() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    target = ask("用户标识（uid/用户名/邮箱）")
+    status = choose([
+        ("active — 正常", "active"),
+        ("banned — 封禁", "banned"),
+    ], "请选择新状态") or "active"
+    data = _cli_user_cmd("set-status", target, status)
+    if data.get("success"):
+        out(data.get("message"))
+    else:
+        out(f"设置失败: {data.get('message', '未知错误')}")
+
+
+def action_user_revoke_sessions() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    target = ask("用户标识（uid/用户名/邮箱）")
+    data = _cli_user_cmd("revoke-sessions", target)
+    if data.get("success"):
+        out(data.get("message"))
+    else:
+        out(f"吊销失败: {data.get('message', '未知错误')}")
+
+
+def submenu_users() -> None:
+    if not container_running():
+        out("容器未运行。")
+        return
+    entries = [
+        ("用户列表", action_user_list),
+        ("查看用户详情", action_user_show),
+        ("创建用户", action_user_create),
+        ("删除用户", action_user_delete),
+        ("修改用户密码", lambda: action_reset_password("any", None)),
+        ("设置用户组", action_user_set_group),
+        ("设置用户状态", action_user_set_status),
+        ("吊销用户全部会话", action_user_revoke_sessions),
+    ]
+    run_submenu("用户管理", "主菜单", entries)
 
 
 def submenu_config() -> None:
@@ -1371,6 +1608,7 @@ def main_menu() -> None:
         out("[4] 数据备份与恢复")
         out("[5] 安全维护（签名密钥 / 迁移 / bootstrap）")
         out("[6] 网络与健康")
+        out("[7] 用户管理")
         try:
             choice = input("> ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -1385,6 +1623,7 @@ def main_menu() -> None:
             "4": submenu_data,
             "5": submenu_security,
             "6": submenu_network_health,
+            "7": submenu_users,
         }
         action = actions.get(choice)
         if action is None:
