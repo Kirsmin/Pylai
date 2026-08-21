@@ -144,7 +144,8 @@ async function confirmLock() {
   if (!lockUser.value) return
   let lockoutEnd: string | null = null
   const minutes: Record<string, number> = { '15m': 15, '1h': 60, '24h': 1440 }
-  if (lockMode.value in minutes) lockoutEnd = new Date(Date.now() + minutes[lockMode.value] * 60000).toISOString()
+  const presetMinutes = minutes[lockMode.value]
+  if (presetMinutes !== undefined) lockoutEnd = new Date(Date.now() + presetMinutes * 60000).toISOString()
   if (lockMode.value === 'custom') {
     const value = new Date(customLockoutEnd.value)
     if (!customLockoutEnd.value || Number.isNaN(value.getTime()) || value.getTime() <= Date.now()) {
