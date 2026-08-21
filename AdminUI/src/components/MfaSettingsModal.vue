@@ -34,7 +34,7 @@ async function beginTotp() {
       '/api/auth/mfa/totp/enroll',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
     )
-    if (!data?.success) throw new Error(data?.error || '无法开始 TOTP 设置')
+    if (!data?.enrollmentId) throw new Error(data?.error || '无法开始 TOTP 设置')
     enrollmentId.value = data.enrollmentId
     secret.value = data.secret
     otpauthUri.value = data.otpauthUri
@@ -77,7 +77,7 @@ async function registerPasskey() {
       '/api/auth/mfa/webauthn/registration-options',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
     )
-    if (!data?.success) throw new Error(data?.error || '无法开始 Passkey 注册')
+    if (!data?.registrationId) throw new Error(data?.error || '无法开始 Passkey 注册')
     const response = await createCredential(data.options)
     await authStore.request('/api/auth/mfa/webauthn/registration', {
       method: 'POST',

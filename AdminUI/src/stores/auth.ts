@@ -60,7 +60,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       return false
     }
     const data = await parseApiResponse<AdminCapabilitiesResponse>(response)
-    if (!data?.success) throw new Error(data?.error || '无法获取管理能力')
+    if (!data) throw new Error('无法获取管理能力')
     user.value = data.user ?? null
     capabilities.value = data.capabilities ?? []
     return user.value !== null
@@ -126,7 +126,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       const data = await parseApiResponse<{ success: boolean; transactionId: string; methods: string[] }>(
         await rawFetch('/api/auth/mfa/step-up', { method: 'POST' })
       )
-      if (!data?.success || !data.transactionId) throw new ApiError('无法开始 MFA 验证', 403, 'mfa_invalid')
+      if (!data?.transactionId) throw new ApiError('无法开始 MFA 验证', 403, 'mfa_invalid')
       stepUpTicket.value = { transactionId: data.transactionId, methods: data.methods || [] }
       stepUpVisible.value = true
     } catch (err) {
@@ -194,7 +194,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
         webAuthnCount: number
         stepUpSatisfied: boolean
       }>(await rawFetch('/api/auth/mfa/status'))
-      if (!data?.success) return
+      if (!data) return
       mfaTotpEnabled.value = data.totpEnabled
       mfaWebAuthnCount.value = data.webAuthnCount
       mfaStepUpSatisfied.value = data.stepUpSatisfied

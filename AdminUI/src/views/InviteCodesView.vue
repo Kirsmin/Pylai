@@ -86,7 +86,7 @@ async function save() {
         body: JSON.stringify({ group: form.value.group, maxRedemptions: form.value.maxRedemptions, lifetimeHours: form.value.lifetimeHours })
       })
       createdCode.value = data ?? null
-      createdVisible.value = data?.success === true
+      createdVisible.value = data !== null && data !== undefined
     } else {
       await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(editingId.value)}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
