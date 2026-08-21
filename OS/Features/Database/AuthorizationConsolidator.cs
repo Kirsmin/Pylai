@@ -57,7 +57,8 @@ public static class AuthorizationConsolidator
             return null;
 
         var canonical = existing[0];
-        var canonicalId = await authorizationManager.GetIdAsync(canonical);
+        var canonicalId = await authorizationManager.GetIdAsync(canonical)
+            ?? throw new InvalidOperationException("授权合并失败：主授权缺少 ID");
         var previous = NormalizeScopes(await authorizationManager.GetScopesAsync(canonical));
         var merged = NormalizeScopes(previous.Concat(requestedScopes ?? previous));
 
@@ -66,7 +67,8 @@ public static class AuthorizationConsolidator
 
         foreach (var duplicate in existing.Skip(1))
         {
-            var duplicateId = await authorizationManager.GetIdAsync(duplicate);
+            var duplicateId = await authorizationManager.GetIdAsync(duplicate)
+                ?? throw new InvalidOperationException("授权合并失败：重复授权缺少 ID");
             consolidatedIds.Add(duplicateId);
 
             await foreach (var token in tokenManager.FindByAuthorizationIdAsync(duplicateId))
@@ -113,8 +115,8 @@ public static class AuthorizationConsolidator
         while (true)
         {
             var duplicates = await authorizationSet
-                .Where(a => a.Status == Statuses.Valid && a.Type == AuthorizationTypes.Permanent)
-                .Select(a => new { a.Subject, ApplicationId = EF.Property<string>(a, "ApplicationId") })
+                .Where(a => a.Status == Statuses.Valid && a.Type == AuthorizationTypes.Permanent && a.Subject != null)
+                .Select(a => new { Subject = a.Subject!, ApplicationId = EF.Property<string>(a, "ApplicationId") })
                 .GroupBy(x => new { x.Subject, x.ApplicationId })
                 .Where(g => g.Count() > 1)
                 .Select(g => new { g.Key.Subject, g.Key.ApplicationId })

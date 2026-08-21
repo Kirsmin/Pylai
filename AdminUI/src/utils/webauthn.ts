@@ -24,7 +24,7 @@ export function isWebAuthnAvailable(): boolean {
 
 export function assertWebAuthnAvailable(): void {
   if (!isWebAuthnAvailable()) {
-    throw new Error('当前浏览器环境不支持 WebAuthn / Passkey。请使用 HTTPS 或 localhost 访问，或改用 TOTP 验证。')
+    throw new Error('当前浏览器环境不支持 WebAuthn / 通行密钥。请使用 HTTPS 或 localhost 访问，或改用 时间验证码验证。')
   }
 }
 
@@ -39,7 +39,7 @@ export async function getAssertion(options: any) {
     }))
   }
   const credential = await navigator.credentials.get({ publicKey }) as PublicKeyCredential | null
-  if (!credential) throw new Error('未完成 Passkey 验证')
+  if (!credential) throw new Error('未完成 通行密钥验证')
   const response = credential.response as AuthenticatorAssertionResponse
   return {
     id: credential.id,
@@ -66,7 +66,7 @@ export async function createCredential(options: any) {
     }))
   }
   const credential = await navigator.credentials.create({ publicKey }) as PublicKeyCredential | null
-  if (!credential) throw new Error('未完成 Passkey 注册')
+  if (!credential) throw new Error('未完成 通行密钥注册')
   const response = credential.response as AuthenticatorAttestationResponse
   return {
     id: credential.id,

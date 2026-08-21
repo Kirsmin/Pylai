@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/auth'
 import PageHeader from '@/components/PageHeader.vue'
 import AppPagination from '@/components/AppPagination.vue'
 import AppBadge from '@/components/AppBadge.vue'
+import { groupLabel, inviteStatusLabel } from '@/utils/labels'
 import type { AdminInviteCode, AdminInviteCodeCreateResponse } from '@/types/admin'
 
 const authStore = useAuthStore()
@@ -19,9 +20,9 @@ const pageSize = 20
 
 const cap = computed(() => authStore.capability('inviteCodes'))
 const groupOptions = [
-  { label: 'normal', value: 'normal' },
-  { label: 'admin', value: 'admin' },
-  { label: 'max', value: 'max' }
+  { label: '普通用户', value: 'normal' },
+  { label: '管理员', value: 'admin' },
+  { label: '超级管理员', value: 'max' }
 ]
 
 function endpointAllowed(method: string, path: string) {
@@ -52,7 +53,7 @@ async function load() {
   try {
     const params = new URLSearchParams({ skip: String((page.value - 1) * pageSize), take: String(pageSize) })
     if (group.value) params.set('group', group.value)
-    const data = await authStore.request<{ success: boolean; total: number; codes: AdminInviteCode[] }>(
+    const data = await authStore.request<{ total: number; codes: AdminInviteCode[] }>(
       `/api/admin/invite-codes?${params.toString()}`
     )
     codes.value = data?.codes ?? []
@@ -105,7 +106,7 @@ const detail = ref<AdminInviteCode | null>(null)
 async function openDetail(id: string) {
   detailVisible.value = true; detailLoading.value = true; detail.value = null
   try {
-    const data = await authStore.request<{ success: boolean; code: AdminInviteCode | null }>(
+    const data = await authStore.request<{ code: AdminInviteCode | null }>(
       `/api/admin/invite-codes/${encodeURIComponent(id)}`
     )
     detail.value = data?.code ?? null
@@ -147,10 +148,10 @@ async function revoke(id: string) {
           <tbody>
             <tr v-for="c in codes" :key="c.id">
               <td><span class="mono cell-primary">{{ c.prefix }}...</span></td>
-              <td><AppBadge :tone="groupTone(c.group)">{{ c.group }}</AppBadge></td>
+              <td><AppBadge :tone="groupTone(c.group)">{{ groupLabel(c.group) }}</AppBadge></td>
               <td>
                 <div style="display:flex;flex-direction:column;gap:2px;">
-                  <AppBadge :tone="statusTone(c.status)">{{ c.status }}</AppBadge>
+                  <AppBadge :tone="statusTone(c.status)">{{ inviteStatusLabel(c.status) }}</AppBadge>
                   <span class="mono small muted">{{ formatDate(c.expiresAt) }}</span>
                 </div>
               </td>
@@ -206,7 +207,7 @@ async function revoke(id: string) {
         <div class="mono" style="font-size:18px;word-break:break-all;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-active);">
           {{ createdCode.code }}
         </div>
-        <div class="muted small">{{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
+        <div class="muted small">{{ groupLabel(createdCode.group) }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
         <NButton type="success" ghost @click="createdVisible = false">我已保存</NButton>
       </div>
     </NModal>
@@ -216,8 +217,8 @@ async function revoke(id: string) {
       <template v-else-if="detail">
         <dl class="admin-detail-grid">
           <div><dt>邀请码</dt><dd class="mono">{{ detail.prefix }}...</dd></div>
-          <div><dt>用户组</dt><dd><AppBadge :tone="groupTone(detail.group)">{{ detail.group }}</AppBadge></dd></div>
-          <div><dt>状态</dt><dd><AppBadge :tone="statusTone(detail.status)">{{ detail.status }}</AppBadge></dd></div>
+          <div><dt>用户组</dt><dd><AppBadge :tone="groupTone(detail.group)">{{ groupLabel(detail.group) }}</AppBadge></dd></div>
+          <div><dt>状态</dt><dd><AppBadge :tone="statusTone(detail.status)">{{ inviteStatusLabel(detail.status) }}</AppBadge></dd></div>
           <div><dt>有效期</dt><dd class="mono">{{ formatDate(detail.expiresAt) }}</dd></div>
           <div><dt>核销进度</dt><dd class="mono">{{ detail.usedCount }} / {{ detail.maxRedemptions }}</dd></div>
         </dl>

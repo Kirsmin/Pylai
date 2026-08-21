@@ -68,7 +68,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("修改密码请求");
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         _logger.LogDebug("修改密码 | uid:{Uid} | 用户:{Name}", user.Uid, user.Name);
 
@@ -106,7 +106,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("绑定邮箱请求 | {Email}", request.Email);
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         _logger.LogDebug("绑定邮箱 | uid:{Uid} | 用户:{Name}", user.Uid, user.Name);
 
@@ -157,7 +157,7 @@ public class AccountController : ControllerBase
     public async Task<IActionResult> BindEmailConfirm([FromBody] EmailCodeRequest request)
     {
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var key = $"bind-email:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
@@ -187,7 +187,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("更换邮箱请求 | {Email}", request.NewEmail);
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         _logger.LogDebug("更换邮箱 | uid:{Uid} | 当前:{CurrentEmail}", user.Uid, user.Email);
 
@@ -231,7 +231,7 @@ public class AccountController : ControllerBase
     public async Task<IActionResult> ChangeEmailConfirm([FromBody] EmailCodeRequest request)
     {
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var key = $"change-email:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
@@ -251,7 +251,7 @@ public class AccountController : ControllerBase
     public async Task<IActionResult> ChangeEmailFinalize([FromBody] EmailCodeRequest request)
     {
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var key = $"change-email-final:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
@@ -286,7 +286,10 @@ public class AccountController : ControllerBase
         _logger.LogDebug("账号提权请求 | prefix:{Prefix}", invitePrefix);
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
+
+        if (string.IsNullOrWhiteSpace(request.InviteCode))
+            return BadRequest(new AccountRedeemResponse { Success = false, Error = "邀请码不能为空。", ErrorCode = "invalid_format" });
 
         _logger.LogDebug("账号提权 | uid:{Uid} | 用户:{Name}", user.Uid, user.Name);
 
@@ -325,7 +328,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("列出已授权应用");
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var subject = user.Uid.ToString();
         var items = new List<(DateTimeOffset CreatedAt, AuthorizedAppItem Item)>();
@@ -390,7 +393,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("撤销授权应用 | id:{Id}", id);
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var authorization = await _authorizationManager.FindByIdAsync(id);
         if (authorization is null)
@@ -438,7 +441,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("列出外部登录绑定");
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var logins = await _userManager.GetLoginsAsync(user);
         var items = logins.Select(l => new
@@ -462,7 +465,7 @@ public class AccountController : ControllerBase
         _logger.LogDebug("解绑外部登录 | Provider:{Provider}", provider);
 
         var (user, userError) = await RequireUserAsync();
-        if (userError is not null) return userError;
+        if (user is null) return userError!;
 
         var logins = await _userManager.GetLoginsAsync(user);
         var matched = logins.FirstOrDefault(l =>
@@ -489,7 +492,7 @@ public class AccountController : ControllerBase
             await _emailSender.SendVerificationCodeAsync(kind, email, code);
             return null;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             _logger.LogError("邮件发送失败 | 操作:{Action} uid:{Uid} → {Email}", action, user.Uid, email);
             return StatusCode(503, new EmailCodeResponse

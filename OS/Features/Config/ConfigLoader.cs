@@ -61,7 +61,7 @@ public static class ConfigLoader
             CollectPath(kv, "", map);
         foreach (var tableSyntax in doc.Tables)
             foreach (var kv in tableSyntax.Items)
-                CollectPath(kv, tableSyntax.Name.ToString().Trim(), map);
+                CollectPath(kv, tableSyntax.Name?.ToString().Trim() ?? "", map);
 
 
         var table = TomlSerializer.Deserialize<TomlTable>(text)!;
@@ -132,7 +132,7 @@ public static class ConfigLoader
     private static void CollectPath(KeyValueSyntax kv, string prefix,
         Dictionary<string, (int Line, int Column)> map)
     {
-        var key = kv.Key.ToString().Trim();
+        var key = kv.Key?.ToString().Trim() ?? "";
         if (key.Length == 0) return;
         var full = prefix.Length > 0 ? prefix + "." + key : key;
         map[full] = (kv.Span.Start.Line + 1, kv.Span.Start.Column + 1);
@@ -264,12 +264,12 @@ public static class ConfigLoader
         AddIssue(result, map, path, fileName, "E003", $"应为 {expected}，实际为 {found}");
     }
 
-    private static bool TypeMatches(object value, Type type, out string expected, out string found)
+    private static bool TypeMatches(object? value, Type type, out string expected, out string found)
     {
         expected = JsonTypeName(type);
         found = FoundName(value);
 
-        return type switch
+        return value is not null && type switch
         {
             var t when t == typeof(string) => value is string,
             var t when t == typeof(int) || t == typeof(long) => value is long,
@@ -281,8 +281,9 @@ public static class ConfigLoader
         };
     }
 
-    private static string FoundName(object value) => value switch
+    private static string FoundName(object? value) => value switch
     {
+        null => "null",
         string => "string",
         long => "integer",
         bool => "boolean",

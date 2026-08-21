@@ -35,7 +35,7 @@ async function load() {
     if (success.value !== null) params.set('success', String(success.value))
     if (fromDate.value) params.set('from', fromDate.value)
     if (toDate.value) params.set('to', toDate.value)
-    const data = await authStore.request<{ success: boolean; total: number; logs: AdminAuditLogItem[] }>(
+    const data = await authStore.request<{ total: number; logs: AdminAuditLogItem[] }>(
       `/api/admin/audit-logs?${params.toString()}`
     )
     logs.value = data?.logs ?? []

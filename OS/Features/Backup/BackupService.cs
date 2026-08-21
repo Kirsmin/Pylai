@@ -24,17 +24,17 @@ public sealed class BackupService
     public async Task<string> CreateAsync(string? name = null)
     {
         System.IO.Directory.CreateDirectory(_directory);
-        var (conn, db) = Parse();
+        var (host, port, username, password, db) = Parse();
         var file = SanitizeName(name ?? $"pylai-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.dump");
         var target = Path.Combine(_directory, file);
 
         var args = new List<string>
         {
             "-Fc", "-f", target,
-            "-h", conn.Host, "-p", conn.Port.ToString(), "-U", conn.Username,
+            "-h", host, "-p", port.ToString(), "-U", username,
             db
         };
-        var (exit, stderr) = await RunAsync("pg_dump", args, conn.Password);
+        var (exit, stderr) = await RunAsync("pg_dump", args, password);
         if (exit != 0)
         {
             if (File.Exists(target)) File.Delete(target);
@@ -71,14 +71,14 @@ public sealed class BackupService
         if (!System.IO.File.Exists(path))
             throw new FileNotFoundException($"备份不存在: {name}（可用 backup list 查看）");
 
-        var (conn, db) = Parse();
+        var (host, port, username, password, db) = Parse();
         var args = new List<string>
         {
             "--clean", "--if-exists", "--no-owner",
-            "-h", conn.Host, "-p", conn.Port.ToString(), "-U", conn.Username,
+            "-h", host, "-p", port.ToString(), "-U", username,
             "-d", db, path
         };
-        var (exit, stderr) = await RunAsync("pg_restore", args, conn.Password);
+        var (exit, stderr) = await RunAsync("pg_restore", args, password);
         if (exit != 0)
             throw new InvalidOperationException($"pg_restore 失败 (exit {exit}): {stderr.Trim()}");
     }
@@ -96,12 +96,16 @@ public sealed class BackupService
         return fileName;
     }
 
-    private (NpgsqlConnectionStringBuilder Conn, string Database) Parse()
+    private (string Host, int Port, string Username, string? Password, string Database) Parse()
     {
         var conn = new NpgsqlConnectionStringBuilder(_connectionString);
+        if (string.IsNullOrEmpty(conn.Host))
+            throw new InvalidOperationException("[Database].ConnectionString 缺少 Host 参数");
+        if (string.IsNullOrEmpty(conn.Username))
+            throw new InvalidOperationException("[Database].ConnectionString 缺少 Username 参数");
         if (string.IsNullOrEmpty(conn.Database))
             throw new InvalidOperationException("[Database].ConnectionString 缺少 Database 参数");
-        return (conn, conn.Database);
+        return (conn.Host!, conn.Port, conn.Username!, conn.Password, conn.Database!);
     }
 
     private static async Task<(int Exit, string Stderr)> RunAsync(string tool, List<string> args, string? password)

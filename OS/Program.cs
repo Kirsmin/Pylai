@@ -284,6 +284,7 @@ static async Task<int> RunCliAsync(string[] args, string[] cliArgs, string? conf
     app.AddSubCommand("client", c => c.AddCommands<ClientCommands>());
     app.AddSubCommand("ban", c => c.AddCommands<BanCommands>());
     app.AddSubCommand("user-token", c => c.AddCommands<UserTokenCommands>());
+    app.AddSubCommand("manage-token", c => c.AddCommands<LocalManageTokenCommands>());
     app.AddSubCommand("invite", c => c.AddCommands<InviteCommands>());
     app.AddSubCommand("db", c => c.AddCommands<DbCommands>());
     app.AddSubCommand("key", c => c.AddCommands<SigningKeyCommands>());

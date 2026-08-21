@@ -32,7 +32,7 @@ async function start(provider: string) {
   <template v-if="providers.length">
     <NDivider style="margin: 8px 0">或使用第三方账号登录</NDivider>
     <div class="external-row">
-      <NButton v-for="provider in providers" :key="provider" quaternary dashed @click="start(provider)">{{ names[provider] || provider }}</NButton>
+      <NButton v-for="provider in providers" :key="provider" quaternary dashed @click="start(provider)">使用 {{ names[provider] || provider }} 登录</NButton>
     </div>
   </template>
   <p v-if="error" class="error-msg">{{ error }}</p>

@@ -8,6 +8,7 @@ import {
 } from '@vicons/tabler'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
+import { groupLabel } from '@/utils/labels'
 import MfaSettingsModal from '@/components/MfaSettingsModal.vue'
 import MfaStepUpModal from '@/components/MfaStepUpModal.vue'
 
@@ -49,7 +50,7 @@ function groupTone(group: string): string {
   <div class="admin-shell">
     <aside :class="['admin-sidebar', { open: sidebarOpen }]">
       <div class="sidebar-brand" @click="navTo('/')">
-        <span># Pylai</span>
+        <span>Pylai 管理后台</span>
       </div>
 
       <nav class="sidebar-nav">
@@ -76,7 +77,7 @@ function groupTone(group: string): string {
               background: `var(--${groupTone(authStore.group)}-soft)`,
               color: `var(--${groupTone(authStore.group)})`
             }"
-          >{{ authStore.group }}</span>
+          >{{ groupLabel(authStore.group) }}</span>
         </div>
         <div style="display:flex;gap:6px;">
           <button class="icon-btn" title="切换主题" @click="themeStore.toggle()">
@@ -98,7 +99,7 @@ function groupTone(group: string): string {
           <button class="icon-btn mobile-menu-btn" @click="sidebarOpen = !sidebarOpen">
             <NIcon :component="sidebarOpen ? X : Menu2" />
           </button>
-          <h1 class="header-title">{{ route.meta.title as string || 'Pylai' }}</h1>
+          <h1 class="header-title">{{ route.meta.title as string || 'Pylai 管理后台' }}</h1>
         </div>
         <div class="header-actions">
           <slot name="actions" />

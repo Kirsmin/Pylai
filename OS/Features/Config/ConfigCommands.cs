@@ -89,7 +89,8 @@ public sealed class ConfigCommands
             return 2;
         }
 
-        var table = TomlSerializer.Deserialize<TomlTable>(TomlSerializer.Serialize(result.Config));
+        var table = TomlSerializer.Deserialize<TomlTable>(TomlSerializer.Serialize(result.Config))
+            ?? throw new InvalidOperationException("配置序列化/反序列化失败");
         BlankSensitive(table, typeof(MainConfig));
         Console.Out.WriteLine(TomlSerializer.Serialize(table));
         return 0;

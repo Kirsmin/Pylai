@@ -245,6 +245,7 @@ public static class AppServices
         }
 
         authBuilder.AddScheme<UserTokenOptions, UserTokenAuthHandler>("UserToken", null);
+        authBuilder.AddScheme<LocalManageTokenOptions, LocalManageTokenAuthHandler>(LocalManageToken.Scheme, null);
 
         services.AddAuthorization(options =>
         {
@@ -260,6 +261,7 @@ public static class AppServices
             options.AddPolicy(AuthConstants.Policies.AdminUserApi, policy =>
             {
                 policy.AddAuthenticationSchemes(
+                    LocalManageToken.Scheme,
                     "UserToken",
                     IdentityConstants.ApplicationScheme,
                     "OpenIddict.Validation.AspNetCore");
@@ -270,6 +272,7 @@ public static class AppServices
             options.AddPolicy(AuthConstants.Policies.MaxApi, policy =>
             {
                 policy.AddAuthenticationSchemes(
+                    LocalManageToken.Scheme,
                     "UserToken",
                     IdentityConstants.ApplicationScheme,
                     "OpenIddict.Validation.AspNetCore");

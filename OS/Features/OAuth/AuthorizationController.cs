@@ -360,7 +360,8 @@ public class AuthorizationController : Controller
                         type: AuthorizationTypes.Permanent,
                         scopes: requestedScopes.ToImmutableArray());
 
-                    var createdId = await _authorizationManager.GetIdAsync(created);
+                    var createdId = await _authorizationManager.GetIdAsync(created)
+                        ?? throw new InvalidOperationException("授权创建失败：无法获取新授权 ID");
 
                     _context.ConsentAuditEvents.Add(new ConsentAuditEvent
                     {

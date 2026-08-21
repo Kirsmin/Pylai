@@ -6,6 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AppPagination from '@/components/AppPagination.vue'
 import AppBadge from '@/components/AppBadge.vue'
 import DateTimeText from '@/components/DateTimeText.vue'
+import { groupLabel, statusLabel } from '@/utils/labels'
 import type { AdminUserDetail, AdminUserListItem, AdminUserSession, AdminUserTokenUsageItem } from '@/types/admin'
 
 const authStore = useAuthStore()
@@ -26,13 +27,14 @@ const targetGroups = computed(() => cap.value?.targetGroups ?? [])
 const canEditGroup = computed(() => cap.value?.canEditGroup ?? false)
 const canEditStatus = computed(() => cap.value?.canEditStatus ?? false)
 
-const groupOptions = computed(() => targetGroups.value.map(g => ({ label: g, value: g })))
-const statusOptions = [
-  { label: 'Active', value: 'Active' },
-  { label: 'Banned', value: 'Banned' },
-  { label: 'Locked', value: 'Locked' },
-  { label: 'Deleted', value: 'Deleted' }
+const groupOptions = computed(() => targetGroups.value.map(g => ({ label: groupLabel(g), value: g })))
+const statusFilterOptions = [
+  { label: '正常', value: 'Active' },
+  { label: '封禁', value: 'Banned' },
+  { label: '锁定', value: 'Locked' },
+  { label: '已删除', value: 'Deleted' }
 ]
+const statusEditOptions = statusFilterOptions.filter(option => option.value !== 'Deleted')
 
 function groupTone(g: string) {
   if (g.toLowerCase() === 'normal') return 'success'
@@ -59,7 +61,7 @@ async function load() {
     if (search.value.trim()) params.set('search', search.value.trim())
     if (group.value) params.set('group', group.value)
     if (status.value) params.set('status', status.value)
-    const data = await authStore.request<{ success: boolean; total: number; users: AdminUserListItem[] }>(
+    const data = await authStore.request<{ total: number; users: AdminUserListItem[] }>(
       `/api/admin/users?${params.toString()}`
     )
     users.value = data?.users ?? []
@@ -79,7 +81,7 @@ const detailLoading = ref(false)
 async function openDetail(uid: string) {
   detailVisible.value = true; detailLoading.value = true; detail.value = null
   try {
-    const data = await authStore.request<{ success: boolean; user: AdminUserDetail | null }>(
+    const data = await authStore.request<{ user: AdminUserDetail | null }>(
       `/api/admin/users/${encodeURIComponent(uid)}`
     )
     detail.value = data?.user ?? null
@@ -117,16 +119,42 @@ async function saveEdit() {
 
 // Status toggle
 const statusSavingUid = ref('')
-async function setStatus(user: AdminUserListItem, next: string) {
+async function setStatus(user: AdminUserListItem, next: string, lockoutEnd?: string | null) {
   statusSavingUid.value = user.uid
   try {
+    const body: Record<string, unknown> = { status: next }
+    if (lockoutEnd !== undefined) body.lockoutEnd = lockoutEnd
     await authStore.request(`/api/admin/users/${encodeURIComponent(user.uid)}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: next })
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     })
     message.success('状态已更新'); load()
     if (detail.value?.uid === user.uid) openDetail(user.uid)
   } catch (err) { message.error(err instanceof Error ? err.message : '操作失败') }
   finally { statusSavingUid.value = '' }
+}
+
+const lockVisible = ref(false)
+const lockUser = ref<AdminUserListItem | null>(null)
+const lockMode = ref('15m')
+const customLockoutEnd = ref('')
+function openLock(user: AdminUserListItem) {
+  lockUser.value = user; lockMode.value = '15m'; customLockoutEnd.value = ''; lockVisible.value = true
+}
+async function confirmLock() {
+  if (!lockUser.value) return
+  let lockoutEnd: string | null = null
+  const minutes: Record<string, number> = { '15m': 15, '1h': 60, '24h': 1440 }
+  if (lockMode.value in minutes) lockoutEnd = new Date(Date.now() + minutes[lockMode.value] * 60000).toISOString()
+  if (lockMode.value === 'custom') {
+    const value = new Date(customLockoutEnd.value)
+    if (!customLockoutEnd.value || Number.isNaN(value.getTime()) || value.getTime() <= Date.now()) {
+      message.warning('请选择未来的锁定到期时间')
+      return
+    }
+    lockoutEnd = value.toISOString()
+  }
+  await setStatus(lockUser.value, 'Locked', lockoutEnd)
+  lockVisible.value = false
 }
 
 // Password
@@ -155,7 +183,7 @@ const sessions = ref<AdminUserSession[]>([])
 async function loadSessions(uid: string) {
   sessionsLoading.value = true; sessions.value = []
   try {
-    const data = await authStore.request<{ success: boolean; sessions: AdminUserSession[] }>(
+    const data = await authStore.request<{ sessions: AdminUserSession[] }>(
       `/api/admin/users/${encodeURIComponent(uid)}/sessions`
     )
     sessions.value = data?.sessions ?? []
@@ -189,7 +217,7 @@ async function loadToken(uid: string, skip: number) {
   tokenLoading.value = true
   try {
     const data = await authStore.request<{
-      success: boolean; exists: boolean; tokenPrefix?: string | null;
+      exists: boolean; tokenPrefix?: string | null;
       createdAt?: string | null; refreshedAt?: string | null; expiresAt?: string | null;
       lastUsedAt?: string | null; lastIpAddress?: string | null; totalUsage?: number; usage?: AdminUserTokenUsageItem[]
     }>(`/api/admin/users/${encodeURIComponent(uid)}/token?skip=${skip}&take=${tokenPageSize}`)
@@ -203,7 +231,7 @@ async function loadToken(uid: string, skip: number) {
 function openToken(user: AdminUserListItem) { tokenUid.value = user.uid; tokenVisible.value = true; loadToken(user.uid, 0) }
 async function revokeToken(uid: string) {
   try {
-    const data = await authStore.request<{ success: boolean; revoked: boolean }>(
+    const data = await authStore.request<{ revoked: boolean }>(
       `/api/admin/users/${encodeURIComponent(uid)}/token`, { method: 'DELETE' }
     )
     message.success(data?.revoked === false ? '无 Token' : 'Token 已吊销')
@@ -249,7 +277,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
     <div class="admin-toolbar">
       <NInput v-model:value="search" placeholder="搜索用户名 / 邮箱 / 显示名" clearable style="width:260px" @keyup.enter="searchUsers" />
       <NSelect v-if="targetGroups.length" v-model:value="group" placeholder="用户组" clearable :options="groupOptions" style="width:130px" @update:value="searchUsers" />
-      <NSelect v-if="canEditStatus" v-model:value="status" placeholder="状态" clearable :options="statusOptions" style="width:130px" @update:value="searchUsers" />
+      <NSelect v-if="canEditStatus" v-model:value="status" placeholder="状态" clearable :options="statusFilterOptions" style="width:130px" @update:value="searchUsers" />
       <NButton type="success" ghost @click="searchUsers">查询</NButton>
       <NButton quaternary @click="resetFilters">重置</NButton>
     </div>
@@ -272,8 +300,8 @@ function handleMore(key: string | number, user: AdminUserListItem) {
                 </div>
               </td>
               <td><span class="truncate muted">{{ u.email || '—' }}</span></td>
-              <td><AppBadge :tone="groupTone(u.group)">{{ u.group }}</AppBadge></td>
-              <td><AppBadge :tone="statusTone(u.status)">{{ u.status }}</AppBadge></td>
+              <td><AppBadge :tone="groupTone(u.group)">{{ groupLabel(u.group) }}</AppBadge></td>
+              <td><AppBadge :tone="statusTone(u.status)">{{ statusLabel(u.status) }}</AppBadge></td>
               <td><DateTimeText :value="u.lastLoginAt" /></td>
               <td style="text-align:right">
                 <div style="display:inline-flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">
@@ -284,10 +312,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
                       <template #trigger><NButton size="tiny" quaternary type="warning" :loading="statusSavingUid===u.uid">封禁</NButton></template>
                       <span style="white-space:nowrap">封禁 {{ u.name }}？</span>
                     </NPopconfirm>
-                    <NPopconfirm v-if="u.status.toLowerCase()==='active'" @positive-click="setStatus(u,'Locked')">
-                      <template #trigger><NButton size="tiny" quaternary type="warning" :loading="statusSavingUid===u.uid">锁定</NButton></template>
-                      <span style="white-space:nowrap">锁定 {{ u.name }}？</span>
-                    </NPopconfirm>
+                    <NButton v-if="u.status.toLowerCase()==='active'" size="tiny" quaternary type="warning" :loading="statusSavingUid===u.uid" @click="openLock(u)">锁定</NButton>
                     <NPopconfirm v-if="u.status.toLowerCase()!=='active'" @positive-click="setStatus(u,'Active')">
                       <template #trigger><NButton size="tiny" quaternary type="success" :loading="statusSavingUid===u.uid">启用</NButton></template>
                       <span style="white-space:nowrap">启用 {{ u.name }}？</span>
@@ -315,11 +340,11 @@ function handleMore(key: string | number, user: AdminUserListItem) {
           <div><dt>登录名</dt><dd class="mono">{{ detail.name }}</dd></div>
           <div><dt>显示名</dt><dd>{{ detail.displayName||'—' }}</dd></div>
           <div><dt>邮箱</dt><dd>{{ detail.email||'—' }}</dd></div>
-          <div><dt>用户组</dt><dd><AppBadge :tone="groupTone(detail.group)">{{ detail.group }}</AppBadge></dd></div>
-          <div><dt>状态</dt><dd><AppBadge :tone="statusTone(detail.status)">{{ detail.status }}</AppBadge></dd></div>
+          <div><dt>用户组</dt><dd><AppBadge :tone="groupTone(detail.group)">{{ groupLabel(detail.group) }}</AppBadge></dd></div>
+          <div><dt>状态</dt><dd><AppBadge :tone="statusTone(detail.status)">{{ statusLabel(detail.status) }}</AppBadge></dd></div>
           <div><dt>注册时间</dt><dd><DateTimeText :value="detail.registerTime" /></dd></div>
           <div><dt>最近登录</dt><dd><DateTimeText :value="detail.lastLoginAt" /></dd></div>
-          <div><dt>锁定到期</dt><dd><DateTimeText :value="detail.lockoutEnd" empty="未锁定" /></dd></div>
+          <div><dt>锁定到期</dt><dd><DateTimeText :value="detail.lockoutEnd" :empty="detail.status.toLowerCase()==='locked'?'永久锁定':'未锁定'" /></dd></div>
           <div><dt>失败次数</dt><dd>{{ detail.accessFailedCount }}</dd></div>
           <div><dt>活跃会话</dt><dd>{{ detail.activeSessions }}</dd></div>
           <div>
@@ -351,7 +376,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
         <div v-if="canEditStatus">
           <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;display:block;">状态</span>
           <div class="segmented">
-            <button v-for="opt in statusOptions" :key="opt.value" type="button" :class="{active:editForm.status===opt.value}" @click="editForm.status=opt.value">{{ opt.label }}</button>
+            <button v-for="opt in statusEditOptions" :key="opt.value" type="button" :class="{active:editForm.status===opt.value}" @click="editForm.status=opt.value">{{ opt.label }}</button>
           </div>
         </div>
         <div v-if="canEditGroup">
@@ -362,6 +387,25 @@ function handleMore(key: string | number, user: AdminUserListItem) {
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:4px;">
           <NButton type="success" ghost :loading="editSaving" @click="saveEdit">保存</NButton>
+        </div>
+      </div>
+    </NModal>
+
+    <!-- Lock -->
+    <NModal v-model:show="lockVisible" preset="card" style="width:min(92%,440px)" title="锁定用户">
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <NRadioGroup v-model:value="lockMode">
+          <NSpace vertical>
+            <NRadio value="15m">15 分钟</NRadio>
+            <NRadio value="1h">1 小时</NRadio>
+            <NRadio value="24h">24 小时</NRadio>
+            <NRadio value="permanent">永久</NRadio>
+            <NRadio value="custom">自定义</NRadio>
+          </NSpace>
+        </NRadioGroup>
+        <input v-if="lockMode==='custom'" v-model="customLockoutEnd" type="datetime-local" class="admin-input" />
+        <div style="display:flex;justify-content:flex-end;">
+          <NButton type="warning" ghost :loading="statusSavingUid===lockUser?.uid" @click="confirmLock">确认锁定</NButton>
         </div>
       </div>
     </NModal>

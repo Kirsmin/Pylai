@@ -7,8 +7,8 @@ namespace Pylaios.Shared;
 
 public sealed class PylaiosLookupNormalizer : ILookupNormalizer
 {
-    public string NormalizeName(string name) => UsernameNormalizer.Normalize(name);
-    public string NormalizeEmail(string email) => UsernameNormalizer.Normalize(email);
+    public string? NormalizeName(string? name) => name is null ? null : UsernameNormalizer.Normalize(name);
+    public string? NormalizeEmail(string? email) => email is null ? null : UsernameNormalizer.Normalize(email);
 }
 
 public static class UsernameNormalizer

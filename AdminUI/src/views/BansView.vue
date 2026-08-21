@@ -6,6 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AppPagination from '@/components/AppPagination.vue'
 import AppBadge from '@/components/AppBadge.vue'
 import DateTimeText from '@/components/DateTimeText.vue'
+import { banTypeLabel } from '@/utils/labels'
 import type { AdminBanHistoryItem, AdminBanInfo } from '@/types/admin'
 
 const authStore = useAuthStore()
@@ -22,11 +23,11 @@ const pageSize = 20
 
 const cap = computed(() => authStore.capability('bans'))
 const typeOptions = [
-  { label: 'login', value: 'login' },
-  { label: 'invite', value: 'invite' },
-  { label: 'email', value: 'email' },
-  { label: 'admin', value: 'admin' },
-  { label: 'confirm', value: 'confirm' }
+  { label: '登录', value: 'login' },
+  { label: '邀请码', value: 'invite' },
+  { label: '邮箱验证', value: 'email' },
+  { label: '管理后台', value: 'admin' },
+  { label: '敏感操作', value: 'confirm' }
 ]
 const historyTypeOptions = typeOptions.filter(i => i.value !== 'confirm')
 
@@ -40,10 +41,10 @@ async function load() {
     const params = new URLSearchParams({ skip: String((page.value - 1) * pageSize), take: String(pageSize) })
     if (type.value) params.set('type', type.value)
     if (tab.value === 'active') {
-      const data = await authStore.request<{ success: boolean; total: number; bans: AdminBanInfo[] }>(`/api/admin/bans?${params.toString()}`)
+      const data = await authStore.request<{ total: number; bans: AdminBanInfo[] }>(`/api/admin/bans?${params.toString()}`)
       active.value = data?.bans ?? []; total.value = data?.total ?? 0
     } else {
-      const data = await authStore.request<{ success: boolean; total: number; bans: AdminBanHistoryItem[] }>(`/api/admin/bans/history?${params.toString()}`)
+      const data = await authStore.request<{ total: number; bans: AdminBanHistoryItem[] }>(`/api/admin/bans/history?${params.toString()}`)
       history.value = data?.bans ?? []; total.value = data?.total ?? 0
     }
   } catch (err) { message.error(err instanceof Error ? err.message : '加载失败') }
@@ -104,7 +105,7 @@ async function unbanById(banId: string) {
           <div v-for="ban in active" :key="ban.banId" class="admin-line-card" style="border-left:3px solid var(--warning);">
             <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <AppBadge tone="warning">{{ ban.type }}</AppBadge>
+                <AppBadge tone="warning">{{ banTypeLabel(ban.type) }}</AppBadge>
                 <strong class="mono small">{{ ban.banId }}</strong>
               </div>
               <p class="muted small" style="margin:0;line-height:1.6;">
@@ -125,7 +126,7 @@ async function unbanById(banId: string) {
           <div v-for="item in history" :key="item.id" class="admin-line-card">
             <div style="display:flex;flex-direction:column;gap:4px;min-width:0;">
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <AppBadge tone="neutral">{{ item.type }}</AppBadge>
+                <AppBadge tone="neutral">{{ banTypeLabel(item.type) }}</AppBadge>
                 <strong class="mono small">#{{ item.id }} {{ item.banId }}</strong>
               </div>
               <p class="muted small" style="margin:0;line-height:1.6;">
@@ -149,7 +150,7 @@ async function unbanById(banId: string) {
           <input v-model="unbanIp" class="admin-input mono" placeholder="如 172.17.0.1" />
         </label>
         <label>
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">类型（留空则尝试 login / invite / admin）</span>
+          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">类型（留空则尝试登录 / 邀请码 / 管理后台）</span>
           <NSelect v-model:value="unbanIpType" :options="typeOptions.filter(o=>o.value!=='confirm')" clearable />
         </label>
         <div style="display:flex;justify-content:flex-end;">

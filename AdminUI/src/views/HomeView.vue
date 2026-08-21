@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import type { Component } from 'vue'
 import { Apps, FileSearch, ShieldCheck, Ticket, Users } from '@vicons/tabler'
 import { useAuthStore } from '@/stores/auth'
+import { groupLabel } from '@/utils/labels'
 
 const authStore = useAuthStore()
 const router = useRouter()
@@ -27,11 +28,11 @@ function groupTone(g: string) {
   <section class="admin-page">
     <div class="hero">
       <div>
-        <h1 class="hero-title"># Pylai</h1>
+        <h1 class="hero-title">Pylai 管理后台</h1>
         <p class="hero-subtitle">管理控制台</p>
       </div>
       <span class="app-badge" :class="`tone-${groupTone(authStore.group)}`">
-        {{ authStore.group }}
+        {{ groupLabel(authStore.group) }}
       </span>
     </div>
 

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace Pylaios.Features.Admin;
 
@@ -11,10 +12,34 @@ public class AdminResetPasswordRequest
 
 public class AdminUserUpdateRequest
 {
+    private DateTimeOffset? _lockoutEnd;
+
     public string? DisplayName { get; set; }
     public string? Email { get; set; }
     public string? Status { get; set; }
     public string? Group { get; set; }
+    public DateTimeOffset? LockoutEnd
+    {
+        get => _lockoutEnd;
+        set
+        {
+            _lockoutEnd = value;
+            LockoutEndSpecified = true;
+        }
+    }
+
+    [JsonIgnore]
+    public bool LockoutEndSpecified { get; private set; }
+}
+
+public class AdminUserCreateRequest
+{
+    [Required]
+    public string Email { get; set; } = string.Empty;
+    public string? Name { get; set; }
+    public string? DisplayName { get; set; }
+    public string Group { get; set; } = AuthConstants.Roles.Normal;
+    public string? Password { get; set; }
 }
 
 public class InviteCodeBanInfo

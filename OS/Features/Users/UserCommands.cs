@@ -27,7 +27,7 @@ public sealed class UserCommands
         if (!string.IsNullOrEmpty(group)) query = query.Where(u => u.Group == group);
         if (!string.IsNullOrEmpty(status))
         {
-            if (!Enum.TryParse<UserStatus>(status, true, out var parsed))
+            if (!UserStatusParser.TryParse(status, out var parsed))
                 return await CliHelpers.ErrorAsync($"无效状态: {status}（可用: active/banned/locked/deleted）");
             query = query.Where(u => u.Status == parsed);
         }
@@ -230,40 +230,52 @@ public sealed class UserCommands
         return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name} 已从 {oldGroup} 变更到 {targetGroup} 组，其会话已全部吊销。" });
     }
 
-    [Command("set-status", Description = "封禁/解封用户（解封清除锁定，封禁吊销会话）")]
+    [Command("set-status", Description = "设置用户状态（active/banned/locked；locked 可指定 --lockout-end）")]
     public async Task<int> SetStatusAsync(
         [Argument("uid|name")] string target,
-        [Argument("status")] string status)
+        [Argument("status")] string status,
+        [Option("lockout-end", Description = "锁定到期时间（ISO 8601；locked 时省略表示永久锁定）")] string? lockoutEnd = null)
     {
-        var targetStatus = status.ToLowerInvariant();
-        if (targetStatus is not ("active" or "banned"))
-            return await CliHelpers.ErrorAsync($"无效状态: {status}（可用: active / banned）");
+        if (!UserStatusParser.TryParse(status, out var newStatus)
+            || newStatus is not (UserStatus.Active or UserStatus.Banned or UserStatus.Locked))
+            return await CliHelpers.ErrorAsync($"无效状态: {status}（可用: active / banned / locked）");
+
+        DateTimeOffset? parsedLockoutEnd = null;
+        if (newStatus == UserStatus.Locked && lockoutEnd is not null)
+        {
+            if (!DateTimeOffset.TryParse(lockoutEnd, out var parsed))
+                return await CliHelpers.ErrorAsync("--lockout-end 必须是有效的 ISO 8601 时间。");
+            if (parsed <= DateTimeOffset.UtcNow)
+                return await CliHelpers.ErrorAsync("--lockout-end 必须晚于当前时间。");
+            parsedLockoutEnd = parsed;
+        }
 
         var user = await CliHelpers.FindUserAsync(_ctx, target);
         if (user is null)
             return await CliHelpers.ErrorAsync($"用户不存在: {target}");
 
-        var newStatus = targetStatus == "banned" ? UserStatus.Banned : UserStatus.Active;
-        if (user.Status == newStatus)
-            return await CliHelpers.ErrorAsync($"用户 {user.Name} 当前状态已是 {targetStatus}。");
-
+        var oldStatus = user.Status;
         user.Status = newStatus;
         if (newStatus == UserStatus.Active)
         {
             user.LockoutEnd = null;
             user.AccessFailedCount = 0;
-            await _ctx.Db.SaveChangesAsync();
         }
-        else
+        else if (newStatus == UserStatus.Locked)
         {
-            await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
+            user.LockoutEnd = parsedLockoutEnd;
         }
+
+        if (newStatus == UserStatus.Active)
+            await _ctx.Db.SaveChangesAsync();
+        else
+            await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
 
         await CliHelpers.LogAsync(_ctx, "cli:user set-status", true,
-            $"CLI set-status {user.Name} (uid:{user.Uid}) {user.Status} -> {newStatus}",
+            $"CLI set-status {user.Name} (uid:{user.Uid}) {oldStatus} -> {newStatus}",
             userId: user.Uid.ToString(), userEmail: user.Email);
 
-        return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name} 状态已变更为 {targetStatus}。" });
+        return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name} 状态已变更为 {newStatus}。" });
     }
 
     [Command("reset-password", Description = "重置密码 + 吊销全部会话（密码仅从 stdin 读取）")]

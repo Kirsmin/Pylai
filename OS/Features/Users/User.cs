@@ -40,6 +40,9 @@ public class User
 
     public int AccessFailedCount { get; set; }
 
+    /// <summary>
+    /// 自动风控锁定的到期时间；当 Status=Locked 时则表示管理员锁定的可选到期时间，null 为永久锁定。
+    /// </summary>
     public DateTimeOffset? LockoutEnd { get; set; }
 
     public DateTimeOffset RegisterTime { get; set; } = DateTimeOffset.UtcNow;

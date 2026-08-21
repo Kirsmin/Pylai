@@ -94,7 +94,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("发送邮箱码请求 | token:{Token}", LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 1);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         var ip = this.GetClientIp(_ipResolver);
 
@@ -149,7 +149,7 @@ public class RegisterController : ControllerBase
         {
             await _emailSender.SendRegisterCodeAsync(dummy, request.Email, code);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             _logger.LogError("验证码邮件发送失败 | → {Email}", request.Email);
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, false, "SMTP send failed", request.SessionToken);
@@ -178,7 +178,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("验证邮箱请求 | token:{Token}", LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 2);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         if (session.EmailCodeExpires is null || session.EmailCodeExpires < DateTimeOffset.UtcNow)
         {
@@ -245,7 +245,7 @@ public class RegisterController : ControllerBase
             request.NewEmail, LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 2);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         if (session.EmailChangeCount >= 2)
         {
@@ -288,7 +288,7 @@ public class RegisterController : ControllerBase
         {
             await _emailSender.SendRegisterCodeAsync(dummy, request.NewEmail, code);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             _logger.LogError("更换邮箱验证码发送失败 | → {NewEmail}", request.NewEmail);
             await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailChanged, null, request.NewEmail, false, "SMTP send failed", request.SessionToken);
@@ -315,7 +315,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("用户名检查请求 | {Username}", request.Username);
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 3, unauthorized: true);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         var ip = this.GetClientIp(_ipResolver);
         if (await _ipRateLimitService.IsRateLimited(ip, "check-username", _config.InviteCode.UsernameCheckMaxPerHourPerIp, TimeSpan.FromHours(1)))
@@ -359,7 +359,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("创建账户请求 | token:{Token}", LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 4);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         if (string.IsNullOrEmpty(request.Password))
         {
@@ -475,7 +475,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("邀请码提权请求 | token:{Token}", LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken, 5);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         if (string.IsNullOrEmpty(request.InviteCode))
         {
@@ -539,7 +539,7 @@ public class RegisterController : ControllerBase
         _logger.LogDebug("注册完成请求 | token:{Token}", LogToken(request.SessionToken));
 
         var (session, sessionError) = await RequireSessionAsync(request.SessionToken);
-        if (sessionError is not null) return sessionError;
+        if (session is null) return sessionError!;
 
         if (session.Completed)
         {

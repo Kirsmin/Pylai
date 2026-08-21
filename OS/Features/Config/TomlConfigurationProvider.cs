@@ -33,7 +33,8 @@ public sealed class TomlConfigurationProvider : ConfigurationProvider
             throw new FileNotFoundException($"配置文件不存在: {_path}");
         }
 
-        var table = TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(_path));
+        var table = TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(_path))
+            ?? throw new InvalidOperationException($"配置文件解析失败: {_path}");
         Flatten("", table);
     }
 
@@ -58,8 +59,9 @@ public sealed class TomlConfigurationProvider : ConfigurationProvider
         }
     }
 
-    private static string ScalarToString(object value) => value switch
+    private static string ScalarToString(object? value) => value switch
     {
+        null => "",
         string s => s,
         bool b => b ? "true" : "false",
         long l => l.ToString(System.Globalization.CultureInfo.InvariantCulture),

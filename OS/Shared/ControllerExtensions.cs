@@ -83,6 +83,9 @@ public static class ControllerExtensions
         IMfaService mfa,
         ApplicationDbContext context)
     {
+        if (controller.User.FindFirst("auth_scheme")?.Value == LocalManageToken.Scheme)
+            return null;
+
         var user = await controller.GetCurrentUserAsync(context);
         if (user is null)
             return new UnauthorizedObjectResult(new { success = false, error = "Unauthorized.", errorCode = "unauthorized" });

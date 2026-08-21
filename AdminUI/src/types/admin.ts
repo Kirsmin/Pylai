@@ -1,9 +1,3 @@
-export interface ApiEnvelope {
-  success: boolean
-  error?: string
-  errorCode?: string
-}
-
 export interface AdminCapabilityEndpoint {
   method: string
   path: string
@@ -28,7 +22,7 @@ export interface AdminCapabilityUser {
   group: string
 }
 
-export interface AdminCapabilitiesResponse extends ApiEnvelope {
+export interface AdminCapabilitiesResponse {
   user: AdminCapabilityUser | null
   capabilities: AdminCapability[]
 }
@@ -87,16 +81,16 @@ export interface AdminUserSession {
   active: boolean
 }
 
-export interface AdminUserListResponse extends ApiEnvelope {
+export interface AdminUserListResponse {
   total: number
   users: AdminUserListItem[]
 }
 
-export interface AdminUserDetailResponse extends ApiEnvelope {
+export interface AdminUserDetailResponse {
   user: AdminUserDetail | null
 }
 
-export interface AdminUserSessionsResponse extends ApiEnvelope {
+export interface AdminUserSessionsResponse {
   sessions: AdminUserSession[]
 }
 
@@ -111,7 +105,7 @@ export interface AdminInviteCode {
   usedBy?: Array<{ uid: string; name: string; displayName: string | null }>
 }
 
-export interface AdminInviteCodeCreateResponse extends ApiEnvelope {
+export interface AdminInviteCodeCreateResponse {
   id: string
   code: string
   prefix: string
@@ -121,12 +115,12 @@ export interface AdminInviteCodeCreateResponse extends ApiEnvelope {
   saveWarning: string
 }
 
-export interface AdminInviteCodeListResponse extends ApiEnvelope {
+export interface AdminInviteCodeListResponse {
   total: number
   codes: AdminInviteCode[]
 }
 
-export interface AdminInviteCodeDetailResponse extends ApiEnvelope {
+export interface AdminInviteCodeDetailResponse {
   code: AdminInviteCode | null
 }
 

@@ -112,21 +112,29 @@ public class LoginController : ControllerBase
 
         if (user.Status == UserStatus.Locked)
         {
-            var remaining = user.LockoutEnd is { } end && end > DateTimeOffset.UtcNow
-                ? end - DateTimeOffset.UtcNow
-                : TimeSpan.FromMinutes(_config.Identity.Lockout.DefaultTimeoutMinutes);
-            _logger.LogWarning("账户被管理员锁定 | uid:{Uid} | 剩余:{Remaining}", user.Uid, remaining);
-            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginLockedOut, user.Uid.ToString(), user.Email, false, "Account locked by admin");
-            return Unauthorized(new LoginResponse
+            if (user.LockoutEnd is { } adminLockEnd && adminLockEnd <= DateTimeOffset.UtcNow)
             {
-                Success = false,
-                Error = "账号已被锁定。",
-                ErrorCode = "locked_out",
-                LockedOut = true,
-                LockoutRemaining = remaining.ToString(@"hh\h\ mm\m\ ss\s")
-            });
+                await _context.Users.Where(x => x.Uid == user.Uid).ExecuteUpdateAsync(s => s
+                    .SetProperty(u => u.Status, UserStatus.Active)
+                    .SetProperty(u => u.LockoutEnd, (DateTimeOffset?)null)
+                    .SetProperty(u => u.AccessFailedCount, 0));
+                user.Status = UserStatus.Active;
+                user.LockoutEnd = null;
+                user.AccessFailedCount = 0;
+            }
+            else
+            {
+                _logger.LogWarning("账户被管理员锁定 | uid:{Uid}", user.Uid);
+                await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginLockedOut, user.Uid.ToString(), user.Email, false, "Account locked by admin");
+                return Unauthorized(new LoginResponse
+                {
+                    Success = false,
+                    Error = "账号已被锁定，请联系管理员。",
+                    ErrorCode = "admin_locked",
+                    LockedOut = true
+                });
+            }
         }
-
 
         if (user.LockoutEnd is not null && user.LockoutEnd <= DateTimeOffset.UtcNow)
         {
@@ -137,15 +145,15 @@ public class LoginController : ControllerBase
         if (user.LockoutEnd is not null && user.LockoutEnd > DateTimeOffset.UtcNow)
         {
             var remaining = user.LockoutEnd.Value - DateTimeOffset.UtcNow;
-            _logger.LogWarning("账户锁定中 | uid:{Uid} | 剩余:{Remaining}", user.Uid, remaining);
-            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginLockedOut, user.Uid.ToString(), user.Email, false, "Account locked");
+            _logger.LogWarning("账户自动锁定中 | uid:{Uid} | 剩余:{Remaining}", user.Uid, remaining);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.LoginLockedOut, user.Uid.ToString(), user.Email, false, "Account auto locked");
             return Unauthorized(new LoginResponse
             {
                 Success = false,
-                Error = "账号已被锁定。",
-                ErrorCode = "locked_out",
+                Error = "密码错误次数过多，账号已暂时锁定。",
+                ErrorCode = "auto_locked",
                 LockedOut = true,
-                LockoutRemaining = remaining.ToString(@"hh\h\ mm\m\ ss\s")
+                LockoutRemaining = FormatLockoutRemaining(remaining)
             });
         }
 
@@ -162,19 +170,16 @@ public class LoginController : ControllerBase
                     .SetProperty(u => u.AccessFailedCount,
                         u => u.LockoutEnd != null && u.LockoutEnd <= now ? 1 : u.AccessFailedCount + 1)
                     .SetProperty(u => u.LockoutEnd,
-                        u => u.LockoutEnd != null && u.LockoutEnd <= now ? (DateTimeOffset?)null : u.LockoutEnd));
+                        u => u.LockoutEnd != null && u.LockoutEnd > now
+                            ? u.LockoutEnd
+                            : (u.LockoutEnd != null && u.LockoutEnd <= now ? 1 : u.AccessFailedCount + 1) >= lockout.MaxFailedAttempts
+                                ? lockoutEnd
+                                : (DateTimeOffset?)null));
 
             var currentCount = await _context.Users.AsNoTracking()
                 .Where(x => x.Uid == user.Uid)
                 .Select(x => x.AccessFailedCount)
                 .FirstAsync();
-
-            if (currentCount >= lockout.MaxFailedAttempts)
-            {
-                await _context.Users
-                    .Where(x => x.Uid == user.Uid && (x.LockoutEnd == null || x.LockoutEnd <= now))
-                    .ExecuteUpdateAsync(s => s.SetProperty(u => u.LockoutEnd, lockoutEnd));
-            }
 
             _logger.LogDebug("密码验证失败 | uid:{Uid} | 尝试:{Attempts}", user.Uid, currentCount);
             var fr4 = await _loginRateLimitService.RecordFailureAsync(ip);
@@ -234,6 +239,19 @@ public class LoginController : ControllerBase
             Group = user.Group,
             Email = user.Email
         });
+    }
+
+    private static string FormatLockoutRemaining(TimeSpan remaining)
+    {
+        var seconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        var value = TimeSpan.FromSeconds(seconds);
+        if (value.TotalDays >= 1)
+            return $"{(int)value.TotalDays}天 {value.Hours}小时 {value.Minutes}分钟";
+        if (value.TotalHours >= 1)
+            return $"{(int)value.TotalHours}小时 {value.Minutes}分钟";
+        if (value.TotalMinutes >= 1)
+            return $"{(int)value.TotalMinutes}分钟 {value.Seconds}秒";
+        return $"{value.Seconds}秒";
     }
 
 }

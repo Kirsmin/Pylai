@@ -64,9 +64,9 @@ const userGroup = ref('normal')
 
 const groupLabel = computed(() => {
   const g = userGroup.value.toLowerCase()
-  if (g === 'admin') return 'Admin'
-  if (g === 'max') return 'Max'
-  return 'Normal'
+  if (g === 'admin') return '管理员'
+  if (g === 'max') return '超级管理员'
+  return '普通用户'
 })
 
 

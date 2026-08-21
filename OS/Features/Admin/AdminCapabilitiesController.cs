@@ -68,6 +68,7 @@ public class AdminCapabilitiesController : ControllerBase
             Endpoints =
             [
                 Endpoint("GET", "/api/admin/users"),
+                Endpoint("POST", "/api/admin/users"),
                 Endpoint("GET", "/api/admin/users/{uid}"),
                 Endpoint("PATCH", "/api/admin/users/{uid}"),
                 Endpoint("POST", "/api/admin/users/{uid}/reset-password"),
