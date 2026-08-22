@@ -48,7 +48,7 @@ async function handleLogin() {
   } catch (e) {
     if (e instanceof ApiError && e.status >= 500) {
       loginErrorState.value = 'server_error'; loginError.value = e.message || '登录服务暂时不可用'
-    } else if (e instanceof ApiError && ['admin_locked', 'auto_locked', 'locked_out'].includes(e.errorCode || '')) {
+    } else if (e instanceof ApiError && e.errorCode === 'locked_out') {
       lockedOut.value = true; loginErrorState.value = 'locked_out'
       loginError.value = `${e.message || ''}${e.data?.lockoutRemaining ? ` ${e.data.lockoutRemaining}` : ''}`
     } else if (e instanceof ApiError && e.errorCode === 'ip_banned') {
@@ -110,7 +110,7 @@ async function verifyWebAuthn() {
     const response = await getAssertion(options)
     const data = await api<Record<string, unknown>>('/api/auth/mfa/webauthn/verify', { method: 'POST', body: JSON.stringify({ transactionId: mfaTransactionId.value, response }) })
     finishLogin(data)
-  } catch (e) { mfaError.value = e instanceof Error ? e.message : '通行密钥验证失败，请重试' }
+  } catch (e) { mfaError.value = e instanceof Error ? e.message : 'Passkey 验证失败，请重试' }
   finally { loading.value = false }
 }
 
@@ -121,7 +121,7 @@ async function setupWebAuthn() {
     const response = await createCredential(data.options)
     await api('/api/auth/mfa/webauthn/registration', { method: 'POST', body: JSON.stringify({ transactionId: mfaTransactionId.value, registrationId: data.registrationId, response }) })
     await verifyWebAuthn()
-  } catch (e) { mfaError.value = e instanceof Error ? e.message : '通行密钥设置失败，请重试' }
+  } catch (e) { mfaError.value = e instanceof Error ? e.message : 'Passkey 设置失败，请重试' }
   finally { loading.value = false }
 }
 
@@ -139,14 +139,14 @@ function resetMfa() {
     <div v-if="mfaSetup && mfaSecret" class="mfa-box">
       <span>使用认证器添加此密钥：</span><code>{{ mfaSecret }}</code><small>{{ mfaOtpauthUri }}</small>
       <NInput v-model:value="mfaCode" maxlength="6" placeholder="认证器验证码" />
-      <NButton type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="confirmTotpSetup">确认时间验证码</NButton>
+      <NButton type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="confirmTotpSetup">确认 TOTP</NButton>
     </div>
     <template v-else-if="!mfaSetup && mfaMethods.includes('totp')">
       <NInput v-model:value="mfaCode" maxlength="6" placeholder="认证器验证码" class="login-input" />
-      <NButton type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="verifyMfa">验证时间验证码</NButton>
+      <NButton type="success" :loading="loading" :disabled="mfaCode.length !== 6" @click="verifyMfa">验证 TOTP</NButton>
     </template>
     <NButton v-if="mfaMethods.includes('webauthn')" type="success" dashed :loading="loading" @click="mfaSetup ? setupWebAuthn() : verifyWebAuthn()">
-      {{ mfaSetup ? '设置通行密钥' : '使用通行密钥' }}
+      {{ mfaSetup ? '设置 Passkey' : '使用 Passkey' }}
     </NButton>
     <p v-if="mfaError" class="error-msg">{{ mfaError }}</p>
     <NButton quaternary :disabled="loading" @click="resetMfa">返回登录</NButton>

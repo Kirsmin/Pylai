@@ -10,7 +10,6 @@ import json
 import os
 import platform as host_platform
 import re
-import signal
 import secrets
 import shutil
 import subprocess
@@ -19,8 +18,8 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode, urlparse
-from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 APP_NAME = "Pylai"
@@ -58,6 +57,10 @@ def out(message: str = "") -> None:
     print(message, flush=True)
 
 
+def random_password(length: int = 12) -> str:
+    """生成同时包含数字、小写和大写字母的初始密码。"""
+    return f"{secrets.token_urlsafe(length)}Aa1"
+
 
 def ask(
     prompt: str,
@@ -75,12 +78,9 @@ def ask(
     while True:
         try:
             value = input(prompt_line)
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             out("\n已退出。")
             raise SystemExit(0)
-        except KeyboardInterrupt:
-            out()
-            raise
         if secret and sys.stdout.isatty():
             # 输入时明文显示；回车后回退一行清除整行并重印提示（密码从屏幕消失）
             sys.stdout.write("\033[1A\033[2K")
@@ -126,28 +126,15 @@ def choose(options: list[tuple[str, str]], prompt: str = "请选择") -> str | N
     if not options:
         out("没有可选项。")
         return None
-    page_size = 20
-    page = 0
     while True:
-        start = page * page_size
-        end = min(start + page_size, len(options))
-        for index in range(start, end):
-            out(f"  [{index + 1}] {options[index][0]}")
-        if end < len(options):
-            out("  [n] -- 更多 --")
-        if start:
-            out("  [p] -- 上一页 --")
-        raw = ask(prompt, str(start + 1)).strip().lower()
-        if raw in ("n", "next") and end < len(options):
-            page += 1
-            continue
-        if raw in ("p", "prev") and start:
-            page -= 1
-            continue
+        for index, (label, _) in enumerate(options, 1):
+            out(f"  [{index}] {label}")
+        raw = ask(prompt, "1")
         try:
             return options[int(raw) - 1][1]
         except (ValueError, IndexError):
             out("选择无效。\n")
+
 
 def confirm_danger(text: str, required_word: str = "DELETE") -> bool:
     out(f"危险操作：{text}")
@@ -234,7 +221,7 @@ def print_container_logs(tail: int = 60) -> None:
 
 
 def view_container_logs(tail: int | str = 200, follow: bool = False) -> None:
-    """用 less 查看容器日志；follow=True 时退出 less 后立即清理 docker logs -f。"""
+    """用 less 查看容器日志；follow=True 时使用 less +F 持续跟踪。"""
     if not container_exists():
         out("尚未安装或容器不存在。")
         return
@@ -250,33 +237,26 @@ def view_container_logs(tail: int | str = 200, follow: bool = False) -> None:
         return
 
     if follow:
-        out("已进入持续跟踪：按 q 退出；退出后返回日志菜单。\n")
-    docker_proc: subprocess.Popen | None = None
+        out("已进入持续跟踪：Ctrl+C 停止跟踪，按 q 退出；退出后返回日志菜单。\n")
     try:
-        docker_proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        less_cmd = [less, "-R"] + (["+F"] if follow else [])
-        subprocess.run(less_cmd, stdin=docker_proc.stdout, check=False)
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as docker_proc:
+            less_cmd = [less, "-R"]
+            if follow:
+                less_cmd.append("+F")
+            subprocess.run(less_cmd, stdin=docker_proc.stdout, check=False)
+            if docker_proc.stdout is not None:
+                docker_proc.stdout.close()
+            try:
+                docker_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                docker_proc.terminate()
+                try:
+                    docker_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    docker_proc.kill()
     except (OSError, subprocess.SubprocessError) as exc:
         out(f"日志查看失败: {exc}")
-    finally:
-        if docker_proc is None:
-            return
-        if docker_proc.stdout is not None:
-            docker_proc.stdout.close()
-        if docker_proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(docker_proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-        try:
-            docker_proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
+
 
 def wait_healthy(api_port: int, timeout: int = 180) -> bool:
     url = f"http://127.0.0.1:{api_port}/health/ready"
@@ -285,22 +265,21 @@ def wait_healthy(api_port: int, timeout: int = 180) -> bool:
         return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        # 容器退出/进入重启循环时无需继续等待，尽快把日志交给用户排查
         if container_status() != "running":
             return False
         current_restart_count = container_restart_count()
         if current_restart_count is None or current_restart_count > restart_count:
             return False
-        remaining = max(0.1, deadline - time.monotonic())
         try:
-            with urllib.request.urlopen(url, timeout=min(1.0, remaining)) as resp:
+            with urllib.request.urlopen(url, timeout=3) as resp:
                 if resp.status == 200:
                     return True
         except (OSError, urllib.error.URLError):
             pass
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            time.sleep(min(1.0, remaining / 2))
+        time.sleep(3)
     return False
+
 
 def host_arch() -> str:
     machine = host_platform.machine().lower()
@@ -349,11 +328,9 @@ def read_template(image: str) -> str:
 
 def replace_one(text: str, old: str, new: str, count: int = 1) -> str:
     if old not in text:
-        key = old.split("=", 1)[0].strip().splitlines()[-1]
-        context = [line.strip() for line in text.splitlines() if key and key in line][:4]
-        hint = " | ".join(context) if context else "未找到同名键"
-        raise ManageError(f"配置模板缺少预期内容: {old[:80]!r}；附近候选: {hint}")
+        raise ManageError(f"配置模板缺少预期内容: {old[:60]}...")
     return text.replace(old, new, count)
+
 
 def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -542,6 +519,57 @@ def mask_config_text(text: str) -> str:
     return "\n".join(masked_lines) + ("\n" if text.endswith("\n") else "")
 
 
+def read_password_policy() -> dict:
+    """从本地 pylai.toml 读取密码策略，失败则返回默认值。"""
+    defaults = {
+        "RequiredLength": 12,
+        "AdminRequiredLength": 14,
+        "RequireDigit": True,
+        "RequireLowercase": False,
+        "RequireUppercase": False,
+        "RequireNonAlphanumeric": False,
+        "CheckBreachedPasswords": True,
+    }
+    if not CONFIG_FILE.is_file():
+        return defaults
+    try:
+        with open(CONFIG_FILE, "rb") as f:
+            data = tomllib.load(f)
+        pwd = data.get("Identity", {}).get("Password", {}) if isinstance(data.get("Identity"), dict) else {}
+        # 兼容部分配置直接扁平的情况，但主要走嵌套
+        for key in list(defaults.keys()):
+            if key in pwd:
+                defaults[key] = pwd[key]
+            # TOML 中键可能为驼峰，保持一致
+        return defaults
+    except (OSError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+        return defaults
+
+
+def validate_password_local(password: str, policy: dict, is_privileged: bool) -> list[str]:
+    """本地密码策略预校验，返回错误描述列表（空列表表示通过）。"""
+    errs: list[str] = []
+    if not password:
+        errs.append("密码不能为空。")
+        return errs
+    required = policy.get("AdminRequiredLength", 14) if is_privileged else policy.get("RequiredLength", 12)
+    try:
+        required = int(required)
+    except (TypeError, ValueError):
+        required = 14 if is_privileged else 12
+    if len(password) < required:
+        errs.append(f"密码长度至少为 {required} 个字符。")
+    if policy.get("RequireDigit") and not any(c.isdigit() for c in password):
+        errs.append("密码必须包含数字。")
+    if policy.get("RequireLowercase") and not any(c.islower() for c in password):
+        errs.append("密码必须包含小写字母。")
+    if policy.get("RequireUppercase") and not any(c.isupper() for c in password):
+        errs.append("密码必须包含大写字母。")
+    if policy.get("RequireNonAlphanumeric") and all(c.isalnum() for c in password):
+        errs.append("密码必须包含非字母数字字符。")
+    return errs
+
+
 def _replace_toml_block_value(text: str, marker: str, key: str, value: str) -> str:
     """替换 TOML 段内指定键值；键不存在时插到段首行之后。"""
     start = text.index(marker)
@@ -680,7 +708,7 @@ def collect_install_answers() -> dict:
         cors_origins.extend(x.strip() for x in extra_cors.split(",") if x.strip())
 
     out("\n-- 高权限账户 MFA --")
-    out("MFA 可保护 Admin/Max 账户安全。HTTP/局域网部署时 WebAuthn 通行密钥不可用，建议关闭或仅使用时间验证码。")
+    out("MFA 可保护 Admin/Max 账户安全。HTTP/局域网部署时 WebAuthn 不可用，建议关闭或仅使用 TOTP。")
     mfa_for_admin = ask_yes_no("Admin 及以上角色登录时强制要求 MFA？", False)
     if mfa_for_admin:
         mfa_webauthn_for_max = ask_yes_no("Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？", False)
@@ -823,11 +851,9 @@ def run_submenu(title: str, parent_title: str, entries: list[tuple[str, object]]
             continue
         try:
             action()  # type: ignore[operator]
-        except KeyboardInterrupt:
-            out()
-            return
         except ManageError as exc:
             out(f"错误: {exc}")
+
 
 def menu_install() -> None:
     ensure_docker()
@@ -904,24 +930,6 @@ def action_restart() -> None:
     out("已重启。")
 
 
-def action_clear_logs() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    if not confirm_danger("清空当前 Pylai 容器日志，此操作不可撤销。", required_word="CLEAR"):
-        out("已取消。")
-        return
-    result = docker("inspect", "-f", "{{.LogPath}}", CONTAINER, check=False)
-    log_path = result.stdout.strip()
-    if result.returncode != 0 or not log_path:
-        raise ManageError("当前 Docker 日志驱动不提供可清理的日志文件。")
-    try:
-        os.truncate(log_path, 0)
-    except OSError as exc:
-        raise ManageError(f"清理容器日志失败: {exc}") from exc
-    out("容器日志已清空。")
-
-
 def submenu_logs() -> None:
     entries = [
         ("最近 100 行", lambda: view_container_logs(100, follow=False)),
@@ -929,7 +937,6 @@ def submenu_logs() -> None:
         ("最近 2000 行", lambda: view_container_logs(2000, follow=False)),
         ("全部日志", lambda: view_container_logs("all", follow=False)),
         ("持续跟踪（less +F）", lambda: view_container_logs(200, follow=True)),
-        ("清理容器日志", action_clear_logs),
     ]
     run_submenu("运行控制 / 日志", "运行控制", entries)
 
@@ -995,25 +1002,21 @@ def action_change_ports() -> None:
     state["public_port"] = new_public
     state["api_port"] = new_api
     if container_exists() and ask_yes_no("端口映射需要重建容器才能生效，是否立即应用？", True):
-        try:
-            env = read_container_env()
-        except ManageError as exc:
-            out(f"读取容器环境失败，改从 pylai.toml 获取凭据: {exc}")
-            env = {}
-        creds = read_config_credentials()
+        env = read_container_env()
         image = state.get("image") or "pylaios:unknown"
         answers = {
             "public_url": state.get("public_url", "http://localhost"),
             "public_port": new_public,
             "api_port": new_api,
-            "db_user": env.get("PYLAI_DB_USER") or creds.get("db_user") or "pylai",
-            "db_name": env.get("PYLAI_DB_NAME") or creds.get("db_name") or "pylai",
-            "db_password": env.get("PYLAI_DB_PASSWORD") or creds.get("db_password") or "",
-            "redis_password": env.get("PYLAI_REDIS_PASSWORD") or creds.get("redis_password") or "",
+            "db_user": env.get("PYLAI_DB_USER", "pylai"),
+            "db_name": env.get("PYLAI_DB_NAME", "pylai"),
+            "db_password": env.get("PYLAI_DB_PASSWORD", ""),
+            "redis_password": env.get("PYLAI_REDIS_PASSWORD", ""),
         }
         if not answers["db_password"] or not answers["redis_password"]:
             save_state(state)
-            raise ManageError("无法验证数据库/Redis 凭据；端口已记录，但未重建容器。")
+            out("无法读取现有容器环境变量，端口已记录，将在下次重建容器时生效。")
+            return
         start_container(image, answers)
         if not wait_healthy(new_api):
             print_container_logs()
@@ -1022,6 +1025,7 @@ def action_change_ports() -> None:
     else:
         out("端口已记录，将在下次重建容器时生效。")
     save_state(state)
+
 
 def action_change_smtp() -> None:
     if not CONFIG_FILE.is_file():
@@ -1046,12 +1050,21 @@ def action_reset_password(kind: str, target_email: str | None = None) -> None:
         return
     default_email = target_email or (state.get("max_email") if kind == "max" else state.get("admin_email"))
     email = ask("账号邮箱/登录名", default_email or (f"{kind}@pylai.local"))
-    password = ask("新密码", "", secret=True)
-    data = _user_api_cmd("reset-password", email, input_text=password + "\n")
-    if data.get("success"):
-        out(data.get("message") or "密码已重置，该用户全部会话与 token 已吊销。")
-    else:
-        out(f"重置失败: {data.get('message', '未知错误')}")
+    policy = read_password_policy()
+    is_privileged = kind in ("max", "admin")
+    while True:
+        password = ask("新密码", "", secret=True)
+        errs = validate_password_local(password, policy, is_privileged)
+        if not errs:
+            break
+        out(f"密码不符合策略: {', '.join(errs)}")
+        if not ask_yes_no("重新输入？"):
+            return
+    run(["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", "reset-password", email,
+         "--password-stdin", "--config", "/etc/pylai/pylai.toml"],
+        input_text=password + "\n", timeout=120)
+    out("密码已重置，该用户全部会话与 token 已吊销。")
+
 
 def action_change_mfa() -> None:
     if not CONFIG_FILE.is_file():
@@ -1083,178 +1096,23 @@ def action_change_mfa() -> None:
     out("MFA 配置已更新，注意：需要手动重启实例才能生效")
 
 
-_MANAGE_TOKEN: str | None = None
-
-
-def _manage_token(force: bool = False) -> str:
-    global _MANAGE_TOKEN
-    if _MANAGE_TOKEN and not force:
-        return _MANAGE_TOKEN
-    result = run([
-        "docker", "exec", "-i", CONTAINER, PYLAIOS_BIN,
-        "manage-token", "issue", "--config", "/etc/pylai/pylai.toml",
-    ], check=False, timeout=120)
+def _cli_user_cmd(*args: str, input_text: str | None = None) -> dict:
+    """执行 Pylaios user CLI 并解析 JSON 输出。"""
+    cmd = ["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", *args,
+           "--config", "/etc/pylai/pylai.toml"]
+    result = run(cmd, check=False, timeout=120, input_text=input_text)
     try:
-        data = json.loads(result.stdout.strip())
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise ManageError(result.stderr.strip() or result.stdout.strip() or "无法获取本机管理令牌。") from exc
-    token = data.get("token")
-    if result.returncode != 0 or not token:
-        raise ManageError(data.get("message") or data.get("error") or "无法获取本机管理令牌。")
-    _MANAGE_TOKEN = str(token)
-    return _MANAGE_TOKEN
-
-
-def _admin_api(path: str, method: str = "GET", body: dict | None = None, retry: bool = True) -> dict:
-    state = load_state()
-    port = int(state.get("api_port", 5000))
-    payload = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{port}{path}",
-        data=payload,
-        method=method,
-        headers={
-            "Authorization": f"Bearer {_manage_token()}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            raw = response.read().decode("utf-8")
-            data = json.loads(raw) if raw else {}
-            if isinstance(data, dict):
-                data.setdefault("success", True)
-                return data
-            return {"success": True, "data": data}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        try:
-            data = json.loads(raw) if raw else {}
-        except ValueError:
-            data = {}
-        if exc.code == 401 and retry:
-            global _MANAGE_TOKEN
-            _MANAGE_TOKEN = None
-            return _admin_api(path, method, body, retry=False)
-        message = data.get("error") or data.get("message") or raw or f"HTTP {exc.code}"
-        return {**data, "success": False, "message": message, "status": exc.code}
-    except (OSError, urllib.error.URLError) as exc:
-        raise ManageError(f"无法连接本机管理 API: {exc}") from exc
-
-
-def _resolve_user_uid(target: str) -> str | None:
-    if re.fullmatch(r"[0-9a-fA-F-]{36}", target):
-        data = _admin_api(f"/api/admin/users/{target}")
-        if data.get("success") and data.get("user"):
-            return str(data["user"].get("uid") or target)
-    query = urlencode({"search": target, "skip": 0, "take": 100})
-    data = _admin_api(f"/api/admin/users?{query}")
-    if not data.get("success"):
-        return None
-    needle = target.casefold()
-    matches = [u for u in data.get("users", []) if needle in {
-        str(u.get("uid", "")).casefold(),
-        str(u.get("name", "")).casefold(),
-        str(u.get("email", "")).casefold(),
-    }]
-    return str(matches[0]["uid"]) if len(matches) == 1 else None
-
-
-def _user_api_cmd(*args: str, input_text: str | None = None) -> dict:
-    """通过本机 Admin HTTP API 执行用户管理；管理令牌仅首次获取一次。"""
-    if not args:
-        return {"success": False, "message": "缺少用户命令。"}
-    command = args[0]
-    rest = list(args[1:])
-
-    if command == "list":
-        users: list[dict] = []
-        skip = 0
-        total = 0
-        while True:
-            data = _admin_api(f"/api/admin/users?{urlencode({'skip': skip, 'take': 100})}")
-            if not data.get("success"):
-                return data
-            batch = data.get("users", [])
-            users.extend(batch)
-            total = int(data.get("total", len(users)))
-            skip += len(batch)
-            if not batch or skip >= total:
-                return {"success": True, "total": total, "users": users}
-
-    if command == "create":
-        if not rest:
-            return {"success": False, "message": "缺少邮箱。"}
-        email = rest.pop(0)
-        body: dict[str, object] = {"email": email}
-        option_map = {"--name": "name", "--display-name": "displayName", "--group": "group"}
-        i = 0
-        while i < len(rest):
-            key = option_map.get(rest[i])
-            if key and i + 1 < len(rest):
-                if rest[i + 1]:
-                    body[key] = rest[i + 1]
-                i += 2
-            else:
-                i += 1
-        if input_text is not None:
-            body["password"] = input_text.rstrip("\r\n")
-        return _admin_api("/api/admin/users", "POST", body)
-
-    if not rest:
-        return {"success": False, "message": "缺少用户标识。"}
-    target = rest.pop(0)
-    uid = _resolve_user_uid(target)
-    if not uid:
-        return {"success": False, "message": "用户不存在或标识不唯一。"}
-
-    if command == "show":
-        return _admin_api(f"/api/admin/users/{uid}")
-    if command == "delete":
-        data = _admin_api(f"/api/admin/users/{uid}", "DELETE")
-    elif command == "set-group" and rest:
-        data = _admin_api(f"/api/admin/users/{uid}", "PATCH", {"group": rest[0]})
-    elif command == "set-status" and rest:
-        body: dict[str, object | None] = {"status": rest[0]}
-        if rest[0].lower() == "locked":
-            body["lockoutEnd"] = None
-            if "--lockout-end" in rest:
-                index = rest.index("--lockout-end")
-                if index + 1 < len(rest):
-                    body["lockoutEnd"] = rest[index + 1]
-        data = _admin_api(f"/api/admin/users/{uid}", "PATCH", body)
-    elif command == "revoke-sessions":
-        data = _admin_api(f"/api/admin/users/{uid}/revoke-sessions", "POST", {})
-    elif command == "reset-password" and input_text is not None:
-        data = _admin_api(f"/api/admin/users/{uid}/reset-password", "POST", {"newPassword": input_text.rstrip("\r\n")})
-    else:
-        return {"success": False, "message": f"不支持的用户命令: {command}"}
-
-    if data.get("success") and not data.get("message"):
-        messages = {
-            "delete": "用户已删除。",
-            "set-group": "用户组已更新。",
-            "set-status": "用户状态已更新。",
-            "revoke-sessions": "用户会话已吊销。",
-            "reset-password": "密码已重置，该用户全部会话与 token 已吊销。",
-        }
-        data["message"] = messages.get(command, "操作成功。")
-    return data
-
-def _user_group_label(value: object) -> str:
-    return {"normal": "普通用户", "admin": "管理员", "max": "超级管理员"}.get(str(value).lower(), str(value))
-
-
-def _user_status_label(value: object) -> str:
-    return {"active": "正常", "banned": "封禁", "locked": "锁定", "deleted": "已删除"}.get(str(value).lower(), str(value))
+        return json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, ValueError):
+        out(result.stdout.strip() or result.stderr.strip())
+        return {"success": False}
 
 
 def action_user_list() -> None:
     if not container_running():
         out("容器未运行。")
         return
-    data = _user_api_cmd("list")
+    data = _cli_user_cmd("list")
     if not data.get("success"):
         out("获取用户列表失败。")
         return
@@ -1265,7 +1123,7 @@ def action_user_list() -> None:
     out("-" * 120)
     for u in users:
         out(f"{u.get('uid',''):<36} {u.get('name',''):<20} {u.get('displayName','') or '-':<20} "
-            f"{u.get('email',''):<30} {_user_group_label(u.get('group','')):<8} {_user_status_label(u.get('status','')):<8}")
+            f"{u.get('email',''):<30} {u.get('group',''):<8} {u.get('status',''):<8}")
 
 
 def action_user_show() -> None:
@@ -1273,7 +1131,7 @@ def action_user_show() -> None:
         out("容器未运行。")
         return
     target = ask("用户标识（uid/用户名/邮箱）")
-    data = _user_api_cmd("show", target)
+    data = _cli_user_cmd("show", target)
     if not data.get("success"):
         out("用户不存在或查询失败。")
         return
@@ -1282,8 +1140,8 @@ def action_user_show() -> None:
     out(f"用户名:      {u.get('name')}")
     out(f"显示名:      {u.get('displayName')}")
     out(f"邮箱:        {u.get('email')}")
-    out(f"组:          {_user_group_label(u.get('group'))}")
-    out(f"状态:        {_user_status_label(u.get('status'))}")
+    out(f"组:          {u.get('group')}")
+    out(f"状态:        {u.get('status')}")
     out(f"注册时间:    {u.get('registerTime')}")
     out(f"最后登录:    {u.get('lastLoginAt') or '从未登录'}")
     out(f"活跃会话数:  {u.get('activeSessions', 0)}")
@@ -1301,24 +1159,34 @@ def action_user_create() -> None:
     name = ask("登录名（留空使用邮箱前缀）", "", allow_blank=True)
     display_name = ask("显示名（留空使用登录名）", "", allow_blank=True)
     group = choose([
-        ("普通用户", "normal"),
-        ("管理员", "admin"),
-        ("超级管理员", "max"),
+        ("normal — 普通用户", "normal"),
+        ("admin — 管理员", "admin"),
+        ("max — 超级管理员", "max"),
     ], "请选择用户组") or "normal"
-    if ask_yes_no("手动指定密码？（否则由后端自动生成）", False):
-        password = ask("密码", "", secret=True)
-        data = _user_api_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
-                             "--group", group, input_text=password + "\n")
+    policy = read_password_policy()
+    is_privileged = group in ("admin", "max")
+    if ask_yes_no("手动指定密码？（留空则自动生成）", False):
+        while True:
+            password = ask("密码", "", secret=True)
+            errs = validate_password_local(password, policy, is_privileged)
+            if not errs:
+                break
+            out(f"密码不符合策略: {', '.join(errs)}")
+            if not ask_yes_no("重新输入？"):
+                return
+        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
+                             "--group", group, "--password-stdin", input_text=password + "\n")
     else:
-        data = _user_api_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
+        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
                              "--group", group)
     if data.get("success"):
-        out(f"创建成功: {data.get('message', '操作成功。')}")
-        if data.get("generatedPassword"):
+        out(f"创建成功: {data.get('message')}")
+        if "generatedPassword" in data:
             out(f"自动生成的密码: {data['generatedPassword']}")
             out("请立即保存，该密码不会再次显示。")
     else:
         out(f"创建失败: {data.get('message', '未知错误')}")
+
 
 def action_user_delete() -> None:
     if not container_running():
@@ -1328,7 +1196,7 @@ def action_user_delete() -> None:
     if not confirm_danger(f"将软删除用户 {target}，其全部会话将被吊销。", required_word="DELETE"):
         out("已取消。")
         return
-    data = _user_api_cmd("delete", target)
+    data = _cli_user_cmd("delete", target)
     if data.get("success"):
         out(data.get("message"))
     else:
@@ -1341,15 +1209,16 @@ def action_user_set_group() -> None:
         return
     target = ask("用户标识（uid/用户名/邮箱）")
     group = choose([
-        ("普通用户", "normal"),
-        ("管理员", "admin"),
-        ("超级管理员", "max"),
+        ("normal — 普通用户", "normal"),
+        ("admin — 管理员", "admin"),
+        ("max — 超级管理员", "max"),
     ], "请选择新用户组") or "normal"
-    data = _user_api_cmd("set-group", target, group)
+    data = _cli_user_cmd("set-group", target, group)
     if data.get("success"):
         out(data.get("message"))
     else:
         out(f"设置失败: {data.get('message', '未知错误')}")
+
 
 def action_user_set_status() -> None:
     if not container_running():
@@ -1357,38 +1226,22 @@ def action_user_set_status() -> None:
         return
     target = ask("用户标识（uid/用户名/邮箱）")
     status = choose([
-        ("正常", "active"),
-        ("封禁", "banned"),
-        ("锁定", "locked"),
+        ("active — 正常", "active"),
+        ("banned — 封禁", "banned"),
     ], "请选择新状态") or "active"
-    args = ["set-status", target, status]
-    if status == "locked":
-        duration = choose([
-            ("15 分钟", "15m"),
-            ("1 小时", "1h"),
-            ("24 小时", "24h"),
-            ("永久", "permanent"),
-            ("自定义截止时间", "custom"),
-        ], "请选择锁定时长") or "permanent"
-        if duration != "permanent":
-            if duration == "custom":
-                lockout_end = ask("截止时间（ISO 8601，例如 2026-08-22T12:00:00+08:00）")
-            else:
-                delta = {"15m": timedelta(minutes=15), "1h": timedelta(hours=1), "24h": timedelta(hours=24)}[duration]
-                lockout_end = (datetime.now(timezone.utc) + delta).isoformat().replace("+00:00", "Z")
-            args += ["--lockout-end", lockout_end]
-    data = _user_api_cmd(*args)
+    data = _cli_user_cmd("set-status", target, status)
     if data.get("success"):
         out(data.get("message"))
     else:
         out(f"设置失败: {data.get('message', '未知错误')}")
+
 
 def action_user_revoke_sessions() -> None:
     if not container_running():
         out("容器未运行。")
         return
     target = ask("用户标识（uid/用户名/邮箱）")
-    data = _user_api_cmd("revoke-sessions", target)
+    data = _cli_user_cmd("revoke-sessions", target)
     if data.get("success"):
         out(data.get("message"))
     else:
@@ -1399,7 +1252,6 @@ def submenu_users() -> None:
     if not container_running():
         out("容器未运行。")
         return
-    _manage_token()
     entries = [
         ("用户列表", action_user_list),
         ("查看用户详情", action_user_show),
@@ -1411,6 +1263,7 @@ def submenu_users() -> None:
         ("吊销用户全部会话", action_user_revoke_sessions),
     ]
     run_submenu("用户管理", "主菜单", entries)
+
 
 def submenu_config() -> None:
     state = load_state()
@@ -1498,7 +1351,7 @@ def action_key_status() -> None:
 def action_key_rotate() -> None:
     state = load_state()
     mfa_user = ask("用于 MFA 验证的 Admin/Max 账户", state.get("max_email") or "max@pylai.local")
-    mfa_code = ask("该账户时间验证码", "", secret=True)
+    mfa_code = ask("该账户 TOTP 验证码", "", secret=True)
     if not mfa_code:
         raise ManageError("签名密钥轮换需要 MFA 验证码。")
     run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "key", "rotate",
@@ -1530,14 +1383,27 @@ def generate_host_nginx() -> None:
     state = load_state()
     port = state.get("public_port", 8080)
     public_url = state.get("public_url", "https://sso.example.com")
-    parsed = urlparse(public_url)
-    server_name = parsed.hostname or "localhost"
-    proxy_block = f"""    client_max_body_size 2m;
-    add_header X-Content-Type-Options \"nosniff\" always;
-    add_header X-Frame-Options \"SAMEORIGIN\" always;
-    add_header Referrer-Policy \"strict-origin-when-cross-origin\" always;
-    # 如启用外部 OAuth/CDN，请按实际来源调整 CSP。
-    add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'\" always;
+    template = f"""# Pylai 主机 Nginx 配置模板
+# 安装前请替换证书路径和 server_name。
+server {{
+    listen 80;
+    server_name {public_url.replace('https://', '').replace('http://', '').split('/')[0]};
+    return 301 https://$host$request_uri;
+}}
+
+server {{
+    listen 443 ssl http2;
+    server_name {public_url.replace('https://', '').replace('http://', '').split('/')[0]};
+
+    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    client_max_body_size 2m;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
 
     location / {{
         proxy_pass http://127.0.0.1:{port};
@@ -1545,40 +1411,15 @@ def generate_host_nginx() -> None:
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-    }}"""
-    if parsed.scheme.lower() == "https":
-        template = f"""# Pylai 主机 Nginx 配置模板
-server {{
-    listen 80;
-    server_name {server_name};
-    return 301 https://$host$request_uri;
-}}
-
-server {{
-    listen 443 ssl http2;
-    server_name {server_name};
-
-    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;
-
-{proxy_block}
-}}
-"""
-    else:
-        template = f"""# Pylai 主机 Nginx 配置模板（HTTP）
-server {{
-    listen 80;
-    server_name {server_name};
-
-{proxy_block}
+    }}
 }}
 """
     ensure_home()
     HOST_NGINX_FILE.write_text(template, encoding="utf-8")
     HOST_NGINX_FILE.chmod(0o600)
     out(f"模板已生成: {HOST_NGINX_FILE}")
-    out("请核对 server_name；HTTPS 部署还需替换证书路径，然后安装到 Nginx 并 reload。")
+    out("请自行替换证书路径和 server_name，然后安装到 /etc/nginx/conf.d/ 并 reload。")
+
 
 def action_health() -> None:
     state = load_state()
@@ -1611,33 +1452,28 @@ def read_container_env() -> dict[str, str]:
 
 
 def read_config_credentials() -> dict[str, str]:
-    """使用 tomllib 正规解析数据库/Redis 凭据。"""
+    """从 pylai.toml 解析数据库/Redis 凭据（容器不存在时的回退路径）。"""
     if not CONFIG_FILE.is_file():
         return {}
-    try:
-        with open(CONFIG_FILE, "rb") as file:
-            data = tomllib.load(file)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ManageError(f"无法解析 {CONFIG_FILE}: {exc}") from exc
-
+    text = CONFIG_FILE.read_text(encoding="utf-8")
     creds: dict[str, str] = {}
-    database = data.get("Database", {})
-    connection = database.get("ConnectionString", "") if isinstance(database, dict) else ""
-    if isinstance(connection, str):
-        parts: dict[str, str] = {}
-        for item in connection.split(";"):
-            key, sep, value = item.partition("=")
-            if sep:
-                parts[key.strip().lower()] = value
-        creds["db_user"] = parts.get("username") or parts.get("user id") or parts.get("user") or ""
-        creds["db_password"] = parts.get("password", "")
-        creds["db_name"] = parts.get("database", "")
-    redis = data.get("Redis", {})
-    if isinstance(redis, dict):
-        password = redis.get("Password", "")
-        if isinstance(password, str):
-            creds["redis_password"] = password
-    return {key: value for key, value in creds.items() if value != ""}
+    match = re.search(r'ConnectionString\s*=\s*"([^"]+)"', text)
+    if match:
+        for key, pattern in (
+            ("db_user", r"(?:Username|User ID)=([^;]+)"),
+            ("db_password", r"Password=([^;]+)"),
+            ("db_name", r"Database=([^;]+)"),
+        ):
+            inner = re.search(pattern, match.group(1))
+            if inner:
+                creds[key] = inner.group(1)
+    section = re.search(r"\[Redis\]\s*\n(.*?)(?=\n\[|\Z)", text, re.S)
+    if section:
+        inner = re.search(r'^Password\s*=\s*"([^"]*)"', section.group(1), re.M)
+        if inner:
+            creds["redis_password"] = inner.group(1)
+    return creds
+
 
 def preflight_config(image: str) -> None:
     """用新镜像对现有 pylai.toml 做四阶段配置校验，提前暴露 E002 等不兼容项。"""
@@ -1679,11 +1515,7 @@ def update() -> None:
     version, arch = parse_tar(tar_path) or (state.get("version", "0.0.1"), state.get("architecture", "AMD64"))
     old_image = state.get("image", "pylaios:unknown")
     creds = read_config_credentials()
-    try:
-        env = read_container_env() if container_exists() else {}
-    except ManageError as exc:
-        out(f"读取容器环境失败，改从 pylai.toml 获取凭据: {exc}")
-        env = {}
+    env = read_container_env() if container_exists() else {}
     if not container_exists():
         out("未找到容器，将从 pylai.toml 读取凭据执行更新。")
     answers = {
@@ -1704,60 +1536,58 @@ def update() -> None:
 
     image = load_image_tar(tar_path)
     preflight_config(image)
+
     if container_exists():
         docker("stop", "-t", "30", CONTAINER, timeout=120)
     else:
         out("容器不存在，跳过停止步骤。")
     try:
         start_container(image, answers)
-    except Exception as update_exc:
-        out("更新失败，正在恢复旧镜像。")
-        if container_exists():
-            docker("rm", "-f", CONTAINER, check=False)
+        state["version"] = version
+        state["architecture"] = arch
+        state["image"] = image
+        save_state(state)
+        out("更新完成。")
+    except Exception:
+        out("更新失败，尝试回滚旧镜像。")
         try:
             start_container(old_image, answers)
-        except Exception as rollback_exc:
-            save_state(state)
-            raise ManageError(f"更新失败且回滚失败，系统当前不可用: {rollback_exc}") from update_exc
+        except Exception:
+            out("旧镜像以只读容器启动失败，尝试去掉 --read-only 重试...")
+            try:
+                start_container(old_image, answers, read_only=False)
+                out("回滚完成（旧镜像以非只读容器运行，容器安全性已降低）。")
+            except Exception:
+                out("回滚失败，请检查 docker logs pylai。")
         save_state(state)
-        raise ManageError(f"更新失败，已成功回滚旧镜像。原始错误: {update_exc}") from update_exc
+        raise
 
-    state["version"] = version
-    state["architecture"] = arch
-    state["image"] = image
-    save_state(state)
-    out("更新完成。")
 
 def uninstall() -> None:
     state = load_state()
     if not state and not container_exists():
         out("没有已安装实例。")
         return
-    if not confirm_danger("卸载会停止并删除容器和当前镜像。"):
+    if not confirm_danger("卸载会停止并删除容器，可能删除全部数据。"):
         out("已取消。")
         return
     if container_exists():
         docker("stop", "-t", "30", CONTAINER, check=False, timeout=120)
         docker("rm", "-f", CONTAINER, check=False)
 
-    delete_data = confirm_danger(
-        "确认删除全部用户数据（包括数据库）？此操作不可撤销。",
-        required_word="DELETE-DATA",
-    )
-    if delete_data:
-        for vol in ("pylai_data", "pylai_pgdata"):
-            docker("volume", "rm", "-f", vol, check=False)
-    else:
-        out("已保留数据库命名卷。")
+    # 强制清理命名卷，防止旧数据库残留导致新安装 KEK 不匹配
+    for vol in ("pylai_data", "pylai_pgdata"):
+        docker("volume", "rm", "-f", vol, check=False)
 
     image = state.get("image")
     if image:
         docker("rmi", image, check=False)
-    if delete_data and confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？"):
+    if confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？"):
         shutil.rmtree(HOME, ignore_errors=True)
         out("已删除全部数据目录。")
-    STATE_FILE.unlink(missing_ok=True)
+    STATE_FILE.unlink(missing_ok=True) if not HOME.exists() else None
     out("卸载完成。")
+
 
 def submenu_install_update() -> None:
     entries = [
@@ -1801,9 +1631,6 @@ def main_menu() -> None:
             continue
         try:
             action()
-        except KeyboardInterrupt:
-            out()
-            continue
         except ManageError as exc:
             out(f"错误: {exc}")
 

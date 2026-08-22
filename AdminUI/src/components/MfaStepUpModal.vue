@@ -19,16 +19,16 @@ const methods = computed(() => authStore.stepUpTicket?.methods ?? [])
 
       <template v-if="methods.includes('totp')">
         <label class="admin-field">
-          <span class="admin-field-label">时间验证码</span>
+          <span class="admin-field-label">TOTP 验证码</span>
           <input v-model="authStore.stepUpCode" class="admin-input mono" maxlength="6" placeholder="6 位验证码" />
         </label>
         <NButton type="success" ghost :loading="authStore.stepUpBusy" :disabled="authStore.stepUpCode.length !== 6" @click="authStore.verifyStepUpTotp()">
-          验证时间验证码
+          验证 TOTP
         </NButton>
       </template>
 
       <NButton v-if="methods.includes('webauthn')" type="success" dashed :loading="authStore.stepUpBusy" @click="authStore.verifyStepUpWebAuthn()">
-        使用通行密钥验证
+        使用 Passkey 验证
       </NButton>
 
       <p v-if="authStore.stepUpError" class="error-msg">{{ authStore.stepUpError }}</p>

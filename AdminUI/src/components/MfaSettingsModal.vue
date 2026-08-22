@@ -30,17 +30,17 @@ async function beginTotp() {
   busy.value = true
   error.value = ''
   try {
-    const data = await authStore.request<{ enrollmentId: string; secret: string; otpauthUri: string; error?: string }>(
+    const data = await authStore.request<{ success: boolean; enrollmentId: string; secret: string; otpauthUri: string; error?: string }>(
       '/api/auth/mfa/totp/enroll',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
     )
-    if (!data?.enrollmentId) throw new Error(data?.error || '无法开始设置时间验证码')
+    if (!data?.enrollmentId) throw new Error(data?.error || '无法开始 TOTP 设置')
     enrollmentId.value = data.enrollmentId
     secret.value = data.secret
     otpauthUri.value = data.otpauthUri
     code.value = ''
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '无法开始设置时间验证码'
+    error.value = err instanceof Error ? err.message : '无法开始 TOTP 设置'
   } finally {
     busy.value = false
   }
@@ -62,7 +62,7 @@ async function confirmTotp() {
     code.value = ''
     await load()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '时间验证码验证失败'
+    error.value = err instanceof Error ? err.message : 'TOTP 验证失败'
   } finally {
     busy.value = false
   }
@@ -73,21 +73,21 @@ async function registerPasskey() {
   error.value = ''
   passkeyMessage.value = ''
   try {
-    const data = await authStore.request<{ registrationId: string; options: any; error?: string }>(
+    const data = await authStore.request<{ success: boolean; registrationId: string; options: any; error?: string }>(
       '/api/auth/mfa/webauthn/registration-options',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
     )
-    if (!data?.registrationId) throw new Error(data?.error || '无法开始注册通行密钥')
+    if (!data?.registrationId) throw new Error(data?.error || '无法开始 Passkey 注册')
     const response = await createCredential(data.options)
     await authStore.request('/api/auth/mfa/webauthn/registration', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ registrationId: data.registrationId, response })
     })
-    passkeyMessage.value = '通行密钥已注册。'
+    passkeyMessage.value = 'Passkey 已注册。'
     await load()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '通行密钥注册失败'
+    error.value = err instanceof Error ? err.message : 'Passkey 注册失败'
   } finally {
     busy.value = false
   }
@@ -101,7 +101,7 @@ defineExpose({ open })
     <div class="admin-form-stack">
       <div class="admin-line-card">
         <div class="admin-line-main">
-          <strong>时间验证码认证器</strong>
+          <strong>TOTP 认证器</strong>
           <span class="muted">{{ authStore.mfaTotpEnabled ? '已启用' : '未启用' }}</span>
         </div>
         <NButton v-if="!authStore.mfaTotpEnabled && !secret" size="tiny" type="success" ghost :loading="busy" @click="beginTotp">设置</NButton>
@@ -109,10 +109,10 @@ defineExpose({ open })
 
       <div class="admin-line-card">
         <div class="admin-line-main">
-          <strong>通行密钥 / WebAuthn</strong>
+          <strong>Passkey / WebAuthn</strong>
           <span class="muted">已注册 {{ authStore.mfaWebAuthnCount }} 个</span>
         </div>
-        <NButton size="tiny" type="success" dashed :loading="busy" @click="registerPasskey">注册通行密钥</NButton>
+        <NButton size="tiny" type="success" dashed :loading="busy" @click="registerPasskey">注册 Passkey</NButton>
       </div>
 
       <div v-if="secret" class="mfa-secret-box">
@@ -120,7 +120,7 @@ defineExpose({ open })
         <code class="mono">{{ secret }}</code>
         <small class="muted">{{ otpauthUri }}</small>
         <input v-model="code" class="admin-input mono" maxlength="6" placeholder="认证器验证码" />
-        <NButton type="success" ghost :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认时间验证码</NButton>
+        <NButton type="success" ghost :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
       </div>
 
       <p v-if="passkeyMessage" class="success-msg">{{ passkeyMessage }}</p>

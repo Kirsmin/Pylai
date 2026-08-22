@@ -6,7 +6,7 @@ const authStore = useAuthStore()
 <template>
   <div class="login-shell">
     <div class="login-card animate-fade">
-      <h1 class="login-title">Pylai 管理后台</h1>
+      <h1 class="login-title"># Pylai</h1>
       <p class="login-subtitle">管理控制台</p>
       <NButton v-if="authStore.loginError" type="error" text class="login-error">
         {{ authStore.loginError }}

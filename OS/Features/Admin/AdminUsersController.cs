@@ -43,71 +43,6 @@ public class AdminUsersController : ControllerBase
         _logger = logger;
     }
 
-    [HttpPost]
-    public async Task<IActionResult> Create([FromBody] AdminUserCreateRequest request)
-    {
-        var current = await this.GetCurrentUserAsync(_context);
-        if (current is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
-        if (current.Group != AuthConstants.Roles.Max)
-            return StatusCode(403, new ApiResponse { Success = false, Error = "Forbidden.", ErrorCode = "forbidden" });
-        if (!ModelState.IsValid || !AuthHelper.IsValidEmail(request.Email))
-            return BadRequest(new ApiResponse { Success = false, Error = "请求参数无效。", ErrorCode = "invalid_format" });
-
-        var group = request.Group?.Trim().ToLowerInvariant();
-        if (group is null || !AuthConstants.Groups.IsValid(group))
-            return BadRequest(new ApiResponse { Success = false, Error = "无效的用户组。", ErrorCode = "invalid_request" });
-
-        var normalizedEmail = UsernameNormalizer.Normalize(request.Email);
-        var normalizedName = UsernameNormalizer.Normalize(string.IsNullOrWhiteSpace(request.Name)
-            ? request.Email.Split('@', 2)[0]
-            : request.Name);
-        if (await _context.Users.AnyAsync(u => u.Name == normalizedName || u.NormalizedEmail == normalizedEmail))
-            return StatusCode(409, new ApiResponse { Success = false, Error = "用户名或邮箱已被占用。", ErrorCode = "duplicate" });
-
-        var user = new User
-        {
-            Status = UserStatus.Active,
-            Name = normalizedName,
-            DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? normalizedName : request.DisplayName,
-            Email = request.Email,
-            NormalizedEmail = normalizedEmail,
-            Group = group,
-            SecurityStamp = Guid.NewGuid().ToString(),
-            RegisterTime = DateTimeOffset.UtcNow
-        };
-
-        var generatedPassword = string.IsNullOrEmpty(request.Password);
-        var password = generatedPassword ? GeneratePolicyCompliantPassword(group) : request.Password!;
-        var passwordErrors = await AuthHelper.ValidatePasswordAsync(_userManager, user, password);
-        if (passwordErrors.Count > 0)
-            return UnprocessableEntity(new ApiResponse { Success = false, Error = passwordErrors[0].Description, ErrorCode = "invalid_password" });
-
-        user.PasswordHash = _passwordHasher.HashPassword(user, password);
-        _context.Users.Add(user);
-        try
-        {
-            await _context.SaveChangesAsync();
-        }
-        catch (DbUpdateException ex) when (ex.IsUniqueViolation())
-        {
-            return StatusCode(409, new ApiResponse { Success = false, Error = "用户名或邮箱已被占用。", ErrorCode = "duplicate" });
-        }
-
-        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.UserCreated,
-            user.Uid.ToString(), user.Email, true, $"Admin API created user {user.Name}");
-
-        return Ok(new
-        {
-            success = true,
-            message = $"已创建用户 {user.Name}（uid:{user.Uid}）。",
-            uid = user.Uid,
-            name = user.Name,
-            group = user.Group,
-            generatedPassword = generatedPassword ? password : null
-        });
-    }
-
     [HttpGet]
     public async Task<IActionResult> List(
         [FromQuery] string? group = null,
@@ -128,7 +63,7 @@ public class AdminUsersController : ControllerBase
             query = query.Where(u => u.Group == group);
         if (!string.IsNullOrEmpty(status))
         {
-            if (!UserStatusParser.TryParse(status, out var parsed))
+            if (!Enum.TryParse<UserStatus>(status, true, out var parsed))
                 return BadRequest(new ApiResponse { Success = false, Error = "无效的用户状态。", ErrorCode = "invalid_request" });
             query = query.Where(u => u.Status == parsed);
         }
@@ -237,7 +172,7 @@ public class AdminUsersController : ControllerBase
         var isMax = current.Group == AuthConstants.Roles.Max;
         var accessChanged = false;
 
-        if (!isMax && (request.Group is not null || request.Status is not null || request.LockoutEndSpecified))
+        if (!isMax && (request.Group is not null || request.Status is not null))
             return StatusCode(403, new ApiResponse { Success = false, Error = "Forbidden.", ErrorCode = "forbidden" });
 
         if (request.Group is not null)
@@ -260,7 +195,7 @@ public class AdminUsersController : ControllerBase
 
         if (request.Status is not null)
         {
-            if (!UserStatusParser.TryParse(request.Status, out var parsed))
+            if (!Enum.TryParse<UserStatus>(request.Status, true, out var parsed))
                 return BadRequest(new ApiResponse { Success = false, Error = "无效的用户状态。", ErrorCode = "invalid_request" });
             if (target.Uid == current.Uid && parsed is UserStatus.Banned or UserStatus.Deleted)
                 return StatusCode(403, new ApiResponse { Success = false, Error = "不能封禁或删除自己。", ErrorCode = "forbidden" });
@@ -268,28 +203,14 @@ public class AdminUsersController : ControllerBase
             {
                 target.Status = parsed;
                 accessChanged = true;
+                if (parsed == UserStatus.Active)
+                {
+                    target.LockoutEnd = null;
+                    target.AccessFailedCount = 0;
+                }
+                if (parsed == UserStatus.Locked && target.LockoutEnd is null)
+                    target.LockoutEnd = DateTimeOffset.UtcNow.AddMinutes(5);
             }
-            if (parsed == UserStatus.Active)
-            {
-                target.LockoutEnd = null;
-                target.AccessFailedCount = 0;
-            }
-            else if (parsed == UserStatus.Locked && request.LockoutEndSpecified)
-            {
-                if (request.LockoutEnd is { } end && end <= DateTimeOffset.UtcNow)
-                    return BadRequest(new ApiResponse { Success = false, Error = "锁定到期时间必须晚于当前时间。", ErrorCode = "invalid_request" });
-                target.LockoutEnd = request.LockoutEnd;
-            }
-        }
-
-        if (request.Status is null && request.LockoutEndSpecified)
-        {
-            if (target.Status != UserStatus.Locked)
-                return BadRequest(new ApiResponse { Success = false, Error = "只有管理员锁定状态可以单独修改锁定到期时间。", ErrorCode = "invalid_request" });
-            if (request.LockoutEnd is { } end && end <= DateTimeOffset.UtcNow)
-                return BadRequest(new ApiResponse { Success = false, Error = "锁定到期时间必须晚于当前时间。", ErrorCode = "invalid_request" });
-            target.LockoutEnd = request.LockoutEnd;
-            accessChanged = true;
         }
 
         if (request.DisplayName is not null)
@@ -489,36 +410,6 @@ public class AdminUsersController : ControllerBase
         _logger.LogInformation("管理员删除用户 | uid:{Uid} | 用户:{Name}", target.Uid, target.Name);
 
         return Ok(new ApiResponse { Success = true });
-    }
-
-    private string GeneratePolicyCompliantPassword(string group)
-    {
-        var options = _userManager.Options.Password;
-        var config = HttpContext.RequestServices.GetRequiredService<MainConfig>();
-        var requiredLength = group is AuthConstants.Roles.Admin or AuthConstants.Roles.Max
-            ? config.Identity.Password.AdminRequiredLength
-            : config.Identity.Password.RequiredLength;
-        var length = Math.Max(16, Math.Max(options.RequiredLength, requiredLength));
-        const string lower = "abcdefghijklmnopqrstuvwxyz";
-        const string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        const string digits = "0123456789";
-        const string special = "!@#$%^&*()_+-=[]{}|;:,.<>?";
-        var chars = new List<char>(length);
-
-        if (options.RequireLowercase) chars.Add(lower[System.Security.Cryptography.RandomNumberGenerator.GetInt32(lower.Length)]);
-        if (options.RequireUppercase) chars.Add(upper[System.Security.Cryptography.RandomNumberGenerator.GetInt32(upper.Length)]);
-        if (options.RequireDigit) chars.Add(digits[System.Security.Cryptography.RandomNumberGenerator.GetInt32(digits.Length)]);
-        if (options.RequireNonAlphanumeric) chars.Add(special[System.Security.Cryptography.RandomNumberGenerator.GetInt32(special.Length)]);
-
-        var pool = lower + upper + digits + special;
-        while (chars.Count < length)
-            chars.Add(pool[System.Security.Cryptography.RandomNumberGenerator.GetInt32(pool.Length)]);
-        for (var i = chars.Count - 1; i > 0; i--)
-        {
-            var j = System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1);
-            (chars[i], chars[j]) = (chars[j], chars[i]);
-        }
-        return new string(chars.ToArray());
     }
 
     private async Task<(User? Current, User? Target, IActionResult? Error)> ResolveTargetAsync(Guid uid)

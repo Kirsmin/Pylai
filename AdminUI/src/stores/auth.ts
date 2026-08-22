@@ -68,19 +68,10 @@ export const useAuthStore = defineStore('admin-auth', () => {
 
   async function ensureCsrf() {
     if (csrfToken.value) return csrfToken.value
-    try {
-      const data = await parseApiResponse<{ token: string }>(await rawFetch('/api/admin/bff/csrf'))
-      if (!data?.token) throw new ApiError('无法建立管理会话', 403, 'csrf_invalid')
-      csrfToken.value = data.token
-      return csrfToken.value
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        user.value = null
-        capabilities.value = []
-        throw new ApiError('登录已过期，请重新登录', 401, 'unauthorized')
-      }
-      throw err
-    }
+    const data = await parseApiResponse<{ success: boolean; token: string }>(await rawFetch('/api/admin/bff/csrf'))
+    if (!data?.token) throw new ApiError('无法建立管理会话', 403, 'csrf_invalid')
+    csrfToken.value = data.token
+    return csrfToken.value
   }
 
   async function executeOnce<T>(path: string, init: RequestInit = {}): Promise<T | undefined> {
@@ -132,7 +123,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     stepUpBusy.value = true
     stepUpError.value = ''
     try {
-      const data = await parseApiResponse<{ transactionId: string; methods: string[] }>(
+      const data = await parseApiResponse<{ success: boolean; transactionId: string; methods: string[] }>(
         await rawFetch('/api/auth/mfa/step-up', { method: 'POST' })
       )
       if (!data?.transactionId) throw new ApiError('无法开始 MFA 验证', 403, 'mfa_invalid')
@@ -152,7 +143,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     stepUpBusy.value = true
     stepUpError.value = ''
     try {
-      await parseApiResponse<Record<string, never>>(await rawFetch('/api/auth/mfa/step-up/totp', {
+      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/totp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId: ticket.transactionId, code: stepUpCode.value })
@@ -176,7 +167,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
         `/api/auth/mfa/step-up/webauthn/options?transactionId=${encodeURIComponent(ticket.transactionId)}`
       ))
       const response = await getAssertion(options)
-      await parseApiResponse<Record<string, never>>(await rawFetch('/api/auth/mfa/step-up/webauthn/verify', {
+      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/webauthn/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId: ticket.transactionId, response })
@@ -184,7 +175,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       mfaStepUpSatisfied.value = true
       stepUpResolve?.()
     } catch (err) {
-      stepUpError.value = err instanceof Error ? err.message : '通行密钥验证失败，请重试'
+      stepUpError.value = err instanceof Error ? err.message : 'Passkey 验证失败，请重试'
     } finally {
       stepUpBusy.value = false
     }
@@ -197,6 +188,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
   async function loadMfaStatus() {
     try {
       const data = await parseApiResponse<{
+        success: boolean
         required: boolean
         totpEnabled: boolean
         webAuthnCount: number

@@ -27,7 +27,7 @@ async function load() {
   loading.value = true
   try {
     const params = new URLSearchParams({ skip: String((page.value - 1) * pageSize), take: String(pageSize) })
-    const data = await authStore.request<{ total: number; items: AdminClientItem[] }>(
+    const data = await authStore.request<{ success: boolean; total: number; items: AdminClientItem[] }>(
       `/api/clients?${params.toString()}`
     )
     clients.value = data?.items ?? []
@@ -212,7 +212,7 @@ function arrayOutput(v: string[] | undefined): string {
       <div style="display:flex;flex-direction:column;gap:12px;">
         <label><span class="field-label">clientId</span><input v-model="form.clientId" class="admin-input mono" :disabled="editingId!==null" /></label>
         <label><span class="field-label">显示名称</span><input v-model="form.displayName" class="admin-input" /></label>
-        <label v-if="editingId===null"><span class="field-label">客户端密钥</span><input v-model="form.clientSecret" type="password" class="admin-input" placeholder="留空自动生成" /></label>
+        <label v-if="editingId===null"><span class="field-label">Client Secret</span><input v-model="form.clientSecret" type="password" class="admin-input" placeholder="留空自动生成" /></label>
         <label><span class="field-label">介绍</span><input v-model="form.description" class="admin-input" /></label>
         <label><span class="field-label">主页</span><input v-model="form.homepageUrl" class="admin-input" /></label>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -220,9 +220,9 @@ function arrayOutput(v: string[] | undefined): string {
           <span style="font-size:13px;">Fajor 认证</span>
         </div>
         <label><span class="field-label">Scopes（每行一个）</span><textarea :value="arrayOutput(form.scopes)" class="admin-input mono" rows="4" @input="form.scopes = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
-        <label><span class="field-label">重定向地址（每行一个）</span><textarea :value="arrayOutput(form.redirectUris)" class="admin-input mono" rows="3" @input="form.redirectUris = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
-        <label><span class="field-label">登出后重定向地址（每行一个）</span><textarea :value="arrayOutput(form.postLogoutRedirectUris)" class="admin-input mono" rows="2" @input="form.postLogoutRedirectUris = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
-        <label><span class="field-label">授权类型（每行一个）</span><textarea :value="arrayOutput(form.grantTypes)" class="admin-input mono" rows="2" @input="form.grantTypes = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
+        <label><span class="field-label">Redirect URIs（每行一个）</span><textarea :value="arrayOutput(form.redirectUris)" class="admin-input mono" rows="3" @input="form.redirectUris = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
+        <label><span class="field-label">Post Logout URIs（每行一个）</span><textarea :value="arrayOutput(form.postLogoutRedirectUris)" class="admin-input mono" rows="2" @input="form.postLogoutRedirectUris = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
+        <label><span class="field-label">Grant Types（每行一个）</span><textarea :value="arrayOutput(form.grantTypes)" class="admin-input mono" rows="2" @input="form.grantTypes = arrayInput(($event.target as HTMLTextAreaElement).value)" /></label>
         <div style="display:flex;justify-content:flex-end;margin-top:4px;">
           <NButton type="success" ghost :loading="saving" @click="save">保存</NButton>
         </div>

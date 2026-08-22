@@ -59,7 +59,7 @@ public static class AppServices
     {
         var csBuilder = new NpgsqlConnectionStringBuilder(config.Database.ConnectionString);
         if (!csBuilder.ContainsKey("Max Pool Size"))
-            csBuilder.MaxPoolSize = 80;
+            csBuilder.MaxPoolSize = 200;
 
         services.AddDbContext<ApplicationDbContext>(options =>
         {
@@ -245,7 +245,6 @@ public static class AppServices
         }
 
         authBuilder.AddScheme<UserTokenOptions, UserTokenAuthHandler>("UserToken", null);
-        authBuilder.AddScheme<LocalManageTokenOptions, LocalManageTokenAuthHandler>(LocalManageToken.Scheme, null);
 
         services.AddAuthorization(options =>
         {
@@ -261,7 +260,6 @@ public static class AppServices
             options.AddPolicy(AuthConstants.Policies.AdminUserApi, policy =>
             {
                 policy.AddAuthenticationSchemes(
-                    LocalManageToken.Scheme,
                     "UserToken",
                     IdentityConstants.ApplicationScheme,
                     "OpenIddict.Validation.AspNetCore");
@@ -272,7 +270,6 @@ public static class AppServices
             options.AddPolicy(AuthConstants.Policies.MaxApi, policy =>
             {
                 policy.AddAuthenticationSchemes(
-                    LocalManageToken.Scheme,
                     "UserToken",
                     IdentityConstants.ApplicationScheme,
                     "OpenIddict.Validation.AspNetCore");

@@ -10,7 +10,7 @@ const ClientsView = () => import('@/views/ClientsView.vue')
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: '/', name: 'home', component: HomeView, meta: { title: 'Pylai 管理后台' } },
+    { path: '/', name: 'home', component: HomeView, meta: { title: '# Pylai' } },
     { path: '/users', name: 'users', component: UsersView, meta: { title: 'Pylai 用户管理', capability: 'users' } },
     { path: '/invite-codes', name: 'invite-codes', component: InviteCodesView, meta: { title: 'Pylai 邀请码', capability: 'inviteCodes' } },
     { path: '/bans', name: 'bans', component: BansView, meta: { title: 'Pylai 封禁管理', capability: 'bans' } },
@@ -28,7 +28,7 @@ router.beforeEach((to) => {
       return { name: 'home' }
     }
   }
-  document.title = to.meta.title as string || 'Pylai 管理后台'
+  document.title = to.meta.title as string || 'Pylai'
 })
 
 export default router
