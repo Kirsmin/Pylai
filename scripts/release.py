@@ -104,6 +104,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True, help="版本号，例如 0.0.1 或 v0.0.1")
     parser.add_argument("--target", default="all", choices=["all", *TARGETS.keys()],
                         help="目标平台，默认 all")
+    parser.add_argument("--finalize", action="store_true",
+                        help="跳过镜像构建：校验 dist/ 下已有 tar 产物齐全后仅生成 "
+                             "ManagePylai.py 与 release.json（供 CI 汇总 job 使用）")
     return parser.parse_args()
 
 
@@ -119,7 +122,14 @@ def main() -> int:
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     selected = TARGETS.items() if args.target == "all" else [(args.target, TARGETS[args.target])]
 
-    outputs = [build_target(version, name, target) for name, target in selected]
+    if args.finalize:
+        expected = [DIST_DIR / f"Pylai-{version}-Linux-{target['arch']}.tar" for _, target in selected]
+        missing = [p.name for p in expected if not p.is_file() or p.stat().st_size == 0]
+        if missing:
+            raise SystemExit(f"产物缺失或为空，无法 finalize: {', '.join(missing)}")
+        outputs = expected
+    else:
+        outputs = [build_target(version, name, target) for name, target in selected]
 
     manage_dst = DIST_DIR / "ManagePylai.py"
     shutil.copy2(MANAGE_PY, manage_dst)
