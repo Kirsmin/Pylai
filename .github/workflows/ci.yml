@@ -185,7 +185,7 @@ jobs:
         run: docker save pylai-dev:latest -o pylai-dev-amd64.tar
 
       - name: Upload Dev image artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pylai-dev-amd64
           path: pylai-dev-amd64.tar
