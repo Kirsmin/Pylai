@@ -29,13 +29,12 @@ def fatal(msg: str, code: int = 1) -> None:
 
 # ============ 工具函数 ============
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """执行命令，失败时 fatal（等效 Bash set -e）。"""
-    log("DEBUG", f"exec: {' '.join(cmd)}")
+    """执行命令，失败时 fatal（等效 Bash set -e）。禁止打印命令内容：参数可能含敏感值。"""
     result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if result.returncode != 0:
-        stderr = result.stderr.strip() if result.stderr else ""
-        stdout = result.stdout.strip() if result.stdout else ""
-        fatal(f"命令失败 (rc={result.returncode}): {' '.join(cmd)}\nstderr: {stderr}\nstdout: {stdout}")
+        stderr = (result.stderr or "").strip()[-500:]
+        stdout = (result.stdout or "").strip()[-500:]
+        fatal(f"命令失败 (rc={result.returncode})，stderr: {stderr}\nstdout: {stdout}")
     return result
 
 # ============ 阶段 1: 环境检查 ============
@@ -157,8 +156,26 @@ def setup_postgres() -> None:
     db_pass = os.environ["PYLAI_DB_PASSWORD"]
     db_name = os.environ["PYLAI_DB_NAME"]
 
+    ident_re = re.compile(r'^[a-z_][a-z0-9_$]{0,62}$')
+    if not ident_re.match(db_user):
+        fatal(f"PYLAI_DB_USER 含非法字符: 仅允许小写字母/数字/下划线/$，且需以字母或下划线开头")
+    if not ident_re.match(db_name):
+        fatal(f"PYLAI_DB_NAME 含非法字符: 仅允许小写字母/数字/下划线/$，且需以字母或下划线开头")
+
+    def pg_literal(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    # 密码经 stdin 传入 psql，不经 argv / shell 字符串 / 日志
+    role_sql = (
+        "DO $$ BEGIN "
+        f"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = {pg_literal(db_user)}) THEN "
+        f"CREATE ROLE {db_user} LOGIN PASSWORD {pg_literal(db_pass)}; "
+        f"ELSE ALTER ROLE {db_user} WITH LOGIN PASSWORD {pg_literal(db_pass)}; "
+        "END IF; END $$;"
+    )
     run(["su", "postgres", "-c",
-         f"psql -q -h /run/postgresql -v ON_ERROR_STOP=1 -c \"DO \\$\\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{db_user}') THEN CREATE ROLE {db_user} LOGIN PASSWORD '{db_pass}'; ELSE ALTER ROLE {db_user} WITH LOGIN PASSWORD '{db_pass}'; END IF; END \\$\\$;\""])
+         "psql -q -h /run/postgresql -v ON_ERROR_STOP=1 -f -"],
+        input=role_sql)
 
     result = subprocess.run(
         ["su", "postgres", "-c",
@@ -183,8 +200,9 @@ def setup_redis() -> None:
 
     for i in range(20):
         result = subprocess.run(
-            ["redis-cli", "-p", "6379", "-a", redis_pass, "--no-auth-warning", "ping"],
-            capture_output=True
+            ["redis-cli", "-p", "6379", "--no-auth-warning", "ping"],
+            capture_output=True,
+            env={**os.environ, "REDISCLI_AUTH": redis_pass}
         )
         if result.returncode == 0:
             break
@@ -195,8 +213,9 @@ def setup_redis() -> None:
 def shutdown_redis() -> None:
     redis_pass = os.environ.get("PYLAI_REDIS_PASSWORD", "")
     subprocess.run(
-        ["redis-cli", "-p", "6379", "-a", redis_pass, "--no-auth-warning", "shutdown", "nosave"],
-        capture_output=True
+        ["redis-cli", "-p", "6379", "--no-auth-warning", "shutdown", "nosave"],
+        capture_output=True,
+        env={**os.environ, "REDISCLI_AUTH": redis_pass}
     )
     pid_file = Path("/run/redis.pid")
     if pid_file.exists():

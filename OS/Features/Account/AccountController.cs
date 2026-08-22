@@ -9,7 +9,7 @@ namespace Pylaios.Features.Account;
 
 [ApiController]
 [Route("api/auth/account")]
-[Authorize(AuthenticationSchemes = "Identity.Application,OpenIddict.Validation.AspNetCore")]
+[Authorize(AuthenticationSchemes = "Identity.Application,UserToken")]
 public class AccountController : ControllerBase
 {
     private readonly IPasswordHasher<User> _passwordHasher;

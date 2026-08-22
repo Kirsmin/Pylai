@@ -56,6 +56,8 @@ public interface IMfaService
     Task<bool> VerifyStepUpTotpAsync(string transactionId, string code);
     Task<AssertionOptions> BeginStepUpWebAuthnAssertionAsync(string transactionId);
     Task<bool> VerifyStepUpWebAuthnAssertionAsync(string transactionId, AuthenticatorAssertionRawResponse response);
+    Task MarkStepUpVerifiedAsync(string credentialKey);
+    Task<bool> HasCredentialStepUpVerifiedAsync(string credentialKey);
     Task<bool> HasRecentStepUpAsync(Guid userUid);
 }
 
@@ -68,6 +70,7 @@ public sealed class MfaService : IMfaService
     private const string RegistrationPrefix = "mfa:registration:";
     private const string AssertionPrefix = "mfa:assertion:";
     private const string StepUpAssertionPrefix = "mfa:stepup-assertion:";
+    public const string StepUpVerifiedPrefix = "mfa:verified:";
     private const string Base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
     private readonly ApplicationDbContext _context;
@@ -145,6 +148,13 @@ public sealed class MfaService : IMfaService
         return settings?.LastVerifiedAt is { } verified
             && verified >= DateTimeOffset.UtcNow.AddMinutes(-_config.ChallengeLifetimeMinutes);
     }
+
+    public async Task MarkStepUpVerifiedAsync(string credentialKey)
+        => await _cache.SetAsync(StepUpVerifiedPrefix + credentialKey, true,
+            TimeSpan.FromMinutes(_config.ChallengeLifetimeMinutes));
+
+    public async Task<bool> HasCredentialStepUpVerifiedAsync(string credentialKey)
+        => await _cache.GetAsync<bool>(StepUpVerifiedPrefix + credentialKey);
 
     public async Task<MfaLoginRequirement> BeginStepUpAsync(User user)
     {

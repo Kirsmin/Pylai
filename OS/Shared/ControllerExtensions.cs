@@ -78,6 +78,24 @@ public static class ControllerExtensions
                 && u.Status != UserStatus.Deleted);
     }
 
+    /// <summary>
+    /// 当前请求凭据的 Step-Up 标识：Cookie 会话用 session token 哈希，UserToken 用令牌 ID。
+    /// 返回 null 表示无法定位具体凭据（fail closed，不允许通过 Step-Up）。
+    /// </summary>
+    public static string? GetStepUpCredentialKey(this ControllerBase controller)
+    {
+        var config = controller.HttpContext.RequestServices.GetRequiredService<MainConfig>();
+        var sessionCookie = controller.HttpContext.Request.Cookies[config.Cookie.SessionName];
+        if (!string.IsNullOrEmpty(sessionCookie))
+            return "sess:" + AuthHelper.HashCode(sessionCookie);
+
+        var tokenId = controller.User.FindFirst("user_token_id")?.Value;
+        if (!string.IsNullOrEmpty(tokenId))
+            return "utok:" + tokenId;
+
+        return null;
+    }
+
     public static async Task<IActionResult?> RequireMfaStepUpAsync(
         this ControllerBase controller,
         IMfaService mfa,
@@ -90,13 +108,14 @@ public static class ControllerExtensions
         if (AuthConstants.Groups.Rank(user.Group) < AuthConstants.Groups.Rank(AuthConstants.Roles.Admin))
             return null;
 
-        if (await mfa.HasRecentStepUpAsync(user.Uid))
-            return null;
+        var credentialKey = controller.GetStepUpCredentialKey();
+        if (credentialKey is null || !await mfa.HasCredentialStepUpVerifiedAsync(credentialKey))
+            return new ObjectResult(new { success = false, error = "敏感操作需要 MFA 二次验证。", errorCode = "mfa_step_up_required" })
+            {
+                StatusCode = StatusCodes.Status403Forbidden
+            };
 
-        return new ObjectResult(new { success = false, error = "敏感操作需要 MFA 二次验证。", errorCode = "mfa_step_up_required" })
-        {
-            StatusCode = StatusCodes.Status403Forbidden
-        };
+        return null;
     }
 
     public static Task<bool> IsEmailTakenAsync(this ApplicationDbContext context, string email)

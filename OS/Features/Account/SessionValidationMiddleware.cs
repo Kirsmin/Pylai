@@ -40,7 +40,7 @@ public class SessionValidationMiddleware
             }
 
             var tokenHash = AuthHelper.HashCode(sessionCookie);
-            var cacheKey = $"session-valid:{tokenHash}";
+            var cacheKey = SessionCacheInvalidator.ValidPrefix + tokenHash;
             var stateCache = context.RequestServices.GetRequiredService<IRedisStateCache>();
 
             if (await stateCache.GetAsync<bool>(cacheKey))

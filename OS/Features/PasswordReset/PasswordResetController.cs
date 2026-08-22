@@ -78,19 +78,23 @@ public class PasswordResetController : ControllerBase
             var code = await _emailCodeService.CreateAsync(transactionKey, user.Email, user.Uid);
             _logger.LogCode(_testMode, LogLevel.Debug, "重置码生成 | transaction:{Transaction}", code, transactionId[..8]);
 
-            try
+            var email = user.Email;
+            _ = Task.Run(async () =>
             {
-                await _emailSender.SendPasswordResetCodeAsync(user, user.Email, code);
-                _logger.LogInformation("密码重置邮件已发送 | uid:{Uid}", user.Uid);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "密码重置邮件发送失败 | uid:{Uid}", user.Uid);
-            }
+                try
+                {
+                    await _emailSender.SendPasswordResetCodeAsync(email!, code);
+                    _logger.LogInformation("密码重置邮件已发送 | uid:{Uid}", user.Uid);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "密码重置邮件发送失败 | uid:{Uid}", user.Uid);
+                }
+            });
         }
         else
         {
-            // 邮箱不存在：不创建验证码条目、不发送邮件，仅保持响应形状一致（防时序侧信道）。
+            // 邮箱不存在：不创建验证码条目、不发送邮件，响应耗时与存在分支对齐（防时序侧信道）。
         }
 
         return Ok(new ForgotPasswordResponse { Success = true, TransactionId = transactionId });

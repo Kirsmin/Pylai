@@ -32,10 +32,10 @@ public class EmailSender
         _ipResolver = ipResolver;
     }
 
-    public Task SendRegisterCodeAsync(User user, string email, string code)
+    public Task SendRegisterCodeAsync(string email, string code)
         => SendThemedAsync(MailThemeKind.Register, email, code);
 
-    public Task SendPasswordResetCodeAsync(User user, string email, string resetCode)
+    public Task SendPasswordResetCodeAsync(string email, string resetCode)
         => SendThemedAsync(MailThemeKind.PasswordReset, email, resetCode);
 
     public Task SendVerificationCodeAsync(MailThemeKind kind, string email, string code)

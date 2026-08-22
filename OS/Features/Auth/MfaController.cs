@@ -134,13 +134,14 @@ public sealed class MfaController : ControllerBase
             || (rank >= AuthConstants.Groups.Rank(AuthConstants.Roles.Max) && _config.Mfa.RequireWebAuthnForMax);
         var settings = await _context.UserMfaSettings.AsNoTracking().FirstOrDefaultAsync(x => x.UserUid == user.Uid);
         var webauthnCount = await _context.WebAuthnCredentials.CountAsync(x => x.UserUid == user.Uid);
+        var credentialKey = this.GetStepUpCredentialKey();
         return Ok(new MfaStatusResponse
         {
             Success = true,
             Required = required,
             TotpEnabled = settings?.TotpEnabled == true && !string.IsNullOrWhiteSpace(settings.EncryptedTotpSecret),
             WebAuthnCount = webauthnCount,
-            StepUpSatisfied = await _mfa.HasRecentStepUpAsync(user.Uid)
+            StepUpSatisfied = credentialKey is not null && await _mfa.HasCredentialStepUpVerifiedAsync(credentialKey)
         });
     }
 
@@ -165,6 +166,10 @@ public sealed class MfaController : ControllerBase
     [HttpPost("step-up/totp")]
     public async Task<IActionResult> VerifyStepUpTotp([FromBody] MfaVerifyRequest request)
     {
+        var credentialKey = this.GetStepUpCredentialKey();
+        if (credentialKey is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "无法识别请求凭据，拒绝验证。", ErrorCode = "mfa_invalid" });
+
         if (!await TryBeginMfaAttemptAsync("stepup"))
             return StatusCode(429, new ApiResponse { Success = false, Error = "MFA 尝试过于频繁，请稍后重试。", ErrorCode = "rate_limited" });
 
@@ -172,6 +177,7 @@ public sealed class MfaController : ControllerBase
             return Unauthorized(new ApiResponse { Success = false, Error = "MFA 验证失败。", ErrorCode = "mfa_invalid" });
 
         await _mfa.RemoveStepUpStateAsync(request.TransactionId);
+        await _mfa.MarkStepUpVerifiedAsync(credentialKey);
         return Ok(new ApiResponse { Success = true });
     }
 
@@ -194,9 +200,14 @@ public sealed class MfaController : ControllerBase
     [HttpPost("step-up/webauthn/verify")]
     public async Task<IActionResult> VerifyStepUpWebAuthn([FromBody] MfaWebAuthnRequest request)
     {
+        var credentialKey = this.GetStepUpCredentialKey();
+        if (credentialKey is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "无法识别请求凭据，拒绝验证。", ErrorCode = "mfa_invalid" });
+
         if (!await _mfa.VerifyStepUpWebAuthnAssertionAsync(request.TransactionId, request.Response))
             return Unauthorized(new ApiResponse { Success = false, Error = "MFA 验证失败。", ErrorCode = "mfa_invalid" });
 
+        await _mfa.MarkStepUpVerifiedAsync(credentialKey);
         return Ok(new ApiResponse { Success = true });
     }
 

@@ -27,6 +27,11 @@ public sealed class UserGroupAuthorizationHandler : AuthorizationHandler<UserGro
     protected override async Task HandleRequirementAsync(
         AuthorizationHandlerContext context, UserGroupRequirement requirement)
     {
+        if (context.User.Identities.Any(i => string.Equals(
+                i.AuthenticationType, OpenIddict.Validation.AspNetCore.OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme,
+                StringComparison.Ordinal)))
+            return;
+
         var uidClaim = context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
                     ?? context.User.FindFirst(OpenIddict.Abstractions.OpenIddictConstants.Claims.Subject)?.Value;
         if (uidClaim is null || !Guid.TryParse(uidClaim, out var uid))

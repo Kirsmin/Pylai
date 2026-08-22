@@ -31,6 +31,11 @@ const mfaSetup = ref(false)
 
 onMounted(async () => {
   try { supportEmail.value = (await loadPublicConfig()).supportEmail } catch { /* support text has a safe fallback */ }
+  const params = new URLSearchParams(window.location.search)
+  if (params.get('error') === 'mfa_required' && params.get('mfa_transaction')) {
+    mfaTransactionId.value = String(params.get('mfa_transaction') || '')
+    mfaMethods.value = (params.get('mfa_methods') || '').split(',').filter(Boolean)
+  }
 })
 
 async function handleLogin() {

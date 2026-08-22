@@ -248,12 +248,13 @@ public static class AppServices
 
         services.AddAuthorization(options =>
         {
+            // OAuth access token（OpenIddict 验证方案）仅用于 /connect/* 端点，
+            // 一律不得进入本站 API：profile scope 不构成账户/管理操作授权。
             options.AddPolicy(AuthConstants.Policies.AuthenticatedApi, policy =>
             {
                 policy.AddAuthenticationSchemes(
                     "UserToken",
-                    IdentityConstants.ApplicationScheme,
-                    "OpenIddict.Validation.AspNetCore");
+                    IdentityConstants.ApplicationScheme);
                 policy.RequireAuthenticatedUser();
             });
 
@@ -261,8 +262,7 @@ public static class AppServices
             {
                 policy.AddAuthenticationSchemes(
                     "UserToken",
-                    IdentityConstants.ApplicationScheme,
-                    "OpenIddict.Validation.AspNetCore");
+                    IdentityConstants.ApplicationScheme);
                 policy.RequireAuthenticatedUser();
                 policy.AddRequirements(new UserGroupRequirement(UserGroupRequirementLevel.AdminOrMax));
             });
@@ -271,8 +271,7 @@ public static class AppServices
             {
                 policy.AddAuthenticationSchemes(
                     "UserToken",
-                    IdentityConstants.ApplicationScheme,
-                    "OpenIddict.Validation.AspNetCore");
+                    IdentityConstants.ApplicationScheme);
                 policy.RequireAuthenticatedUser();
                 policy.AddRequirements(new UserGroupRequirement(UserGroupRequirementLevel.Max));
             });

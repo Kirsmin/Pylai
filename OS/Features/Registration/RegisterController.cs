@@ -145,10 +145,9 @@ public class RegisterController : ControllerBase
             });
         }
 
-        var dummy = new User();
         try
         {
-            await _emailSender.SendRegisterCodeAsync(dummy, request.Email, code);
+            await _emailSender.SendRegisterCodeAsync(request.Email, code);
         }
         catch (Exception)
         {
@@ -284,10 +283,9 @@ public class RegisterController : ControllerBase
         var remaining = 2 - session.EmailChangeCount;
         await _sessionService.UpdateSessionAsync(request.SessionToken, session);
 
-        var dummy = new User();
         try
         {
-            await _emailSender.SendRegisterCodeAsync(dummy, request.NewEmail, code);
+            await _emailSender.SendRegisterCodeAsync(request.NewEmail, code);
         }
         catch (Exception)
         {

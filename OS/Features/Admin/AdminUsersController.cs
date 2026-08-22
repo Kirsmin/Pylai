@@ -17,6 +17,7 @@ public class AdminUsersController : ControllerBase
     private readonly IUserTokenService _userTokenService;
     private readonly IUserAccessRevoker _userAccessRevoker;
     private readonly IMfaService _mfa;
+    private readonly IRedisStateCache _stateCache;
     private readonly IAuditService _auditService;
     private readonly IpResolutionService _ipResolver;
     private readonly ILogger<AdminUsersController> _logger;
@@ -28,6 +29,7 @@ public class AdminUsersController : ControllerBase
         IUserTokenService userTokenService,
         IUserAccessRevoker userAccessRevoker,
         IMfaService mfa,
+        IRedisStateCache stateCache,
         IAuditService auditService,
         IpResolutionService ipResolver,
         ILogger<AdminUsersController> logger)
@@ -38,6 +40,7 @@ public class AdminUsersController : ControllerBase
         _userTokenService = userTokenService;
         _userAccessRevoker = userAccessRevoker;
         _mfa = mfa;
+        _stateCache = stateCache;
         _auditService = auditService;
         _ipResolver = ipResolver;
         _logger = logger;
@@ -201,6 +204,8 @@ public class AdminUsersController : ControllerBase
                 return StatusCode(403, new ApiResponse { Success = false, Error = "不能封禁或删除自己。", ErrorCode = "forbidden" });
             if (target.Status != parsed)
             {
+                var statusStepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+                if (statusStepUp is not null) return statusStepUp;
                 target.Status = parsed;
                 accessChanged = true;
                 if (parsed == UserStatus.Active)
@@ -256,6 +261,9 @@ public class AdminUsersController : ControllerBase
         if (target is null)
             return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
 
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
+
         if (!ModelState.IsValid)
             return BadRequest(new ApiResponse { Success = false, Error = "请求参数无效。", ErrorCode = "invalid_format" });
 
@@ -282,7 +290,13 @@ public class AdminUsersController : ControllerBase
         if (target is null)
             return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
 
+        var revokedHashes = await _context.UserSessions.AsNoTracking()
+            .Where(s => s.UserUid == target.Uid && s.RevokedAt == null)
+            .Select(s => s.TokenHash)
+            .ToListAsync();
         await _context.RevokeAllSessionsAsync(target.Uid);
+        foreach (var tokenHash in revokedHashes)
+            await SessionCacheInvalidator.InvalidateSessionAsync(_stateCache, tokenHash);
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.SessionsRevokedAll,
             target.Uid.ToString(), target.Email, true, $"Admin API revoked all sessions for {target.Name}");
@@ -330,6 +344,7 @@ public class AdminUsersController : ControllerBase
 
         session.RevokedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
+        await SessionCacheInvalidator.InvalidateSessionAsync(_stateCache, session.TokenHash);
 
         return Ok(new ApiResponse { Success = true });
     }
@@ -400,6 +415,9 @@ public class AdminUsersController : ControllerBase
 
         if (target.Status == UserStatus.Deleted)
             return NotFound(new ApiResponse { Success = false, Error = "用户不存在。", ErrorCode = "not_found" });
+
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
 
         target.Status = UserStatus.Deleted;
         await _userAccessRevoker.RevokeUserAccessAsync(target.Uid);

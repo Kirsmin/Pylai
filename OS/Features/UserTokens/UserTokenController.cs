@@ -5,7 +5,7 @@ namespace Pylaios.Features.UserTokens;
 
 [ApiController]
 [Route("api/user-token")]
-[Authorize(AuthenticationSchemes = "Identity.Application,OpenIddict.Validation.AspNetCore")]
+[Authorize(AuthenticationSchemes = "Identity.Application,UserToken")]
 public class UserTokenController : ControllerBase
 {
     private readonly ApplicationDbContext _context;

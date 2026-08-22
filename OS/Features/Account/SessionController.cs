@@ -7,7 +7,7 @@ namespace Pylaios.Features.Account;
 
 [ApiController]
 [Route("api/auth")]
-[Authorize(AuthenticationSchemes = "Identity.Application,OpenIddict.Validation.AspNetCore")]
+[Authorize(AuthenticationSchemes = "Identity.Application,UserToken")]
 public class SessionController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
@@ -15,6 +15,7 @@ public class SessionController : ControllerBase
     private readonly IpResolutionService _ipResolver;
     private readonly SignInManager<User> _signInManager;
     private readonly MainConfig _config;
+    private readonly IRedisStateCache _stateCache;
     private readonly ILogger<SessionController> _logger;
 
     public SessionController(
@@ -23,6 +24,7 @@ public class SessionController : ControllerBase
         IpResolutionService ipResolver,
         SignInManager<User> signInManager,
         MainConfig config,
+        IRedisStateCache stateCache,
         ILogger<SessionController> logger)
     {
         _context = context;
@@ -30,6 +32,7 @@ public class SessionController : ControllerBase
         _ipResolver = ipResolver;
         _signInManager = signInManager;
         _config = config;
+        _stateCache = stateCache;
         _logger = logger;
     }
 
@@ -45,6 +48,7 @@ public class SessionController : ControllerBase
             await _context.UserSessions
                 .Where(s => s.TokenHash == tokenHash && s.UserUid == user.Uid && s.RevokedAt == null)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.RevokedAt, DateTimeOffset.UtcNow));
+            await SessionCacheInvalidator.InvalidateSessionAsync(_stateCache, tokenHash);
         }
 
         await _signInManager.SignOutAsync();
@@ -97,6 +101,7 @@ public class SessionController : ControllerBase
 
         session.RevokedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
+        await SessionCacheInvalidator.InvalidateSessionAsync(_stateCache, session.TokenHash);
 
         _logger.LogInformation("会话已注销 | uid:{Uid} | session:{Id}", user.Uid, id);
 
@@ -111,6 +116,7 @@ public class SessionController : ControllerBase
             return Unauthorized(new { Success = false, Error = "Not authenticated.", ErrorCode = "unauthorized" });
 
         var affected = await _context.RevokeAllSessionsAsync(user.Uid);
+        await SessionCacheInvalidator.InvalidateUserSessionsAsync(_stateCache, _context, user.Uid);
 
         await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.SessionsRevokedAll, user.Uid.ToString(), user.Email, true, $"Revoked {affected} sessions");
 

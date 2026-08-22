@@ -80,6 +80,7 @@ public class ExternalLoginController : ControllerBase
             return BadRequest(new { Success = false, Error = "Provider is not configured.", ErrorCode = "invalid_request" });
 
         string? initiatorUid = null;
+        string? sessionStepUpKey = null;
         if (User.Identity?.IsAuthenticated == true)
         {
             var initiator = await _userManager.GetUserAsync(User);
@@ -90,12 +91,13 @@ public class ExternalLoginController : ControllerBase
                 return Unauthorized(ApiResponse.Fail("登录状态无效。", "session_invalid"));
             }
             initiatorUid = initiator.Uid.ToString();
+            sessionStepUpKey = this.GetStepUpCredentialKey();
         }
 
         var flowId = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
         await _stateCache.SetAsync(
             ExternalStatePrefix + flowId,
-            new ExternalLoginState(provider, initiatorUid),
+            new ExternalLoginState(provider, initiatorUid, sessionStepUpKey),
             ExternalStateTtl);
 
         // ASP.NET Core OAuth handler still owns its protected state/correlation cookie.
@@ -192,9 +194,12 @@ public class ExternalLoginController : ControllerBase
                 return RedirectToLogin();
             }
 
-            if (!await _mfa.HasRecentStepUpAsync(currentUser.Uid))
+            var currentStepUpKey = this.GetStepUpCredentialKey();
+            if (string.IsNullOrEmpty(state.SessionStepUpKey)
+                || !string.Equals(state.SessionStepUpKey, currentStepUpKey, StringComparison.Ordinal)
+                || !await _mfa.HasCredentialStepUpVerifiedAsync(state.SessionStepUpKey))
             {
-                _logger.LogWarning("外部登录绑定拒绝：未通过近期 Step-Up | uid:{Uid} | Provider:{Provider}",
+                _logger.LogWarning("外部登录绑定拒绝：发起会话未通过 Step-Up 或会话已变化 | uid:{Uid} | Provider:{Provider}",
                     currentUser.Uid, provider);
                 return RedirectToLogin("mfa_step_up_required", provider);
             }
@@ -229,6 +234,17 @@ public class ExternalLoginController : ControllerBase
             return RedirectToLogin("external_failed");
         }
 
+        var mfaRequirement = await _mfa.BeginLoginAsync(user, rememberMe: false, ip);
+        if (mfaRequirement.Required)
+        {
+            _logger.LogInformation("外部登录需完成 MFA | uid:{Uid} | Provider:{Provider}", user.Uid, provider);
+            return RedirectToLogin("mfa_required", provider, new Dictionary<string, string>
+            {
+                ["mfa_transaction"] = mfaRequirement.TransactionId ?? string.Empty,
+                ["mfa_methods"] = string.Join(",", mfaRequirement.Methods)
+            });
+        }
+
         user.LastLoginAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
 
@@ -243,7 +259,8 @@ public class ExternalLoginController : ControllerBase
         return Redirect($"{_config.Frontend.Url}/");
     }
 
-    private IActionResult RedirectToLogin(string? error = null, string? provider = null)
+    private IActionResult RedirectToLogin(string? error = null, string? provider = null,
+        Dictionary<string, string>? extraParams = null)
     {
         var url = new StringBuilder($"{_config.Frontend.Url.TrimEnd('/')}/login");
         var separator = '?';
@@ -259,6 +276,10 @@ public class ExternalLoginController : ControllerBase
 
         if (!string.IsNullOrWhiteSpace(error)) Append("error", error);
         if (!string.IsNullOrWhiteSpace(provider)) Append("provider", provider);
+        if (extraParams is not null)
+            foreach (var (key, value) in extraParams)
+                if (!string.IsNullOrEmpty(value))
+                    Append(key, value);
         return Redirect(url.ToString());
     }
 
@@ -266,4 +287,4 @@ public class ExternalLoginController : ControllerBase
 
 }
 
-internal sealed record ExternalLoginState(string Provider, string? InitiatorUid);
+internal sealed record ExternalLoginState(string Provider, string? InitiatorUid, string? SessionStepUpKey = null);

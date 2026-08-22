@@ -17,17 +17,20 @@ public sealed class UserAccessRevoker : IUserAccessRevoker
     private readonly ApplicationDbContext _context;
     private readonly IOpenIddictTokenManager _tokenManager;
     private readonly IOpenIddictAuthorizationManager _authorizationManager;
+    private readonly IRedisStateCache _stateCache;
     private readonly ILogger<UserAccessRevoker> _logger;
 
     public UserAccessRevoker(
         ApplicationDbContext context,
         IOpenIddictTokenManager tokenManager,
         IOpenIddictAuthorizationManager authorizationManager,
+        IRedisStateCache stateCache,
         ILogger<UserAccessRevoker> logger)
     {
         _context = context;
         _tokenManager = tokenManager;
         _authorizationManager = authorizationManager;
+        _stateCache = stateCache;
         _logger = logger;
     }
 
@@ -48,6 +51,8 @@ public sealed class UserAccessRevoker : IUserAccessRevoker
     {
         var now = DateTimeOffset.UtcNow;
         var subject = uid.ToString();
+
+        await SessionCacheInvalidator.InvalidateUserSessionsAsync(_stateCache, _context, uid);
 
         var user = await _context.Users.FindAsync(uid);
         if (user is not null)

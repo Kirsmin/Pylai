@@ -26,6 +26,7 @@ function isSafeReturnUrl(url: string): boolean {
 
 function mapExternalError(error: unknown): string {
   if (error === 'external_login_requires_account') return '该第三方账号未绑定任何 Pylaios 账户，请先使用本地账户登录并绑定。'
+  if (error === 'mfa_required') return '该账户已启用多因素认证，请继续完成第二因素验证。'
   if (error === 'external_failed') return '第三方登录失败，请重试。'
   if (error === 'mfa_step_up_required') return '绑定第三方账号需要先完成安全验证，请先通过 MFA 验证后再试。'
   if (error === 'invalid_state') return '第三方登录状态已过期或无效，请重新发起。'
