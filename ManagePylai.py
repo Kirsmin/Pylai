@@ -70,6 +70,7 @@ mirror = "{mirror}"
 
 [Manager.State]
 LastCheck = "{last_check}"
+{skip_version_line}
 
 [Compose]
 ProjectName = "{project_name}"
@@ -101,10 +102,14 @@ Level = "{level}"
         sec = self._data.get("Security", {})
         log = self._data.get("Logging", {})
 
+        skip = state.get("SkipVersion")
+        skip_version_line = f"SkipVersion = {json.dumps(skip)}" if skip else ""
+
         text = self._DEFAULT_TOML.format(
             version=mgr.get("Version", __version__),
             mirror=mgr.get("mirror", "Github"),
             last_check=state.get("LastCheck", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
+            skip_version_line=skip_version_line,
             project_name=self._data.get("Compose", {}).get("ProjectName", "pylai"),
             auto_backup="true" if sec.get("AutoBackupBeforeUpdate", True) else "false",
             retention=sec.get("BackupRetentionDays", 7),
@@ -164,6 +169,22 @@ Level = "{level}"
     @property
     def auto_backup(self) -> bool:
         return self.get("Security", "AutoBackupBeforeUpdate", default=True)
+
+    # ---------- Phase 2 新增 ----------
+
+    @property
+    def skip_version(self) -> str | None:
+        """用户选择跳过的 ManagePylai.py 版本。"""
+        return self.get("Manager.State", "SkipVersion", default=None)
+
+    def set_skip_version(self, version: str | None) -> None:
+        self.set("Manager.State", "SkipVersion", version)
+        self.save()
+
+    @property
+    def custom_mirror_base(self) -> str | None:
+        """自定义镜像源 base_url（仅当 mirror == 'Custom' 时生效）。"""
+        return self.get("Manager.Custom", "base_url", default=None)
 
 
 class State:
@@ -614,54 +635,90 @@ class DockerCompose:
 
 
 class ReleaseClient:
-    """GitHub Release / 镜像源 客户端。"""
+    """GitHub Release / 镜像源 客户端。
+
+    支持三种模式：
+      1. Github  — 直接调用 GitHub API
+      2. ghproxy — 通过 ghproxy 代理访问 GitHub API
+      3. Custom  — 用户自定义 CDN，直接读取 {base_url}/releases/latest.json
+    """
 
     REPO = "Kirsmin/Pylai"
     USER_AGENT = f"ManagePylai/{__version__}"
 
-    MIRRORS: dict[str, str] = {
+    # 预定义镜像的 API 根（仅用于 GitHub 原生 API 调用）
+    PREDEFINED_API: dict[str, str] = {
         "Github": "https://api.github.com",
         "ghproxy": "https://ghproxy.com/https://api.github.com",
     }
 
-    def __init__(self, mirror: str = "Github") -> None:
-        self.mirror = mirror
-        self._base_api = self.MIRRORS.get(mirror, self.MIRRORS["Github"])
-        self._base_raw = self._raw_base(mirror)
+    # 预定义镜像的 Raw 下载根
+    PREDEFINED_RAW: dict[str, str] = {
+        "Github": "https://github.com",
+        "ghproxy": "https://ghproxy.com/https://github.com",
+    }
 
-    def _raw_base(self, mirror: str) -> str:
-        if mirror == "ghproxy":
-            return "https://ghproxy.com/https://github.com"
-        return "https://github.com"
+    def __init__(self, manager_cfg: ManagerConfig) -> None:
+        self.cfg = manager_cfg
+        self.mirror = manager_cfg.mirror
+        self.custom_base = manager_cfg.custom_mirror_base
+        self._is_custom = self.mirror == "Custom" and bool(self.custom_base)
 
     def _api_url(self, path: str) -> str:
-        return f"{self._base_api}/repos/{self.REPO}/{path}"
+        if self._is_custom:
+            raise ManageError("自定义镜像源不支持 GitHub API 调用")
+        base = self.PREDEFINED_API.get(self.mirror, self.PREDEFINED_API["Github"])
+        return f"{base}/repos/{self.REPO}/{path}"
 
     def _release_url(self, version: str, filename: str) -> str:
-        return f"{self._base_raw}/{self.REPO}/releases/download/v{version}/{filename}"
+        if self._is_custom:
+            base = self.custom_base.rstrip("/")
+            return f"{base}/releases/v{version}/{filename}"
+        base = self.PREDEFINED_RAW.get(self.mirror, self.PREDEFINED_RAW["Github"])
+        return f"{base}/{self.REPO}/releases/download/v{version}/{filename}"
 
-    def check_latest(self) -> tuple[str, str] | None:
-        """返回 (version, tag_name) 或 None（网络/解析失败）。"""
+    def _latest_url(self) -> str:
+        if self._is_custom:
+            return f"{self.custom_base.rstrip('/')}/releases/latest.json"
+        return self._api_url("releases/latest")
+
+    def check_latest(self) -> tuple[str, str, dict] | None:
+        """返回 (version, tag_or_ref, release_info_dict) 或 None。
+
+        release_info_dict 在 Custom 模式下就是 latest.json 本身；
+        在 GitHub 模式下是 releases/latest API 的完整 JSON。
+        """
         try:
-            req = urllib.request.Request(
-                self._api_url("releases/latest"),
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": self.USER_AGENT,
-                    "X-GitHub-Api-Version": "2022-11-28",
-                }
-            )
+            headers: dict[str, str] = {
+                "User-Agent": self.USER_AGENT,
+            }
+            if not self._is_custom:
+                headers["Accept"] = "application/vnd.github+json"
+                headers["X-GitHub-Api-Version"] = "2022-11-28"
+
+            req = urllib.request.Request(self._latest_url(), headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            tag = data.get("tag_name", "")
-            version = tag.lstrip("v")
-            return version, tag
+
+            if self._is_custom:
+                version = str(data.get("version", ""))
+                return version, f"v{version}", data
+            else:
+                tag = data.get("tag_name", "")
+                version = tag.lstrip("v")
+                return version, tag, data
         except (OSError, urllib.error.URLError, json.JSONDecodeError):
             return None
 
     def fetch_release_json(self, version: str) -> dict | None:
-        """获取 release.json 用于 dbSchemaVersion 兼容性校验。"""
-        url = self._release_url(version, "release.json")
+        """获取 release.json 用于 dbSchemaVersion 兼容性校验。
+
+        Custom 镜像源同样支持 {base_url}/releases/v{X.Y.Z}/release.json。
+        """
+        if self._is_custom:
+            url = f"{self.custom_base.rstrip('/')}/releases/v{version}/release.json"
+        else:
+            url = self._release_url(version, "release.json")
         try:
             req = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -693,34 +750,104 @@ class ReleaseClient:
 
 
 class SelfUpdater:
-    """ManagePylai.py 自更新逻辑。"""
+    """ManagePylai.py 自更新逻辑。
 
-    def __init__(self, client: ReleaseClient, script_path: Path | None = None) -> None:
+    流程：
+      1. 读取 ManagerConfig 中的 mirror / skip_version
+      2. 调用 ReleaseClient 获取 latest（含 release_info）
+      3. 版本比较 + 跳过版本过滤
+      4. dbSchemaVersion 兼容性校验（需要 State 中的当前 Pylai 版本）
+      5. 下载 ManagePylai.py.new + .sha256
+      6. SHA256 校验
+      7. 备份旧脚本 → 原子替换 → 清除 skip_version
+    """
+
+    def __init__(
+        self,
+        client: ReleaseClient,
+        manager_cfg: ManagerConfig,
+        state: State | None = None,
+        script_path: Path | None = None,
+    ) -> None:
         self.client = client
+        self.cfg = manager_cfg
+        self.state = state
         self.script_path = script_path or Path(__file__).resolve()
 
-    def check(self) -> str | None:
-        """返回最新版本号（大于当前版本），无更新返回 None。"""
-        latest = self.client.check_latest()
-        if not latest:
+    # ---------- 版本检查 ----------
+
+    def check(self) -> tuple[str, dict] | None:
+        """返回 (version, release_info) 或 None（无更新/网络失败/已跳过）。"""
+        result = self.client.check_latest()
+        if not result:
             return None
-        version, _ = latest
-        return version if self._version_gt(version, __version__) else None
+        version, _, info = result
+
+        if not self._version_gt(version, __version__):
+            return None
+
+        skip = self.cfg.skip_version
+        if skip and version == skip:
+            out(f"版本 {version} 已标记为跳过。")
+            return None
+
+        return version, info
 
     @staticmethod
     def _version_gt(a: str, b: str) -> bool:
-        """语义化版本比较：a > b"""
-        def _parts(v: str):
-            return [int(x) if x.isdigit() else x for x in v.split(".")]
+        """语义化版本比较：a > b。支持 X.Y.Z，忽略非数字后缀。"""
+        def _parts(v: str) -> list[int]:
+            parts: list[int] = []
+            for x in v.split("."):
+                m = re.match(r"(\d+)", x)
+                parts.append(int(m.group(1)) if m else 0)
+            while len(parts) < 3:
+                parts.append(0)
+            return parts
         return _parts(a) > _parts(b)
 
-    def update(self, force: bool = False, dry_run: bool = False) -> bool:
+    # ---------- Schema 兼容性 ----------
+
+    def _check_schema_compat(self, release_info: dict) -> bool:
+        """检查 dbSchemaVersion 兼容性。返回 True 表示可以继续更新。
+
+        逻辑：
+          - release_info 无 dbSchemaVersion → 兼容（旧版本）
+          - 未安装 Pylai（state 为空）    → 兼容
+          - 当前版本 release.json 无法获取 → 警告并放行
+          - 当前 schema == 目标 schema      → 兼容
+          - 否则                           → 不兼容，需手动迁移
+        """
+        remote_schema = release_info.get("dbSchemaVersion")
+        if not remote_schema:
+            return True
+        if not self.state or not self.state.installed:
+            return True
+
+        current_pylai_ver = self.state.version
+        current_release = self.client.fetch_release_json(current_pylai_ver)
+        if not current_release:
+            out(f"警告：无法获取当前 Pylai {current_pylai_ver} 的 release.json，跳过 schema 兼容性检查。")
+            return True
+
+        current_schema = current_release.get("dbSchemaVersion", "0")
+        if remote_schema == current_schema:
+            return True
+
+        out(f"dbSchemaVersion 不兼容: 当前 {current_schema} -> 目标 {remote_schema}")
+        out("此更新需要手动数据库迁移，请查看迁移文档后手动执行。")
+        return False
+
+    # ---------- 执行更新 ----------
+
+    def update(self, force: bool = False, dry_run: bool = False,
+               skip_prompt: bool = False) -> bool:
         """执行自更新；返回是否成功。"""
-        latest = self.client.check_latest()
-        if not latest:
+        result = self.client.check_latest()
+        if not result:
             out("无法获取最新版本信息。")
             return False
-        version, tag = latest
+        version, _, info = result
 
         if not force and not self._version_gt(version, __version__):
             out(f"当前已是最新版本 {__version__}。")
@@ -728,31 +855,45 @@ class SelfUpdater:
 
         out(f"==> 更新 ManagePylai.py: {__version__} -> {version}")
 
-        # 1. 下载 release.json 校验 dbSchemaVersion（预留）
-        release_info = self.client.fetch_release_json(version)
-        if release_info and "dbSchemaVersion" in release_info:
-            pass  # Phase 2+ 可加入 schema 兼容性检查
+        # 1. dbSchemaVersion 兼容性校验
+        if not self._check_schema_compat(info):
+            if skip_prompt:
+                out("Schema 不兼容且非交互模式，跳过更新。")
+                return False
+            if not ask_yes_no("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
+                return False
 
-        # 2. 下载新脚本 + SHA256
+        # 2. 下载 ManagePylai.py.new
         new_script = self.script_path.with_suffix(".py.new")
         sha256_file = self.script_path.with_suffix(".py.sha256")
 
         try:
             self.client.download(version, "ManagePylai.py", new_script)
-            try:
-                self.client.download(version, "ManagePylai.py.sha256", sha256_file)
-                sha256_expected = sha256_file.read_text(encoding="ascii").strip().split()[0]
-                import hashlib
-                actual = hashlib.sha256(new_script.read_bytes()).hexdigest()
-                if actual != sha256_expected:
-                    raise ManageError("SHA256 校验失败")
-            except ManageError:
-                out("警告：SHA256 校验文件下载失败或校验不匹配，继续安装...")
         except ManageError as exc:
             out(f"下载失败: {exc}")
             new_script.unlink(missing_ok=True)
-            sha256_file.unlink(missing_ok=True)
             return False
+
+        # 3. 下载并解析 SHA256
+        sha256_expected: str | None = None
+        try:
+            self.client.download(version, "ManagePylai.py.sha256", sha256_file)
+            sha256_content = sha256_file.read_text(encoding="ascii").strip()
+            # 支持两种格式: "hash" 或 "hash  filename"
+            sha256_expected = sha256_content.split()[0]
+        except (ManageError, OSError):
+            out("警告：无法下载或读取 SHA256 校验文件")
+
+        # 4. SHA256 校验
+        if sha256_expected:
+            import hashlib
+            actual = hashlib.sha256(new_script.read_bytes()).hexdigest()
+            if actual != sha256_expected:
+                out(f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}")
+                new_script.unlink(missing_ok=True)
+                sha256_file.unlink(missing_ok=True)
+                return False
+            out("SHA256 校验通过。")
 
         if dry_run:
             out(f"[dry-run] 将替换 {self.script_path} 为版本 {version}")
@@ -760,9 +901,13 @@ class SelfUpdater:
             sha256_file.unlink(missing_ok=True)
             return True
 
-        # 3. 原子替换
+        # 5. 备份 + 原子替换
         try:
+            backup = self.script_path.with_suffix(f".py.bak.{__version__}")
+            shutil.copy2(self.script_path, backup)
             os.replace(new_script, self.script_path)
+            # 更新成功后清除 skip_version
+            self.cfg.set_skip_version(None)
             out(f"ManagePylai.py 已更新至 {version}，请重新运行脚本。")
             return True
         except OSError as exc:
@@ -771,18 +916,34 @@ class SelfUpdater:
         finally:
             sha256_file.unlink(missing_ok=True)
 
-    def ensure_up_to_date(self, yes: bool = False) -> None:
-        """在 update 命令开始时检查并提示自更新。"""
-        latest_version = self.check()
-        if not latest_version:
-            return
+    # ---------- 更新前钩子 ----------
 
-        msg = f"ManagePylai.py 有新版本 {latest_version}，是否先更新管理工具？"
-        if yes or ask_yes_no(msg, default=True):
+    def ensure_up_to_date(self, yes: bool = False) -> None:
+        """在 `update` 命令开始时检查并提示/强制自更新。
+
+        如果更新成功，直接 sys.exit(0) 要求用户重新运行。
+        """
+        result = self.check()
+        if not result:
+            return
+        version, info = result
+
+        msg = f"ManagePylai.py 有新版本 {version}，是否先更新管理工具？"
+        if yes:
+            out(msg + " [Y/n] Y (非交互模式)")
+            self.update(skip_prompt=yes)
+            out("管理工具已更新，请重新运行命令。")
+            sys.exit(0)
+
+        if ask_yes_no(msg, default=True):
             self.update()
             out("管理工具已更新，请重新运行命令。")
             sys.exit(0)
         else:
+            # 用户拒绝更新，询问是否跳过此版本
+            if ask_yes_no(f"是否跳过版本 {version} 的后续提醒？", False):
+                self.cfg.set_skip_version(version)
+                out(f"已设置跳过版本 {version}。")
             out("警告：使用旧版本管理工具更新可能存在兼容性问题。")
 
 
@@ -2362,28 +2523,40 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
 def _cmd_update(args: argparse.Namespace, docker: DockerCompose, state: State,
                 config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
     if args.check_only:
-        client = ReleaseClient(manager_cfg.mirror)
-        updater = SelfUpdater(client)
-        ver = updater.check()
-        out(f"最新 ManagePylai.py 版本: {ver or '无法获取 / 已是最新'}")
+        client = ReleaseClient(manager_cfg)
+        updater = SelfUpdater(client, manager_cfg, state)
+        result = updater.check()
+        if result:
+            ver, info = result
+            out(f"最新 ManagePylai.py 版本: {ver}")
+            if "dbSchemaVersion" in info:
+                out(f"  dbSchemaVersion: {info['dbSchemaVersion']}")
+        else:
+            out("当前已是最新，或无法获取版本信息。")
         return
 
-    # 更新前 Self-Update 检查
-    client = ReleaseClient(manager_cfg.mirror)
-    updater = SelfUpdater(client)
+    # 更新前 Self-Update 检查（Phase 2 核心）
+    client = ReleaseClient(manager_cfg)
+    updater = SelfUpdater(client, manager_cfg, state)
     updater.ensure_up_to_date(yes=args.yes)
 
+    # 继续执行 Pylai 本体更新（复用 Phase 0 的 update()）
     update()
 
 
-def _cmd_self_update(args: argparse.Namespace, manager_cfg: ManagerConfig) -> None:
-    client = ReleaseClient(manager_cfg.mirror)
-    updater = SelfUpdater(client)
+def _cmd_self_update(args: argparse.Namespace, manager_cfg: ManagerConfig,
+                     state: State) -> None:
+    client = ReleaseClient(manager_cfg)
+    updater = SelfUpdater(client, manager_cfg, state)
     if args.check_only:
-        ver = updater.check()
-        out(f"最新版本: {ver or '无法获取 / 已是最新'}")
+        result = updater.check()
+        if result:
+            ver, info = result
+            out(f"最新版本: {ver}")
+        else:
+            out("当前已是最新，或无法获取版本信息。")
     else:
-        updater.update(force=args.force, dry_run=args.dry_run)
+        updater.update(force=args.force, dry_run=args.dry_run, skip_prompt=args.yes)
 
 
 def _cmd_start(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
@@ -2629,7 +2802,7 @@ def main() -> None:
         elif args.command == "update":
             _cmd_update(args, docker, state, config, manager_cfg)
         elif args.command == "self-update":
-            _cmd_self_update(args, manager_cfg)
+            _cmd_self_update(args, manager_cfg, state)
         elif args.command == "start":
             _cmd_start(args, docker, state)
         elif args.command == "stop":
