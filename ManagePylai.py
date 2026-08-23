@@ -248,6 +248,11 @@ class State:
     def api_port(self) -> int:
         return int(self._data.get("api_port", 5000))
 
+    @property
+    def mode(self) -> str:
+        """部署模式: 'monolith' | 'compose'"""
+        return self._data.get("mode", "monolith")
+
 
 def parse_env_file(path: Path) -> dict[str, str]:
     """解析 .env 文件为字典。支持 KEY=VALUE 和 # 注释，忽略引号包裹。"""
@@ -644,16 +649,19 @@ class PylaiConfig:
 class DockerCompose:
     """Docker / docker compose 操作封装。
 
-    当前为单容器兼容层；所有方法命名与行为预留多服务
-    Compose 接口（如 logs(service)、exec(service) 等）。
+    同时支持单容器（monolith）和多服务（compose）两种部署模式。
+    所有生命周期方法根据 self.mode 自动路由到正确路径。
     """
 
     CONTAINER = "pylai"
     PROJECT_NAME = "pylai"
+    COMPOSE_FILE = HOME / "docker-compose.yml"
 
-    def __init__(self, container: str | None = None, project: str | None = None) -> None:
+    def __init__(self, container: str | None = None, project: str | None = None,
+                 mode: str = "monolith") -> None:
         self.container = container or self.CONTAINER
         self.project = project or self.PROJECT_NAME
+        self.mode = mode  # "monolith" | "compose"
 
     # --- 基础 ---
 
@@ -668,15 +676,28 @@ class DockerCompose:
         return run(["docker", *args], check=check, timeout=timeout)
 
     def _compose(self, *args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
-        return run(["docker", "compose", "-p", self.project, *args], check=check, timeout=timeout)
+        cmd = ["docker", "compose", "-p", self.project, "-f", str(self.COMPOSE_FILE)]
+        cmd.extend(args)
+        return run(cmd, check=check, timeout=timeout)
 
-    # --- 容器状态 ---
+    # --- 模式检测 ---
+
+    def is_compose(self) -> bool:
+        return self.mode == "compose"
+
+    # --- 容器/服务状态 ---
 
     def container_exists(self) -> bool:
+        if self.is_compose():
+            result = self._compose("ps", "-q", "backend", check=False)
+            return bool(result.stdout.strip())
         result = self._docker("inspect", self.container, check=False)
         return result.returncode == 0
 
     def container_status(self) -> str | None:
+        if self.is_compose():
+            result = self._compose("ps", "-q", "backend", check=False)
+            return "running" if result.stdout.strip() else "exited"
         result = self._docker("inspect", "-f", "{{.State.Status}}", self.container, check=False)
         return result.stdout.strip() if result.returncode == 0 else None
 
@@ -684,6 +705,8 @@ class DockerCompose:
         return self.container_status() == "running"
 
     def container_restart_count(self) -> int | None:
+        if self.is_compose():
+            return 0
         result = self._docker("inspect", "-f", "{{.RestartCount}}", self.container, check=False)
         if result.returncode != 0:
             return None
@@ -695,7 +718,11 @@ class DockerCompose:
     # --- 生命周期 ---
 
     def start(self, image: str, answers: dict, read_only: bool = True) -> None:
-        """启动单容器（兼容层，直接复用现有 start_container 逻辑）。"""
+        if self.is_compose():
+            self._compose_up(image, answers)
+            return
+
+        # monolith 路径（保留现有 start_container 逻辑）
         if self.container_exists():
             self._docker("rm", "-f", self.container)
         ensure_home()
@@ -733,19 +760,69 @@ class DockerCompose:
         ]
         run(cmd, timeout=120)
 
+    def _compose_up(self, image: str, answers: dict) -> None:
+        """Compose 模式：更新 .env 与镜像标签后 up -d。"""
+        if not self.COMPOSE_FILE.is_file():
+            raise ManageError("docker-compose.yml 不存在，请先执行安装。")
+
+        # 更新 .env
+        env_file = HOME / ".env"
+        env_lines = [
+            f"PYLAI_PUBLIC_PORT={answers['public_port']}",
+            f"PYLAI_API_PORT={answers['api_port']}",
+            f"PYLAI_DB_USER={answers['db_user']}",
+            f"PYLAI_DB_PASSWORD={answers['db_password']}",
+            f"PYLAI_DB_NAME={answers['db_name']}",
+            f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
+        ]
+        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        env_file.chmod(0o600)
+
+        # 更新 compose 文件中的 backend 镜像
+        text = self.COMPOSE_FILE.read_text(encoding="utf-8")
+        text = re.sub(
+            r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
+            rf'\1{image}',
+            text,
+            flags=re.MULTILINE,
+        )
+        self.COMPOSE_FILE.write_text(text, encoding="utf-8")
+
+        self._compose("up", "-d", "--remove-orphans", timeout=300)
+
     def stop(self, timeout_sec: int = 30) -> None:
+        if self.is_compose():
+            self._compose("down", timeout=120)
+            return
         self._docker("stop", "-t", str(timeout_sec), self.container, timeout=120)
 
     def restart(self, timeout_sec: int = 30) -> None:
+        if self.is_compose():
+            self._compose("restart", "backend", timeout=120)
+            return
         self._docker("restart", "-t", str(timeout_sec), self.container, timeout=120)
 
     def rm(self, force: bool = True) -> None:
+        if self.is_compose():
+            self._compose("down", "-v", timeout=120)
+            return
         args = ["rm", "-f"] if force else ["rm"]
         self._docker(*args, self.container, check=False)
 
     # --- 日志 ---
 
-    def logs_text(self, tail: int | str = 200, follow: bool = False) -> str:
+    def logs_text(self, tail: int | str = 200, follow: bool = False,
+                  service: str = "all") -> str:
+        if self.is_compose():
+            svc = "" if service == "all" else service
+            cmd = ["docker", "compose", "-p", self.project, "-f", str(self.COMPOSE_FILE),
+                   "logs", "--timestamps", "--tail", str(tail)]
+            if follow:
+                cmd.append("-f")
+            if svc:
+                cmd.append(svc)
+            result = run(cmd, check=False)
+            return result.stdout + result.stderr
         cmd = ["docker", "logs", "--timestamps", "--tail", str(tail)]
         if follow:
             cmd.append("-f")
@@ -753,10 +830,14 @@ class DockerCompose:
         result = run(cmd, check=False)
         return result.stdout + result.stderr
 
-    def view_logs(self, tail: int | str = 200, follow: bool = False) -> None:
-        """用 less 查看容器日志；follow=True 时使用 less +F 持续跟踪。"""
+    def view_logs(self, tail: int | str = 200, follow: bool = False,
+                  service: str = "all") -> None:
         if not self.container_exists():
-            out("尚未安装或容器不存在。")
+            out("尚未安装或服务不存在。")
+            return
+        if self.is_compose():
+            text = self.logs_text(tail, follow, service)
+            out(text.strip() or "（暂无日志输出）")
             return
         cmd = ["docker", "logs", "--timestamps", "--tail", str(tail)]
         if follow:
@@ -790,11 +871,17 @@ class DockerCompose:
     # --- 执行 ---
 
     def exec(self, *args: str, check: bool = True, timeout: int | None = None,
-             input_text: str | None = None) -> subprocess.CompletedProcess:
+             input_text: str | None = None, service: str | None = None) -> subprocess.CompletedProcess:
+        if self.is_compose():
+            svc = service or "backend"
+            return self._compose("exec", "-T", svc, *args, check=check, timeout=timeout, input_text=input_text)
         return self._docker("exec", *args, self.container, check=check, timeout=timeout, input_text=input_text)
 
     def exec_pylaios(self, *args: str, check: bool = True, timeout: int | None = None,
-                     input_text: str | None = None) -> subprocess.CompletedProcess:
+                     input_text: str | None = None, service: str | None = None) -> subprocess.CompletedProcess:
+        if self.is_compose():
+            return self.exec("-i", PYLAIOS_BIN, *args, check=check, timeout=timeout,
+                           input_text=input_text, service=service or "backend")
         return self.exec("-i", PYLAIOS_BIN, *args, check=check, timeout=timeout, input_text=input_text)
 
     # --- 镜像 ---
@@ -816,6 +903,11 @@ class DockerCompose:
         raise ManageError(f"无法确定镜像名称，请手动确认: {result.stdout}\n{result.stderr}")
 
     def read_env(self) -> dict[str, str]:
+        if self.is_compose():
+            env_file = HOME / ".env"
+            if env_file.is_file():
+                return parse_env_file(env_file)
+            return {}
         result = self._docker(
             "inspect", self.container, "--format",
             "{{range .Config.Env}}{{println .}}{{end}}",
@@ -831,6 +923,21 @@ class DockerCompose:
 
     def wait_healthy(self, api_port: int, timeout: int = 180) -> bool:
         url = f"http://127.0.0.1:{api_port}/health/ready"
+        if self.is_compose():
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    with urllib.request.urlopen(url, timeout=3) as resp:
+                        if resp.status == 200:
+                            return True
+                except (OSError, urllib.error.URLError):
+                    pass
+                status = self.container_status()
+                if status not in ("running", None):
+                    return False
+                time.sleep(3)
+            return False
+
         restart_count = self.container_restart_count()
         if restart_count is None:
             return False
@@ -849,6 +956,151 @@ class DockerCompose:
                 pass
             time.sleep(3)
         return False
+
+
+class ComposeConfig:
+    """多服务 Docker Compose 配置管理。
+
+    生成 docker-compose.yml、.env 和 nginx.conf（Compose 模式下 nginx
+    服务使用，将所有请求反向代理到 backend:5000）。
+    """
+
+    COMPOSE_FILE = HOME / "docker-compose.yml"
+    ENV_FILE = HOME / ".env"
+
+    _COMPOSE_TEMPLATE = """\
+services:
+  postgres:
+    image: {postgres_image}
+    volumes:
+      - pylai_pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${PYLAI_DB_USER}
+      POSTGRES_PASSWORD: ${PYLAI_DB_PASSWORD}
+      POSTGRES_DB: ${PYLAI_DB_NAME}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PYLAI_DB_USER} -d ${PYLAI_DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: {redis_image}
+    volumes:
+      - pylai_redisdata:/data
+    command: >
+      redis-server
+      --requirepass ${PYLAI_REDIS_PASSWORD}
+      --appendonly yes
+      --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    image: {backend_image}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - {config_dir}:/etc/pylai:ro
+      - pylai_data:/var/lib/pylai
+    ports:
+      - "127.0.0.1:${PYLAI_API_PORT}:5000"
+    environment:
+      PYLAI_CONFIG: /etc/pylai/pylai.toml
+      PYLAI_DP_KEK_FILE: /var/lib/pylai/secrets/dp-kek
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=64m
+
+  nginx:
+    image: {nginx_image}
+    depends_on:
+      - backend
+    ports:
+      - "${PYLAI_PUBLIC_PORT}:80"
+    volumes:
+      - {config_dir}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  pylai_pgdata:
+  pylai_redisdata:
+  pylai_data:
+"""
+
+    @classmethod
+    def generate(cls, answers: dict, manager_cfg: ManagerConfig | None = None,
+                 image: str = "pylaios:latest") -> "ComposeConfig":
+        """生成 docker-compose.yml、.env 和 nginx.conf。"""
+        ensure_home()
+
+        services_cfg = manager_cfg.get("Compose.Services", default={}) if manager_cfg else {}
+        postgres_image = services_cfg.get("PostgresImage", "postgres:17-alpine")
+        redis_image = services_cfg.get("RedisImage", "redis:7-alpine")
+        backend_image = services_cfg.get("BackendImage", image)
+        nginx_image = services_cfg.get("NginxImage", "nginx:alpine")
+
+        compose_text = cls._COMPOSE_TEMPLATE.format(
+            postgres_image=postgres_image,
+            redis_image=redis_image,
+            backend_image=backend_image,
+            nginx_image=nginx_image,
+            config_dir=str(CONFIG_DIR),
+        )
+
+        env_lines = [
+            f"PYLAI_PUBLIC_PORT={answers['public_port']}",
+            f"PYLAI_API_PORT={answers['api_port']}",
+            f"PYLAI_DB_USER={answers['db_user']}",
+            f"PYLAI_DB_PASSWORD={answers['db_password']}",
+            f"PYLAI_DB_NAME={answers['db_name']}",
+            f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
+        ]
+        env_file = cls.ENV_FILE
+        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        env_file.chmod(0o600)
+
+        compose_file = cls.COMPOSE_FILE
+        compose_file.write_text(compose_text, encoding="utf-8")
+        compose_file.chmod(0o600)
+
+        cls.write_nginx_conf()
+        return cls()
+
+    @classmethod
+    def write_nginx_conf(cls) -> None:
+        """生成 nginx.conf 到 config 目录（Compose 模式下使用）。"""
+        nginx_conf = CONFIG_DIR / "nginx.conf"
+        template = """\
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://backend:5000;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+"""
+        ensure_home()
+        nginx_conf.write_text(template, encoding="utf-8")
+        nginx_conf.chmod(0o644)
+
+    @classmethod
+    def ensure_volumes(cls) -> None:
+        """确保 Compose 命名卷已创建（避免首次 up 时延迟）。"""
+        for vol in ("pylai_pgdata", "pylai_redisdata", "pylai_data"):
+            run(["docker", "volume", "create", vol], check=False)
 
 
 class ReleaseClient:
@@ -2057,9 +2309,36 @@ def menu_install() -> None:
 
     out("\n==> 开始安装配置（涉及密码的项直接回车可自动生成）")
     answers = collect_install_answers()
+
+    # P4: 部署模式选择
+    mode = "compose" if ask_yes_no("\n使用多服务 Docker Compose 模式（推荐生产环境）？", False) else "monolith"
+
     generate_config(image, answers)
-    start_container(image, answers)
-    state = {
+    config = PylaiConfig()
+    config.reload()
+
+    # Compose 模式：调整 pylai.toml 连接串（127.0.0.1 → 服务名）
+    if mode == "compose":
+        cs = config.get_value("Database", "ConnectionString", "")
+        if "Host=127.0.0.1" in cs:
+            new_cs = cs.replace("Host=127.0.0.1", "Host=postgres")
+            config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
+        redis_host = config.get_value("Redis", "Host", "")
+        if redis_host == "127.0.0.1":
+            config.set_block_value("[Redis]", "Host", toml_string("redis"))
+            config.set_block_value("[Redis]", "Port", "6379")
+
+        manager_cfg = ManagerConfig()
+        ComposeConfig.generate(answers, manager_cfg, image)
+        ComposeConfig.ensure_volumes()
+
+    docker = DockerCompose(mode=mode)
+    docker.start(image, answers)
+    if not docker.wait_healthy(int(answers["api_port"])):
+        print_container_logs()
+        raise ManageError("服务启动超时，请根据上方日志排查。")
+
+    new_state = {
         "version": version,
         "architecture": arch,
         "image": image,
@@ -2069,8 +2348,9 @@ def menu_install() -> None:
         "max_email": answers["max_email"],
         "admin_email": answers["admin_email"],
         "installed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mode": mode,
     }
-    save_state(state)
+    save_state(new_state)
     print_install_summary(answers)
     out("提示：建议使用主机 Nginx 反代，主菜单 [6] 可生成配置模板。")
 
@@ -2685,6 +2965,10 @@ def update() -> None:
     if not state:
         out("尚未安装，请先执行安装。")
         return
+    mode = state.get("mode", "monolith")
+    if mode == "compose":
+        _update_compose_interactive(state)
+        return
     tars = discover_tars()
     if not tars:
         out("当前目录未找到新的 Pylai-*.tar。")
@@ -2744,10 +3028,75 @@ def update() -> None:
         raise
 
 
+def _update_compose_interactive(state: dict) -> None:
+    """交互式 Compose 模式更新。"""
+    tars = discover_tars()
+    if not tars:
+        out("当前目录未找到新的 Pylai-*.tar。")
+        return
+    name = choose([(p.name, p.name) for p in tars], "请选择新版本安装包")
+    if not name:
+        return
+    tar_path = Path.cwd() / name
+    version, arch = parse_tar(tar_path) or (state.get("version", "0.0.1"), state.get("architecture", "AMD64"))
+    image = load_image_tar(tar_path)
+
+    manager_cfg = ManagerConfig()
+    if manager_cfg.auto_backup:
+        out("==> 自动备份数据库...")
+        docker = DockerCompose(mode="compose")
+        if docker.container_running():
+            export_database()
+
+    preflight_config(image)
+
+    # 更新 compose 文件中的 backend 镜像
+    compose_text = ComposeConfig.COMPOSE_FILE.read_text(encoding="utf-8")
+    compose_text = re.sub(
+        r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
+        rf'\1{image}',
+        compose_text,
+        flags=re.MULTILINE,
+    )
+    ComposeConfig.COMPOSE_FILE.write_text(compose_text, encoding="utf-8")
+
+    docker = DockerCompose(mode="compose")
+    docker._compose("up", "-d", "--remove-orphans", timeout=300)
+
+    if not docker.wait_healthy(int(state.get("api_port", 5000))):
+        out("更新后健康检查未通过，请查看日志。")
+        docker._compose("logs", "backend")
+        return
+
+    state["version"] = version
+    state["architecture"] = arch
+    state["image"] = image
+    save_state(state)
+    out("更新完成。")
+
+
 def uninstall() -> None:
     state = load_state()
     if not state and not container_exists():
         out("没有已安装实例。")
+        return
+    mode = state.get("mode", "monolith") if state else "monolith"
+    if mode == "compose":
+        if not confirm_danger("卸载会停止并删除 Compose 服务，可能删除全部数据。"):
+            out("已取消。")
+            return
+        docker = DockerCompose(mode="compose")
+        docker.rm()
+        for vol in ("pylai_data", "pylai_pgdata", "pylai_redisdata"):
+            docker._docker("volume", "rm", "-f", vol, check=False)
+        image = state.get("image") if state else None
+        if image:
+            docker._docker("rmi", image, check=False)
+        if confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？"):
+            shutil.rmtree(HOME, ignore_errors=True)
+            out("已删除全部数据目录。")
+        STATE_FILE.unlink(missing_ok=True) if not HOME.exists() else None
+        out("卸载完成。")
         return
     if not confirm_danger("卸载会停止并删除容器，可能删除全部数据。"):
         out("已取消。")
@@ -2775,7 +3124,7 @@ def uninstall() -> None:
 # ============================================================================
 
 def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
-                 config: PylaiConfig) -> None:
+                 config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
     if state.installed:
         raise ManageError("检测到已有安装。如需重新安装，请先卸载或使用更新。")
 
@@ -2783,7 +3132,7 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
     if not tars:
         raise ManageError("当前目录未找到 Pylai-<version>-Linux-<arch>.tar。")
 
-    # 选择安装包（非交互时自动选兼容架构的第一个）
+    # 选择安装包
     if args.yes:
         compatible = [p for p in tars if parse_tar(p) and parse_tar(p)[1] == host_arch()]
         if not compatible:
@@ -2804,7 +3153,6 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
         source = Path(args.pylai_config)
         config = PylaiConfig.from_existing(source)
         answers = config.extract_container_params()
-        # 端口可从环境变量覆盖
         answers["public_port"] = int(os.environ.get("PYLAI_PUBLIC_PORT", answers.get("public_port", 8080)))
         answers["api_port"] = int(os.environ.get("PYLAI_API_PORT", answers.get("api_port", 5000)))
         if not answers.get("db_password") or not answers.get("redis_password"):
@@ -2825,11 +3173,33 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
         out("\n==> 开始安装配置（涉及密码的项直接回车可自动生成）")
         answers = collect_install_answers()
 
+    # 确定部署模式
+    if args.yes:
+        mode = os.environ.get("PYLAI_MODE", "monolith")
+    else:
+        mode = "compose" if ask_yes_no("\n使用多服务 Docker Compose 模式（推荐生产环境）？", False) else "monolith"
+
     # 生成配置（方式1 已复制，无需重新生成）
     if not args.pylai_config:
         PylaiConfig.generate_from_template(image, answers)
 
-    # 确保 signing KEK 文件存在
+    config.reload()
+
+    # Compose 模式：调整连接串与生成 compose 文件
+    if mode == "compose":
+        cs = config.get_value("Database", "ConnectionString", "")
+        if "Host=127.0.0.1" in cs:
+            new_cs = cs.replace("Host=127.0.0.1", "Host=postgres")
+            config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
+        redis_host = config.get_value("Redis", "Host", "")
+        if redis_host == "127.0.0.1":
+            config.set_block_value("[Redis]", "Host", toml_string("redis"))
+            config.set_block_value("[Redis]", "Port", "6379")
+
+        ComposeConfig.generate(answers, manager_cfg, image)
+        ComposeConfig.ensure_volumes()
+
+    # 确保 signing KEK
     signing_kek_path = CERT_DIR / "signing-kek"
     if not signing_kek_path.is_file():
         ensure_home()
@@ -2837,7 +3207,7 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
         signing_kek_path.write_text(signing_kek, encoding="ascii")
         signing_kek_path.chmod(0o600)
 
-    # 自动生成加密证书（如果未指定且 openssl 可用）
+    # 自动生成加密证书
     if not answers.get("encryption_pfx") and shutil.which("openssl"):
         ensure_home()
         host_pfx = CERT_DIR / "encryption.pfx"
@@ -2853,14 +3223,14 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
         host_pfx.chmod(0o600)
         key_file.unlink(missing_ok=True)
         cert_file.unlink(missing_ok=True)
-        # 更新配置
         config.reload()
         config.set_block_value("[OpenIddict.Certificates.Encryption]", "Path", toml_string(f"{CONTAINER_CERT_DIR}/encryption.pfx"))
         config.set_block_value("[OpenIddict.Certificates.Encryption]", "Password", toml_string(enc_pwd))
         answers["encryption_pfx"] = f"{CONTAINER_CERT_DIR}/encryption.pfx"
         answers["encryption_pfx_password"] = enc_pwd
 
-    # 启动容器
+    # 启动
+    docker.mode = mode
     docker.start(image, answers)
     if not docker.wait_healthy(answers["api_port"]):
         print_container_logs()
@@ -2876,9 +3246,9 @@ def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
     state.set("max_email", answers.get("max_email", ""))
     state.set("admin_email", answers.get("admin_email", ""))
     state.set("installed_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    state.set("mode", mode)
     state.save()
 
-    # 显示摘要（Phase 5 改进）
     print_install_summary(answers, yes_mode=args.yes)
     out("提示：建议使用主机 Nginx 反代，执行 `config generate-nginx` 可生成配置模板。")
 
@@ -2903,8 +3273,144 @@ def _cmd_update(args: argparse.Namespace, docker: DockerCompose, state: State,
     updater = SelfUpdater(client, manager_cfg, state)
     updater.ensure_up_to_date(yes=args.yes)
 
-    # 继续执行 Pylai 本体更新（复用 Phase 0 的 update()）
-    update()
+    # 根据模式路由
+    if state.mode == "compose":
+        _update_compose(args, docker, state, config, manager_cfg)
+    else:
+        update()  # 现有 monolith 更新逻辑
+
+
+def _update_compose(args: argparse.Namespace, docker: DockerCompose, state: State,
+                    config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
+    """非交互 / CLI 的 Compose 模式更新。"""
+    tars = discover_tars()
+    if not tars:
+        raise ManageError("当前目录未找到新的 Pylai-*.tar。")
+
+    if args.yes:
+        compatible = [p for p in tars if parse_tar(p) and parse_tar(p)[1] == host_arch()]
+        if not compatible:
+            compatible = tars
+        tar_path = compatible[0]
+    else:
+        options = [(p.name, p.name) for p in tars]
+        name = choose(options, "请选择新版本安装包")
+        if not name:
+            return
+        tar_path = Path.cwd() / name
+
+    version, arch = parse_tar(tar_path) or (state.version, state.architecture)
+    image = docker.load_image_tar(tar_path)
+
+    if manager_cfg.auto_backup and docker.container_running():
+        out("==> 自动备份数据库...")
+        export_database()
+
+    preflight_config(image)
+
+    # 更新 compose 文件中的 backend 镜像
+    compose_text = ComposeConfig.COMPOSE_FILE.read_text(encoding="utf-8")
+    compose_text = re.sub(
+        r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
+        rf'\1{image}',
+        compose_text,
+        flags=re.MULTILINE,
+    )
+    ComposeConfig.COMPOSE_FILE.write_text(compose_text, encoding="utf-8")
+
+    docker.mode = "compose"
+    docker._compose("up", "-d", "--remove-orphans", timeout=300)
+
+    if not docker.wait_healthy(state.api_port):
+        out("更新后健康检查未通过，请查看日志。")
+        docker._compose("logs", "backend")
+        raise ManageError("更新失败。")
+
+    state.set("version", version)
+    state.set("architecture", arch)
+    state.set("image", image)
+    state.save()
+    out("更新完成。")
+
+
+def migrate_monolith_to_compose(docker: DockerCompose, state: State,
+                                config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
+    """将单容器部署迁移到多服务 Compose 部署。
+
+    流程：
+      1. 导出数据库备份
+      2. 停止并删除单容器
+      3. 生成 docker-compose.yml / .env / nginx.conf
+      4. 更新 pylai.toml（127.0.0.1 → 服务名）
+      5. 启动 Compose 服务
+      6. 更新状态为 compose 模式
+    """
+    if not state.installed:
+        raise ManageError("尚未安装，无法迁移。")
+    if state.mode == "compose":
+        raise ManageError("已经是 Compose 模式，无需迁移。")
+
+    out("==> 开始从单容器迁移到 Compose 模式")
+
+    # 读取现有参数
+    env = docker.read_env()
+    creds = config.extract_container_params()
+    answers = {
+        "public_url": state.public_url,
+        "public_port": state.public_port,
+        "api_port": state.api_port,
+        "db_user": env.get("PYLAI_DB_USER") or creds.get("db_user", "pylai"),
+        "db_name": env.get("PYLAI_DB_NAME") or creds.get("db_name", "pylai"),
+        "db_password": env.get("PYLAI_DB_PASSWORD") or creds.get("db_password", ""),
+        "redis_password": env.get("PYLAI_REDIS_PASSWORD") or creds.get("redis_password", ""),
+    }
+
+    # 导出备份
+    out("==> 导出数据库备份...")
+    if docker.container_running():
+        export_database()
+
+    # 停止并删除单容器
+    out("==> 停止单容器...")
+    if docker.container_exists():
+        docker.stop()
+        docker.rm()
+
+    # 生成 Compose 配置
+    out("==> 生成 Compose 配置...")
+    image = state.image
+    ComposeConfig.generate(answers, manager_cfg, image)
+    ComposeConfig.ensure_volumes()
+
+    # 更新 pylai.toml 服务发现
+    out("==> 更新 pylai.toml 数据库/Redis 连接...")
+    config.reload()
+    old_cs = config.get_value("Database", "ConnectionString", "")
+    if "Host=127.0.0.1" in old_cs:
+        new_cs = old_cs.replace("Host=127.0.0.1", "Host=postgres")
+        config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
+    old_redis_host = config.get_value("Redis", "Host", "")
+    if old_redis_host == "127.0.0.1":
+        config.set_block_value("[Redis]", "Host", toml_string("redis"))
+
+    # 启动 Compose
+    out("==> 启动 Compose 服务...")
+    docker.mode = "compose"
+    docker.start(image, answers)
+
+    # 等待健康
+    out("==> 等待服务就绪...")
+    if not docker.wait_healthy(answers["api_port"], timeout=300):
+        out("服务启动超时，请检查日志：")
+        run(["docker", "compose", "-p", docker.project, "-f", str(ComposeConfig.COMPOSE_FILE),
+             "logs", "backend"], check=False)
+        raise ManageError("迁移后服务启动失败。")
+
+    # 更新状态
+    state.set("mode", "compose")
+    state.save()
+    out("==> 迁移完成。现在使用 Compose 模式运行。")
+    out(f"  管理命令: docker compose -p {docker.project} -f {ComposeConfig.COMPOSE_FILE} <cmd>")
 
 
 def _cmd_self_update(args: argparse.Namespace, manager_cfg: ManagerConfig,
@@ -2925,11 +3431,15 @@ def _cmd_self_update(args: argparse.Namespace, manager_cfg: ManagerConfig,
 def _cmd_start(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
     if not docker.container_exists():
         raise ManageError("尚未安装。")
-    docker._docker("start", docker.container, timeout=60)
+    if state.mode == "compose":
+        docker.mode = "compose"
+        docker._compose("up", "-d", timeout=120)
+    else:
+        docker._docker("start", docker.container, timeout=60)
     if docker.wait_healthy(state.api_port):
         out("启动完成。")
     else:
-        out("容器已启动，但健康检查尚未通过。")
+        out("服务已启动，但健康检查尚未通过。")
 
 
 def _cmd_stop(args: argparse.Namespace, docker: DockerCompose) -> None:
@@ -2961,9 +3471,9 @@ def _cmd_logs(args: argparse.Namespace, docker: DockerCompose) -> None:
     if not docker.container_exists():
         raise ManageError("尚未安装。")
     if args.follow:
-        docker.view_logs(tail=200, follow=True)
+        docker.view_logs(tail=200, follow=True, service=args.service)
     else:
-        text = docker.logs_text(tail=200)
+        text = docker.logs_text(tail=200, service=args.service)
         out(text.strip() or "（暂无日志输出）")
 
 
@@ -2996,12 +3506,37 @@ def _cmd_backup(args: argparse.Namespace, docker: DockerCompose, state: State) -
 
 
 def _cmd_uninstall(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if args.purge:
-        # --purge 直接确认
-        uninstall()
+    if not state.installed:
+        raise ManageError("没有已安装实例。")
+
+    if not args.yes:
+        if not confirm_danger("卸载会停止并删除所有服务/容器，可能删除全部数据。"):
+            out("已取消。")
+            return
+
+    if state.mode == "compose":
+        docker.mode = "compose"
+        docker.rm()
     else:
-        # 复用现有交互确认逻辑
-        uninstall()
+        if docker.container_exists():
+            docker.stop()
+            docker.rm()
+
+    for vol in ("pylai_data", "pylai_pgdata", "pylai_redisdata"):
+        docker._docker("volume", "rm", "-f", vol, check=False)
+
+    image = state.image
+    if image:
+        docker._docker("rmi", image, check=False)
+
+    if args.purge:
+        shutil.rmtree(HOME, ignore_errors=True)
+        out("已删除全部数据目录。")
+        STATE_FILE.unlink(missing_ok=True)
+
+    state.clear()
+    state.save()
+    out("卸载完成。")
 
 
 def _cmd_rotate_keys(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
@@ -3145,7 +3680,7 @@ def main() -> None:
     manager_cfg = ManagerConfig(
         Path(args.manager_config) if args.manager_config else None
     )
-    docker = DockerCompose()
+    docker = DockerCompose(mode=state.mode)
     state = State()
     config = PylaiConfig()
 
@@ -3161,7 +3696,7 @@ def main() -> None:
 
     try:
         if args.command == "install":
-            _cmd_install(args, docker, state, config)
+            _cmd_install(args, docker, state, config, manager_cfg)
         elif args.command == "update":
             _cmd_update(args, docker, state, config, manager_cfg)
         elif args.command == "self-update":
