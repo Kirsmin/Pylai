@@ -249,6 +249,110 @@ class State:
         return int(self._data.get("api_port", 5000))
 
 
+def parse_env_file(path: Path) -> dict[str, str]:
+    """解析 .env 文件为字典。支持 KEY=VALUE 和 # 注释，忽略引号包裹。"""
+    env: dict[str, str] = {}
+    if not path.is_file():
+        raise ManageError(f".env 文件不存在: {path}")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        env[key] = value
+    return env
+
+
+def build_answers_from_env(env: dict[str, str]) -> dict:
+    """从环境变量字典构建安装 answers（用于非交互安装）。"""
+    public_url = env.get("PYLAI_PUBLIC_URL", "http://localhost:8080")
+    origin = public_url.rstrip("/")
+    external_host = urlparse(public_url).hostname or "localhost"
+    allowed_hosts = [external_host]
+    if external_host not in ("localhost", "127.0.0.1", "::1"):
+        allowed_hosts.extend(("localhost", "127.0.0.1"))
+
+    cors_raw = env.get("PYLAI_CORS_ORIGINS", "")
+    cors_origins = [origin]
+    if cors_raw:
+        cors_origins.extend(x.strip() for x in cors_raw.split(",") if x.strip())
+
+    proxies_raw = env.get("PYLAI_TRUSTED_PROXIES", "127.0.0.1,::1")
+    networks_raw = env.get("PYLAI_TRUSTED_NETWORKS", "172.16.0.0/12")
+
+    public_port = int(env.get("PYLAI_PUBLIC_PORT", "8080"))
+    api_port = int(env.get("PYLAI_API_PORT", "5000"))
+
+    db_user = env.get("PYLAI_DB_USER", "pylai")
+    db_name = env.get("PYLAI_DB_NAME", "pylai")
+    db_password = env.get("PYLAI_DB_PASSWORD", secrets.token_hex(16))
+    redis_password = env.get("PYLAI_REDIS_PASSWORD", secrets.token_hex(16))
+
+    max_email = env.get("PYLAI_MAX_EMAIL", "max@pylai.local")
+    max_password = env.get("PYLAI_MAX_PASSWORD", "")
+    admin_email = env.get("PYLAI_ADMIN_EMAIL", "")
+    admin_password = env.get("PYLAI_ADMIN_PASSWORD", "")
+    user_email = env.get("PYLAI_USER_EMAIL", "")
+    user_password = env.get("PYLAI_USER_PASSWORD", "")
+
+    smtp_enabled = bool(env.get("PYLAI_SMTP_HOST"))
+    smtp_host = env.get("PYLAI_SMTP_HOST", "")
+    smtp_port = int(env.get("PYLAI_SMTP_PORT", "587"))
+    smtp_security = env.get("PYLAI_SMTP_SECURITY", "StartTls")
+    smtp_user = env.get("PYLAI_SMTP_USER", "")
+    smtp_password = env.get("PYLAI_SMTP_PASSWORD", "")
+    smtp_from = env.get("PYLAI_SMTP_FROM", "")
+
+    mfa_for_admin = env.get("PYLAI_MFA_FOR_ADMIN", "false").lower() in ("true", "1", "yes")
+    mfa_webauthn_for_max = env.get("PYLAI_MFA_WEBAUTHN_FOR_MAX", "false").lower() in ("true", "1", "yes")
+
+    signing_pfx = env.get("PYLAI_SIGNING_PFX", "")
+    signing_pfx_password = env.get("PYLAI_SIGNING_PFX_PASSWORD", "")
+    encryption_pfx = env.get("PYLAI_ENCRYPTION_PFX", "")
+    encryption_pfx_password = env.get("PYLAI_ENCRYPTION_PFX_PASSWORD", "")
+
+    return {
+        "public_url": public_url,
+        "origin": origin,
+        "public_port": public_port,
+        "api_port": api_port,
+        "db_user": db_user,
+        "db_name": db_name,
+        "db_password": db_password,
+        "redis_password": redis_password,
+        "invite_pepper": secrets.token_hex(32),
+        "max_email": max_email,
+        "max_password": max_password,
+        "max_password_input": bool(max_password),
+        "admin_email": admin_email,
+        "admin_password": admin_password,
+        "admin_password_input": bool(admin_password),
+        "user_email": user_email,
+        "user_password": user_password,
+        "user_password_input": bool(user_password),
+        "smtp_enabled": smtp_enabled,
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_security": smtp_security,
+        "smtp_user": smtp_user,
+        "smtp_password": smtp_password,
+        "smtp_from": smtp_from,
+        "signing_pfx": signing_pfx,
+        "signing_pfx_password": signing_pfx_password,
+        "encryption_pfx": encryption_pfx,
+        "encryption_pfx_password": encryption_pfx_password,
+        "trusted_proxies": [x.strip() for x in proxies_raw.split(",") if x.strip()],
+        "trusted_networks": [x.strip() for x in networks_raw.split(",") if x.strip()],
+        "cors_origins": cors_origins,
+        "mfa_for_admin": mfa_for_admin,
+        "mfa_webauthn_for_max": mfa_webauthn_for_max,
+    }
+
+
 class PylaiConfig:
     """pylai.toml 配置管理：生成（string.Template）、读写、校验、脱敏。
 
@@ -266,6 +370,119 @@ class PylaiConfig:
         self._text: str = ""
         if self.FILE.is_file():
             self._text = self.FILE.read_text(encoding="utf-8")
+
+    @classmethod
+    def from_existing(cls, source: Path) -> "PylaiConfig":
+        """从现有 pylai.toml 复制到标准位置并加载。"""
+        if not source.is_file():
+            raise ManageError(f"配置文件不存在: {source}")
+        text = source.read_text(encoding="utf-8")
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ManageError(f"提供的配置不是合法 TOML: {exc}") from exc
+        ensure_home()
+        cls.FILE.write_text(text, encoding="utf-8")
+        cls.FILE.chmod(0o600)
+        instance = cls()
+        instance._text = text
+        return instance
+
+    def extract_container_params(self) -> dict:
+        """从现有 pylai.toml 提取启动容器所需的参数（含完整 answers 用于 summary）。"""
+        params: dict = {}
+        try:
+            data = tomllib.loads(self._text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ManageError(f"配置解析失败: {exc}") from exc
+
+        # URL
+        frontend_url = data.get("Frontend", {}).get("Url", "http://localhost:8080")
+        params["public_url"] = frontend_url
+        params["origin"] = frontend_url.rstrip("/")
+
+        # Database
+        cs = data.get("Database", {}).get("ConnectionString", "")
+        for key, pattern in (
+            ("db_user", r"(?:Username|User ID)=([^;]+)"),
+            ("db_password", r"Password=([^;]+)"),
+            ("db_name", r"Database=([^;]+)"),
+        ):
+            m = re.search(pattern, cs)
+            if m:
+                params[key] = m.group(1)
+        params.setdefault("db_user", "pylai")
+        params.setdefault("db_name", "pylai")
+        params.setdefault("db_password", "")
+        params.setdefault("redis_password", "")
+
+        # Redis
+        redis = data.get("Redis", {})
+        if isinstance(redis, dict):
+            params["redis_password"] = redis.get("Password", "")
+
+        # 端口（非交互时可通过环境变量覆盖）
+        params["public_port"] = 8080
+        params["api_port"] = 5000
+
+        # 其他 summary 所需字段
+        params["invite_pepper"] = data.get("Identity", {}).get("ServerPepper", secrets.token_hex(32))
+        params["trusted_proxies"] = data.get("Server", {}).get("TrustedProxies", ["127.0.0.1", "::1"])
+        params["trusted_networks"] = data.get("Server", {}).get("TrustedNetworks", ["172.16.0.0/12"])
+        params["cors_origins"] = data.get("Cors", {}).get("AllowedOrigins", [frontend_url])
+
+        # 种子用户
+        for section, email_key, pwd_key in [
+            ("Seeds.DefaultMax", "max_email", "max_password"),
+            ("Seeds.DefaultAdmin", "admin_email", "admin_password"),
+            ("Seeds.DefaultUser", "user_email", "user_password"),
+        ]:
+            parts = section.split(".")
+            d = data
+            for p in parts:
+                d = d.get(p, {}) if isinstance(d, dict) else {}
+            if isinstance(d, dict):
+                params[email_key] = d.get("Email", "")
+                params[pwd_key] = d.get("Password", "")
+
+        # MFA
+        mfa = data.get("Mfa", {})
+        if isinstance(mfa, dict):
+            params["mfa_for_admin"] = mfa.get("RequireForAdmin", False)
+            params["mfa_webauthn_for_max"] = mfa.get("RequireWebAuthnForMax", False)
+
+        # 证书
+        signing = data.get("OpenIddict", {}).get("Certificates", {}).get("Signing", {})
+        if isinstance(signing, dict) and signing.get("Path"):
+            params["signing_pfx"] = signing["Path"]
+            params["signing_pfx_password"] = signing.get("Password", "")
+        encryption = data.get("OpenIddict", {}).get("Certificates", {}).get("Encryption", {})
+        if isinstance(encryption, dict) and encryption.get("Path"):
+            params["encryption_pfx"] = encryption["Path"]
+            params["encryption_pfx_password"] = encryption.get("Password", "")
+
+        # SMTP
+        email = data.get("Email", {})
+        if isinstance(email, dict) and email.get("FromAddress"):
+            params["smtp_enabled"] = True
+            params["smtp_from"] = email.get("FromAddress", "")
+            smtp = data.get("Email", {}).get("Smtp", {})
+            if isinstance(smtp, dict):
+                params["smtp_host"] = smtp.get("Host", "")
+                params["smtp_port"] = smtp.get("Port", 587)
+                params["smtp_security"] = smtp.get("Security", "StartTls")
+                params["smtp_user"] = smtp.get("Username", "")
+                params["smtp_password"] = smtp.get("Password", "")
+        else:
+            params["smtp_enabled"] = False
+            params["smtp_host"] = ""
+            params["smtp_port"] = 587
+            params["smtp_security"] = "StartTls"
+            params["smtp_user"] = ""
+            params["smtp_password"] = ""
+            params["smtp_from"] = ""
+
+        return params
 
     # ---------- 生成 ----------
 
@@ -975,6 +1192,44 @@ def out(message: str = "") -> None:
 def random_password(length: int = 12) -> str:
     """生成同时包含数字、小写和大写字母的初始密码。"""
     return f"{secrets.token_urlsafe(length)}Aa1"
+
+
+def reveal_credentials(credentials: list[tuple[str, str]], yes_mode: bool = False) -> None:
+    """批量显示凭据，按回车后从终端清除。
+
+    credentials: [(label, value), ...]
+    yes_mode=True 时不显示到终端（非交互模式），只写入受保护文件。
+    """
+    if not credentials:
+        return
+
+    # 写入受保护文件（追加模式，安装过程可能多次调用）
+    cred_file = HOME / ".install-credentials"
+    ensure_home()
+    with open(cred_file, "a", encoding="utf-8") as f:
+        for label, value in credentials:
+            f.write(f"{label}: {value}\n")
+    cred_file.chmod(0o600)
+
+    if yes_mode:
+        return
+
+    # 终端显示
+    for label, value in credentials:
+        print(f"  {label}: {value}")
+
+    print(f"  {'='*60}")
+    print("  ⚠️  请妥善保存以上凭据，按回车后此信息将从屏幕消失")
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    # 清除显示：上移 n 行后清到屏幕底部
+    lines = 2 + len(credentials)  # 分隔线 + 提示 + 每行凭据
+    sys.stdout.write(f"\033[{lines}F\033[J")
+    sys.stdout.flush()
+    print("  [凭据已隐藏，如需查看请检查 ~/.pylai/.install-credentials]")
 
 
 def ask(
@@ -1718,30 +1973,41 @@ def start_container(image: str, answers: dict, read_only: bool = True) -> None:
     out("==> 服务已就绪。")
 
 
-def print_install_summary(answers: dict) -> None:
+def print_install_summary(answers: dict, yes_mode: bool = False) -> None:
     out("\n" + "=" * 64)
     out("  Pylai 安装完成")
     out(f"  前端:     {answers['public_url']}/")
     out(f"  管理台:   {answers['public_url']}/admin/")
     out(f"  健康检查: http://127.0.0.1:{answers['api_port']}/health/ready")
-    if answers.get("max_email"):
-        if answers.get("max_password"):
-            out(f"  Max 账号: {answers['max_email']} / {answers['max_password']}")
-        else:
-            out(f"  Max 账号: {answers['max_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
-    if answers.get("admin_email"):
-        if answers.get("admin_password"):
-            out(f"  Admin 账号: {answers['admin_email']} / {answers['admin_password']}")
-        else:
-            out(f"  Admin 账号: {answers['admin_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
-    if answers.get("user_email"):
-        if answers.get("user_password"):
-            out(f"  Normal 账号: {answers['user_email']} / {answers['user_password']}")
-        else:
-            out(f"  Normal 账号: {answers['user_email']} / (已自动生成，见容器日志: docker logs {CONTAINER})")
-    out("  以上初始密码仅在本次安装时显示，请妥善保存。")
-    if not answers.get("max_password") or (answers.get("admin_email") and not answers.get("admin_password")) or (answers.get("user_email") and not answers.get("user_password")):
-        out("  提示: 自动生成的密码已在容器启动日志中打印（[DbSeeder] 标记），也可执行 docker logs 查看。")
+    out()
+
+    # 收集需要显示的凭据
+    creds: list[tuple[str, str]] = []
+    creds.append(("PostgreSQL 密码", answers["db_password"]))
+    creds.append(("Redis 密码", answers["redis_password"]))
+
+    if answers.get("max_email") and answers.get("max_password"):
+        creds.append((f"Max 账号 ({answers['max_email']})", answers["max_password"]))
+    if answers.get("admin_email") and answers.get("admin_password"):
+        creds.append((f"Admin 账号 ({answers['admin_email']})", answers["admin_password"]))
+    if answers.get("user_email") and answers.get("user_password"):
+        creds.append((f"Normal 账号 ({answers['user_email']})", answers["user_password"]))
+    if answers.get("encryption_pfx_password"):
+        creds.append(("加密证书密码", answers["encryption_pfx_password"]))
+
+    reveal_credentials(creds, yes_mode=yes_mode)
+
+    # 提示未在 answers 中保留的自动生成密码（旧兼容路径）
+    auto_generated: list[str] = []
+    if answers.get("max_email") and not answers.get("max_password"):
+        auto_generated.append("Max")
+    if answers.get("admin_email") and not answers.get("admin_password"):
+        auto_generated.append("Admin")
+    if answers.get("user_email") and not answers.get("user_password"):
+        auto_generated.append("Normal")
+    if auto_generated:
+        out(f"  提示: {', '.join(auto_generated)} 密码已自动生成，请在容器日志中查看（[DbSeeder] 标记）。")
+
     out("=" * 64)
 
 
@@ -2510,14 +2776,111 @@ def uninstall() -> None:
 
 def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
                  config: PylaiConfig) -> None:
-    if args.pylai_config:
-        # 非交互：从现有 pylai.toml 安装
-        raise ManageError("非交互安装 --config-file 尚未实现（Phase 3）")
-    elif args.env_file:
-        # 非交互：从 .env 文件安装
-        raise ManageError("非交互安装 --env-file 尚未实现（Phase 3）")
+    if state.installed:
+        raise ManageError("检测到已有安装。如需重新安装，请先卸载或使用更新。")
+
+    tars = discover_tars()
+    if not tars:
+        raise ManageError("当前目录未找到 Pylai-<version>-Linux-<arch>.tar。")
+
+    # 选择安装包（非交互时自动选兼容架构的第一个）
+    if args.yes:
+        compatible = [p for p in tars if parse_tar(p) and parse_tar(p)[1] == host_arch()]
+        if not compatible:
+            compatible = tars
+        tar_path = compatible[0]
     else:
-        menu_install()
+        options = [(f"{p.name}（{'与当前主机兼容' if parse_tar(p)[1] == host_arch() else '其他架构'}）", p.name) for p in tars]
+        name = choose(options, "请选择安装包")
+        if not name:
+            return
+        tar_path = Path.cwd() / name
+
+    version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
+    image = docker.load_image_tar(tar_path)
+
+    # ===== 方式1: 从现有 pylai.toml =====
+    if args.pylai_config:
+        source = Path(args.pylai_config)
+        config = PylaiConfig.from_existing(source)
+        answers = config.extract_container_params()
+        # 端口可从环境变量覆盖
+        answers["public_port"] = int(os.environ.get("PYLAI_PUBLIC_PORT", answers.get("public_port", 8080)))
+        answers["api_port"] = int(os.environ.get("PYLAI_API_PORT", answers.get("api_port", 5000)))
+        if not answers.get("db_password") or not answers.get("redis_password"):
+            raise ManageError("从现有配置无法提取数据库/Redis 密码，请检查 pylai.toml。")
+
+    # ===== 方式2: 从 .env 文件 =====
+    elif args.env_file:
+        env = parse_env_file(Path(args.env_file))
+        answers = build_answers_from_env(env)
+
+    # ===== 方式3: 从环境变量（--yes 且无其他参数时）=====
+    elif args.yes:
+        env = {k: v for k, v in os.environ.items() if k.startswith("PYLAI_")}
+        answers = build_answers_from_env(env)
+
+    # ===== 方式4: 交互式 =====
+    else:
+        out("\n==> 开始安装配置（涉及密码的项直接回车可自动生成）")
+        answers = collect_install_answers()
+
+    # 生成配置（方式1 已复制，无需重新生成）
+    if not args.pylai_config:
+        PylaiConfig.generate_from_template(image, answers)
+
+    # 确保 signing KEK 文件存在
+    signing_kek_path = CERT_DIR / "signing-kek"
+    if not signing_kek_path.is_file():
+        ensure_home()
+        signing_kek = secrets.token_hex(32)
+        signing_kek_path.write_text(signing_kek, encoding="ascii")
+        signing_kek_path.chmod(0o600)
+
+    # 自动生成加密证书（如果未指定且 openssl 可用）
+    if not answers.get("encryption_pfx") and shutil.which("openssl"):
+        ensure_home()
+        host_pfx = CERT_DIR / "encryption.pfx"
+        key_file = CERT_DIR / "encryption-key.pem"
+        cert_file = CERT_DIR / "encryption-cert.pem"
+        enc_pwd = secrets.token_urlsafe(12)
+        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(key_file), "-out", str(cert_file), "-days", "3650",
+             "-subj", "/CN=Pylai Encryption"], timeout=300)
+        run(["openssl", "pkcs12", "-export", "-out", str(host_pfx),
+             "-inkey", str(key_file), "-in", str(cert_file),
+             "-passout", f"pass:{enc_pwd}"], timeout=300)
+        host_pfx.chmod(0o600)
+        key_file.unlink(missing_ok=True)
+        cert_file.unlink(missing_ok=True)
+        # 更新配置
+        config.reload()
+        config.set_block_value("[OpenIddict.Certificates.Encryption]", "Path", toml_string(f"{CONTAINER_CERT_DIR}/encryption.pfx"))
+        config.set_block_value("[OpenIddict.Certificates.Encryption]", "Password", toml_string(enc_pwd))
+        answers["encryption_pfx"] = f"{CONTAINER_CERT_DIR}/encryption.pfx"
+        answers["encryption_pfx_password"] = enc_pwd
+
+    # 启动容器
+    docker.start(image, answers)
+    if not docker.wait_healthy(answers["api_port"]):
+        print_container_logs()
+        raise ManageError("服务启动超时，请根据上方日志排查。")
+
+    # 保存状态
+    state.set("version", version)
+    state.set("architecture", arch)
+    state.set("image", image)
+    state.set("public_url", answers["public_url"])
+    state.set("public_port", answers["public_port"])
+    state.set("api_port", answers["api_port"])
+    state.set("max_email", answers.get("max_email", ""))
+    state.set("admin_email", answers.get("admin_email", ""))
+    state.set("installed_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    state.save()
+
+    # 显示摘要（Phase 5 改进）
+    print_install_summary(answers, yes_mode=args.yes)
+    out("提示：建议使用主机 Nginx 反代，执行 `config generate-nginx` 可生成配置模板。")
 
 
 def _cmd_update(args: argparse.Namespace, docker: DockerCompose, state: State,
