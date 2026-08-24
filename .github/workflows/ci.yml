@@ -231,16 +231,17 @@ jobs:
 
           curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
 
-          # 运行时进程用户断言（比配置文件 grep 更强）：backend=pylai、redis=redis
-          # docker top 的 USER 列由宿主机 passwd 解析（runner 无 pylai/redis 用户会显示数字），
-          # 故先取容器内 UID 再按数值断言；ps 输出必须含 PID 列，且行首为 PID
+          # 运行时进程用户断言（比配置文件 grep 更强）：backend=pylai、redis=redis。
+          # 不用 docker top：其 USER 列按 runner 宿主机 passwd 解析（uid 撞上宿主已有用户时
+          # 显示为用户名，如 dhcpcd），数字/名字比对都不可靠。改为容器内直读 /proc 属主，
+          # 与 id -u 权威值精确匹配；自排除必须在主 shell 完成（管道子 shell 中 $$ 不变）。
           PYLAI_UID=$(docker exec smoke id -u pylai)
           REDIS_UID=$(docker exec smoke id -u redis)
-          TOP=$(docker top smoke -o pid,user,args)
-          echo "$TOP"
-          echo "$TOP" | awk -v u="$PYLAI_UID" 'NR>1 && $2==u && $0~/Pylaios serve/ {ok=1} END {exit !ok}' \
+          PROCS=$(docker exec smoke sh -c 'me=$$; res=""; for d in /proc/[0-9]*; do pid=${d#/proc/}; [ "$pid" = "$me" ] && continue; cmd=$(tr "\0" " " < "$d/cmdline" 2>/dev/null); case "$cmd" in *"Pylaios serve"*) res="$res backend=$(stat -c %u "$d")";; *redis-server*) res="$res redis=$(stat -c %u "$d")";; esac; done; echo "$res" | tr " " "\n" | sed "/^$/d" | sort -u')
+          echo "$PROCS"
+          echo "$PROCS" | grep -qx "backend=$PYLAI_UID" \
             || { echo "==> backend 未以 pylai(uid=$PYLAI_UID) 用户运行"; exit 1; }
-          echo "$TOP" | awk -v u="$REDIS_UID" 'NR>1 && $2==u && $0~/redis-server/ {ok=1} END {exit !ok}' \
+          echo "$PROCS" | grep -qx "redis=$REDIS_UID" \
             || { echo "==> redis-server 未以 redis(uid=$REDIS_UID) 用户运行"; exit 1; }
           echo "==> 进程用户断言 OK（backend=pylai, redis=redis）"
 
