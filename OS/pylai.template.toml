@@ -106,8 +106,6 @@ offlineAccess = true
 [OpenIddict.Certificates.Signing]
 Path = "${signing_pfx_path}"
 Password = "${signing_pfx_password}"
-# 数据库托管模式使用 KeyFile
-KeyFile = "${signing_key_file}"
 
 [OpenIddict.Certificates.Encryption]
 Path = "${encryption_pfx_path}"

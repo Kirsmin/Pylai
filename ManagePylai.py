@@ -1580,7 +1580,6 @@ class PylaiConfig:
         t.set("[Mfa]", "Origins", toml_list(answers.cors_origins))
         t.set("[Cors]", "AllowedOrigins", toml_list(answers.cors_origins))
         t.set("[Cookie]", "SecurePolicy", toml_str("Always" if answers.is_https else "SameAsRequest"))
-        t.set("[OpenIddict.Certificates.Signing]", "KeyFile", toml_str("/etc/pylai/certs/signing-kek"))
 
         if answers.signing_pfx:
             t.set_many("[OpenIddict.Certificates.Signing]", {
