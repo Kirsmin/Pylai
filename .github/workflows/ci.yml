@@ -201,6 +201,10 @@ jobs:
           ! grep -Eq '\$\{PYLAI_(DB|REDIS)_PASSWORD:-' docker-compose.yml || { echo "==> docker-compose.yml 秘密存在默认值"; exit 1; }
           docker run --rm --entrypoint sh pylai-dev:latest -c '
             set -e
+            test -f /opt/pylai/pylai.template.toml
+            test -f /opt/pylai/pylai.example.toml
+            grep -q "server_url" /opt/pylai/pylai.template.toml
+            grep -q "\[Server\]" /opt/pylai/pylai.example.toml
             grep -q "user = pylai" /etc/supervisor/conf.d/pylai.conf
             grep -q "user = redis" /etc/supervisor/conf.d/pylai.conf
             grep -q "user = pylai" /etc/supervisor/conf.d/pylai-server.conf

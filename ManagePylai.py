@@ -1500,9 +1500,13 @@ class PylaiConfig:
             return cls._generate_via_replace(example_text, answers)
 
         raise ManageError(
-            "镜像未提供 pylai.template.toml（新版镜像必需）。\n"
-            "请升级镜像至最新版，或临时使用 --compat 启用兼容模式：\n"
-            f"  python3 ManagePylai.py install --compat  或  --compat 与 --config-file/--env-file 组合"
+            "镜像未提供 pylai.template.toml（新版镜像必需，Dockerfile 需包含 COPY OS/pylai.template.toml）。\n"
+            "原因：当前 ManagePylai.py 为新版（template 主路径），但加载的镜像为旧版构建（仅含 pylai.example.toml）。\n"
+            "解决：\n"
+            "  1) 推荐：重新构建/下载最新镜像（构建后 docker run --rm --entrypoint cat <image> /opt/pylai/pylai.template.toml 应存在），再执行安装；\n"
+            "  2) 临时兼容：python3 ManagePylai.py install --compat  （或 --compat 与 --config-file/--env-file 组合）将回退到 example 渲染；\n"
+            f"  当前镜像: {image}\n"
+            "  验证命令: docker run --rm --entrypoint ls <image> /opt/pylai/  应同时列出 pylai.template.toml 与 pylai.example.toml"
         )
 
     @classmethod

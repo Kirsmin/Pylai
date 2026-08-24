@@ -38,6 +38,9 @@ ARG PYLAI_VERSION
 ARG PYLAI_DB_SCHEMA
 COPY OS/pylai.example.toml /opt/pylai/pylai.example.toml
 COPY OS/pylai.template.toml /opt/pylai/pylai.template.toml
+RUN test -f /opt/pylai/pylai.example.toml && test -f /opt/pylai/pylai.template.toml \
+    && grep -q "server_url" /opt/pylai/pylai.template.toml \
+    && echo "==> pylai template check OK"
 COPY dev/entrypoint.sh /usr/local/bin/pylai-dev-entrypoint
 COPY dev/nginx.conf /etc/nginx/sites-available/pylai-dev
 COPY dev/supervisord.conf /etc/supervisor/conf.d/pylai.conf

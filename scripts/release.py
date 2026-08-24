@@ -61,6 +61,23 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_image_templates(image: str) -> None:
+    """Fail Closed: 校验镜像内两份配置模板齐全且模板含必需占位。"""
+    for fname, needle in [
+        ("pylai.template.toml", "server_url"),
+        ("pylai.example.toml", "[Server]"),
+    ]:
+        result = subprocess.run(
+            ["docker", "run", "--rm", "--entrypoint", "cat", image, f"/opt/pylai/{fname}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise SystemExit(f"镜像 {image} 缺少 /opt/pylai/{fname}，构建失败")
+        if needle not in result.stdout:
+            raise SystemExit(f"镜像 {image} 的 {fname} 内容异常（缺少 {needle}）")
+    print(f"==> 镜像模板校验通过: {image}")
+
+
 def build_target(version: str, target_name: str, target: dict[str, str]) -> Path:
     package_name = f"Pylai-{version}-Linux-{target['arch']}"
     tar_path = DIST_DIR / f"{package_name}.tar"
@@ -89,6 +106,9 @@ def build_target(version: str, target_name: str, target: dict[str, str]) -> Path
 
     if not tar_path.is_file() or tar_path.stat().st_size == 0:
         raise SystemExit(f"镜像导出失败: {tar_path}")
+
+    image = f"pylaios:{version}-{target['arch']}"
+    verify_image_templates(image)
 
     checksum = sha256_file(tar_path)
     checksum_path = DIST_DIR / f"{tar_path.name}.sha256"
@@ -127,6 +147,17 @@ def main() -> int:
         missing = [p.name for p in expected if not p.is_file() or p.stat().st_size == 0]
         if missing:
             raise SystemExit(f"产物缺失或为空，无法 finalize: {', '.join(missing)}")
+        # finalize 同样校验已存在的 tar 内镜像模板（CI 汇总 job 的最后一道门禁）
+        for _, target in selected:
+            image = f"pylaios:{version}-{target['arch']}"
+            # tar 已下载但镜像未必已 load，先尝试 load 再校验，失败仅警告（CI 中通常已在 build job 验证）
+            tar_path = DIST_DIR / f"Pylai-{version}-Linux-{target['arch']}.tar"
+            load = subprocess.run(["docker", "load", "-i", str(tar_path)], capture_output=True, text=True)
+            if load.returncode == 0:
+                try:
+                    verify_image_templates(image)
+                except SystemExit as exc:
+                    raise SystemExit(f"finalize 校验失败: {exc}") from exc
         outputs = expected
     else:
         outputs = [build_target(version, name, target) for name, target in selected]
