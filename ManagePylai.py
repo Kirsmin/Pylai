@@ -9,6 +9,7 @@ Release 页面同时提供 Pylai-<version>-Linux-<arch>.tar 与本脚本，
 import argparse
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 import platform as host_platform
@@ -66,6 +67,9 @@ CONTAINER_CERT_DIR = f"{CONTAINER_CONFIG_DIR}/certs"
 DATA_DIR = HOME / "data"
 BACKUP_DIR = HOME / "backups"
 HOST_NGINX_FILE = HOME / "host-nginx.conf"
+
+# 与 deploy/entrypoint.py WEAK_SECRETS 保持一致，本地预检 Fail Closed
+WEAK_SECRETS = {"change-me", "changeme", "password", "secret", "123456", "pylai"}
 
 TAR_PATTERN = re.compile(r"^Pylai-(.+)-Linux-(AMD64|ARM64)\.tar$")
 BACKEND_IMAGE_RE = re.compile(
@@ -216,6 +220,72 @@ def env_bool(value: str | None) -> bool:
 
 def split_csv(raw: str) -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def is_valid_url(value: str) -> bool:
+    try:
+        p = urlparse(value)
+        return p.scheme in {"http", "https"} and bool(p.hostname)
+    except Exception:
+        return False
+
+
+def is_valid_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def is_valid_cidr(value: str) -> bool:
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return "/" in value
+    except ValueError:
+        return False
+
+
+def port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+            return False
+        except OSError:
+            return True
+
+
+def check_weak_secrets(answers: "InstallAnswers") -> None:
+    for label, secret in (
+        ("数据库密码", answers.db_password),
+        ("Redis 密码", answers.redis_password),
+    ):
+        if secret.strip().lower() in WEAK_SECRETS:
+            raise ManageError(f"{label} 为已知弱值，拒绝启动。请使用随机生成的强密码")
+
+
+def validate_answers(answers: "InstallAnswers") -> None:
+    if not is_valid_url(answers.public_url):
+        raise ManageError(f"对外访问地址不是合法 URL: {answers.public_url}")
+    if not (1 <= answers.public_port <= 65535 and 1 <= answers.api_port <= 65535):
+        raise ManageError(f"端口越界: public={answers.public_port} api={answers.api_port}")
+    if answers.public_port == answers.api_port:
+        raise ManageError("对外端口与 API 端口不能相同")
+    for ip in answers.trusted_proxies:
+        if not is_valid_ip(ip):
+            raise ManageError(f"可信代理 IP 非法: {ip}")
+    for cidr in answers.trusted_networks:
+        if not is_valid_cidr(cidr):
+            raise ManageError(f"可信代理 CIDR 非法: {cidr}")
+    for origin in answers.cors_origins:
+        if not is_valid_url(origin):
+            raise ManageError(f"CORS Origin 非法: {origin}")
+    # 端口占用预检（仅提示，不阻断，避免误判）
+    for label, port in (("对外端口", answers.public_port), ("API 端口", answers.api_port)):
+        if port_in_use(port):
+            out(f"[警告] {label} {port} 在本机已被占用，启动可能失败，请先释放或更换端口。")
+    check_weak_secrets(answers)
 
 
 def _toml_section_span(text: str, marker: str) -> tuple[int, int]:
@@ -776,33 +846,21 @@ class InstallAnswers:
             subs[f"{prefix}_password"] = account.password
             subs[f"{prefix}_display_name"] = account.display_name or role.title()
 
-        if self.smtp.enabled:
-            subs.update(
-                {
-                    "smtp_from": self.smtp.sender,
-                    "smtp_host": self.smtp.host,
-                    "smtp_port": str(self.smtp.port),
-                    "smtp_security": self.smtp.security,
-                    "smtp_user": self.smtp.user,
-                    "smtp_password": self.smtp.password,
-                }
-            )
-
-        if self.signing_pfx:
-            subs.update(
-                {
-                    "signing_pfx_path": self.signing_pfx,
-                    "signing_pfx_password": self.signing_pfx_password,
-                }
-            )
-
-        if self.encryption_pfx:
-            subs.update(
-                {
-                    "encryption_pfx_path": self.encryption_pfx,
-                    "encryption_pfx_password": self.encryption_pfx_password,
-                }
-            )
+        # 模板占位需始终有值，避免残留 ${var} 导致告警/解析歧义
+        subs.update(
+            {
+                "smtp_from": self.smtp.sender if self.smtp.enabled else "",
+                "smtp_host": self.smtp.host if self.smtp.enabled else "",
+                "smtp_port": str(self.smtp.port if self.smtp.enabled else 587),
+                "smtp_security": self.smtp.security if self.smtp.enabled else "StartTls",
+                "smtp_user": self.smtp.user if self.smtp.enabled else "",
+                "smtp_password": self.smtp.password if self.smtp.enabled else "",
+                "signing_pfx_path": self.signing_pfx or "",
+                "signing_pfx_password": self.signing_pfx_password or "",
+                "encryption_pfx_path": self.encryption_pfx or "",
+                "encryption_pfx_password": self.encryption_pfx_password or "",
+            }
+        )
 
         return subs
 
@@ -1427,18 +1485,25 @@ class PylaiConfig:
         return InstallAnswers.from_mapping(params)
 
     @classmethod
-    def generate_from_template(cls, image: str, answers: InstallAnswers) -> Self:
+    def generate_from_template(
+        cls, image: str, answers: InstallAnswers, *, allow_compat: bool = False
+    ) -> Self:
         template_text = cls._read_from_image(image, cls.TEMPLATE_NAME)
         if template_text:
             return cls._generate_via_template(template_text, answers)
 
-        out("提示：镜像未提供 pylai.template.toml，使用兼容模式生成配置。")
+        if allow_compat:
+            out("提示：镜像未提供 pylai.template.toml，使用兼容模式（--compat）生成配置。")
+            example_text = cls._read_from_image(image, cls.EXAMPLE_NAME)
+            if not example_text:
+                raise ManageError("无法从镜像读取配置模板（template 且 example 均不存在）")
+            return cls._generate_via_replace(example_text, answers)
 
-        example_text = cls._read_from_image(image, cls.EXAMPLE_NAME)
-        if not example_text:
-            raise ManageError("无法从镜像读取配置模板")
-
-        return cls._generate_via_replace(example_text, answers)
+        raise ManageError(
+            "镜像未提供 pylai.template.toml（新版镜像必需）。\n"
+            "请升级镜像至最新版，或临时使用 --compat 启用兼容模式：\n"
+            f"  python3 ManagePylai.py install --compat  或  --compat 与 --config-file/--env-file 组合"
+        )
 
     @classmethod
     def _read_from_image(cls, image: str, filename: str) -> str | None:
@@ -1447,7 +1512,16 @@ class PylaiConfig:
             check=False,
             timeout=120,
         )
-        return result.stdout if result.returncode == 0 else None
+        if result.returncode != 0:
+            # 明确区分镜像不存在 vs 文件不存在，便于诊断
+            err = (result.stderr or result.stdout).strip()
+            if "No such image" in err or "not found" in err.lower():
+                raise ManageError(f"无法读取镜像 {image} 内 {filename}: 镜像不存在或拉取失败 ({err[:200]})")
+            return None
+        # 空文件视为不存在
+        if not result.stdout.strip():
+            return None
+        return result.stdout
 
     @classmethod
     def _generate_via_template(cls, template_text: str, answers: InstallAnswers) -> Self:
@@ -1668,6 +1742,13 @@ class DockerCompose:
     def down(self) -> None:
         self.compose("down", "-v", timeout=120)
 
+    def validate_compose(self) -> None:
+        result = self.compose("config", "--quiet", check=False)
+        if result.returncode != 0:
+            raise ManageError(
+                f"docker-compose.yml 校验失败:\n{result.stderr.strip() or result.stdout.strip()}"
+            )
+
     def logs_text(
         self,
         tail: int | str = 200,
@@ -1692,12 +1773,44 @@ class DockerCompose:
         follow: bool = False,
         service: ServiceName | Literal["all"] = "all",
     ) -> None:
+        # 安装失败路径由 dump_diagnostics 输出更详细的诊断，此处仅面向菜单「查看日志」
+        if not self.compose_file.is_file():
+            out("尚未安装（docker-compose.yml 不存在）。")
+            return
         if not self.service_exists("backend"):
+            # 容器已退出时仍有日志可查，不直接返回误导信息
+            text = self.logs_text(tail, follow=follow, service=service)
+            if text.strip():
+                out(text.strip())
+                out("\n[提示] 后端容器未运行，以上为最近日志。")
+                return
             out("尚未安装或服务不存在。")
             return
 
         text = self.logs_text(tail, follow=follow, service=service)
         out(text.strip() or "（暂无日志输出）")
+
+    def dump_diagnostics(self, *, tail: int = 200) -> None:
+        """安装/更新失败时输出分服务诊断，不依赖 service_exists 误导。"""
+        out("\n--- 诊断信息 ---")
+        # compose ps
+        ps = self.compose("ps", "-a", check=False)
+        if ps.stdout.strip() or ps.stderr.strip():
+            out(ps.stdout.strip() or ps.stderr.strip())
+        else:
+            out("compose ps 无输出")
+
+        # 按服务分别输出日志
+        for svc in ("backend", "postgres", "redis", "nginx"):
+            out(f"\n--- {svc} 日志（最近 {tail} 行）---")
+            txt = self.logs_text(tail, service=svc)  # type: ignore[arg-type]
+            out(txt.strip() or f"（{svc} 暂无日志）")
+
+        # 指向配置文件与下一步排查
+        out("\n[提示] 可执行：")
+        out(f"  docker compose -p {self.project} -f {self.compose_file} logs --tail 500 backend")
+        out(f"  cat {CONFIG_FILE}")
+        out(f"  docker compose -p {self.project} -f {self.compose_file} ps -a")
 
     def exec_pylaios(
         self,
@@ -1721,17 +1834,53 @@ class DockerCompose:
 
     def load_image_tar(self, tar_path: Path) -> str:
         out(f"==> 加载镜像 {tar_path.name} ...")
+        # 架构强校验：非兼容架构需二次确认（yes 模式除外，由调用方决定）
+        meta = parse_tar(tar_path)
+        if meta:
+            _, arch = meta
+            cur = host_arch()
+            if arch != cur:
+                out(f"[警告] 镜像架构 {arch} 与本机 {cur} 不一致，可能无法运行。")
 
         result = self.docker("load", "-i", tar_path, timeout=1200)
-        version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
-        expected = f"pylaios:{version}-{arch}"
 
+        # 优先通过 docker images 精确匹配最近加载的镜像（不依赖 Loaded image 文本格式）
+        # 回退：解析 Loaded image 行
+        candidates: list[str] = []
         for line in (result.stdout + result.stderr).splitlines():
             if "Loaded image" in line and ":" in line:
-                return line.split(":", 1)[1].strip()
+                # 形如 "Loaded image: pylaios:0.0.12-AMD64"
+                try:
+                    name = line.split("Loaded image", 1)[1].split(":", 1)[1].strip()
+                    # 去除可能的引号与空格
+                    name = name.strip().strip('"').strip("'")
+                    if name:
+                        candidates.append(name.split()[-1].strip())
+                except Exception:
+                    continue
 
+        if candidates:
+            # 取最后一个 Loaded image
+            last = candidates[-1]
+            if self.docker("image", "inspect", last, check=False).returncode == 0:
+                out(f"  已加载: {last}")
+                return last
+
+        # 期望名兜底（兼容旧 tar 命名）
+        version, arch = meta or ("0.0.1", host_arch())
+        expected = f"pylaios:{version}-{arch}"
         if self.docker("image", "inspect", expected, check=False).returncode == 0:
+            out(f"  已加载（按命名推断）: {expected}")
             return expected
+
+        # 最后尝试：列出最近镜像按时间排序
+        img_list = self.docker("images", "--format", "{{.Repository}}:{{.Tag}}", check=False)
+        if img_list.stdout.strip():
+            for line in reversed(img_list.stdout.splitlines()):
+                if "pylaios" in line:
+                    if self.docker("image", "inspect", line.strip(), check=False).returncode == 0:
+                        out(f"  已加载（按列表推断）: {line.strip()}")
+                        return line.strip()
 
         raise ManageError(
             f"无法确定镜像名称，请手动确认:\n{result.stdout}\n{result.stderr}"
@@ -1743,22 +1892,72 @@ class DockerCompose:
             return parse_env_file(env_file)
         return {}
 
-    def wait_healthy(self, api_port: int, timeout: int = 180) -> bool:
+    def wait_healthy(self, api_port: int, timeout: int | None = None, *, warn_after: int = 300) -> bool:
+        """等待 /health/ready 就绪。
+
+        - timeout=None 时永不超时（按用户要求取消自动取消），仅在超过 warn_after 后每 60s 输出警告。
+        - 若 backend 容器退出则立即返回 False，由调用方输出诊断。
+        """
         url = f"http://127.0.0.1:{api_port}/health/ready"
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        warned = False
+        last_warn = start
+        deadline = (start + timeout) if timeout is not None else None
+        attempt = 0
 
-        while time.monotonic() < deadline:
-            with suppress(OSError, urllib.error.URLError):
+        while True:
+            attempt += 1
+            elapsed = int(time.monotonic() - start)
+
+            # 尝试健康检查
+            health_ok = False
+            health_body = ""
+            health_status: int | None = None
+            try:
                 with urllib.request.urlopen(url, timeout=3) as resp:
+                    health_status = resp.status
+                    health_body = resp.read().decode("utf-8", errors="ignore")[:500]
                     if resp.status == 200:
+                        if elapsed > 5:
+                            out(f"[就绪] 健康检查通过（耗时 {elapsed}s）")
                         return True
+            except urllib.error.HTTPError as e:
+                health_status = e.code
+                with suppress(Exception):
+                    health_body = e.read().decode("utf-8", errors="ignore")[:500]
+            except Exception as e:
+                health_body = str(e)[:200]
 
+            # 后置：容器是否仍存活
             if self.service_status("backend") != "running":
+                out(f"[失败] 后端容器已退出（已等待 {elapsed}s，最后健康检查 status={health_status}）。")
+                if health_body:
+                    out(f"  health body: {health_body[:300]}")
                 return False
 
-            time.sleep(3)
+            # 超时分支（仅当显式传入 timeout）
+            if deadline is not None and time.monotonic() >= deadline:
+                out(f"[超时] 健康检查 {timeout}s 内未通过（最后 status={health_status}）。")
+                if health_body:
+                    out(f"  health body: {health_body[:300]}")
+                return False
 
-        return False
+            # 警告分支：超过 warn_after 后每 60s 警告一次
+            if not warned and elapsed >= warn_after:
+                out(f"[警告] 当前步骤超过5分钟无响应（已等待 {elapsed}s，最后 status={health_status}），仍在等待…")
+                if health_body:
+                    out(f"  详情: {health_body[:300]}")
+                warned = True
+                last_warn = time.monotonic()
+            elif warned and time.monotonic() - last_warn >= 60:
+                out(f"[等待] 仍未就绪，已等待 {elapsed}s（最后 status={health_status}）…")
+                last_warn = time.monotonic()
+            else:
+                # 常规进度（每 15s 打印一次，避免刷屏）
+                if attempt % 5 == 0 and elapsed < warn_after:
+                    out(f"[等待] 后端启动中… 已等待 {elapsed}s（health status={health_status or 'unreachable'}）")
+
+            time.sleep(3)
 
 
 # ============================================================================
@@ -1881,6 +2080,18 @@ server {
     def ensure_volumes(cls) -> None:
         for vol in ("pylai_pgdata", "pylai_redisdata", "pylai_data"):
             run(["docker", "volume", "create", vol], check=False)
+
+    @classmethod
+    def validate_compose(cls, compose_file: Path | None = None) -> None:
+        target = compose_file or cls.COMPOSE_FILE
+        result = run(
+            ["docker", "compose", "-f", target, "config", "--quiet"],
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ManageError(
+                f"docker-compose.yml 校验失败:\n{result.stderr.strip() or result.stdout.strip()}"
+            )
 
 
 # ============================================================================
@@ -2304,8 +2515,16 @@ def service_action(ctx: AppContext, action: ServiceAction) -> None:
     match action:
         case "start":
             ctx.docker.compose("up", "-d", timeout=120)
-            healthy = ctx.docker.wait_healthy(ctx.state.api_port)
-            out("启动完成。" if healthy else "服务已启动，但健康检查尚未通过。")
+            try:
+                ctx.docker.validate_compose()
+            except ManageError as e:
+                out(f"Compose 校验警告: {e}")
+            healthy = ctx.docker.wait_healthy(ctx.state.api_port, timeout=None, warn_after=300)
+            if healthy:
+                out("启动完成。")
+            else:
+                out("服务已启动，但健康检查未通过。")
+                ctx.docker.dump_diagnostics(tail=200)
         case "stop":
             ctx.docker.stop()
             out("已停止。")
@@ -2326,6 +2545,23 @@ class InstallService:
         image = self.ctx.docker.load_image_tar(tar_path)
         answers = self.resolve_answers(args)
         interactive = not (args.yes or args.pylai_config or args.env_file)
+        allow_compat = bool(getattr(args, "compat", False))
+
+        if getattr(args, "dry_run", False):
+            out("[dry-run] 预览安装配置（不实际启动）：")
+            validate_answers(answers)
+            out(f"  public_url: {answers.public_url}")
+            out(f"  public_port: {answers.public_port}  api_port: {answers.api_port}")
+            out(f"  db: {answers.db_user}@{answers.db_name}  redis: ***")
+            out(f"  image: {image}  compat: {allow_compat}")
+            # 尝试生成配置到内存并校验，不落盘
+            try:
+                PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
+                out("  配置模板渲染通过（已写入 pylai.toml，dry-run 场景可手动检查）")
+            except Exception as e:
+                out(f"  配置生成失败: {e}")
+            out("  Compose 预览: ~/.pylai/docker-compose.yml / ~/.pylai/.env")
+            return
 
         self.core_install(
             tar_path,
@@ -2333,6 +2569,8 @@ class InstallService:
             answers,
             from_existing=bool(args.pylai_config),
             interactive=interactive,
+            allow_compat=allow_compat,
+            yes_mode=args.yes,
         )
 
     def install_interactive(self) -> None:
@@ -2346,6 +2584,8 @@ class InstallService:
             answers,
             from_existing=False,
             interactive=True,
+            allow_compat=False,
+            yes_mode=False,
         )
 
     def resolve_answers(self, args: argparse.Namespace) -> InstallAnswers:
@@ -2387,50 +2627,116 @@ class InstallService:
         *,
         from_existing: bool,
         interactive: bool,
+        allow_compat: bool = False,
+        yes_mode: bool = False,
     ) -> None:
         ctx = self.ctx
 
-        if not from_existing:
-            PylaiConfig.generate_from_template(image, answers)
-            ctx.config.reload()
+        # ---- 安装流水线（每步带序号，便于定位失败点） ----
+        steps: list[tuple[str, Callable[[], None]]] = []
 
-        self.fix_container_hosts()
+        def step_validate() -> None:
+            validate_answers(answers)
 
-        ComposeConfig.generate(answers, ctx.manager, image)
-        ComposeConfig.ensure_volumes()
+        def step_config() -> None:
+            if not from_existing:
+                PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
+                ctx.config.reload()
+            self.fix_container_hosts()
+            # 生成后再次校验 TOML 合法性
+            ctx.config.validate()
+            out(f"  配置已写入: {CONFIG_FILE}（脱敏预览见 [6] 查看配置）")
 
-        ensure_signing_kek()
-        self.ensure_signing_certificate(answers)
-        self.ensure_encryption_certificate(answers, interactive=interactive)
+        def step_compose() -> None:
+            ComposeConfig.generate(answers, ctx.manager, image)
+            # 预检 compose 语法
+            try:
+                ctx.docker.validate_compose()
+            except ManageError as e:
+                raise ManageError(f"Compose 校验失败:\n{e}") from e
+            out(f"  Compose 已生成: {HOME / 'docker-compose.yml'} / {HOME / '.env'}")
 
-        ctx.docker.start(image, answers)
+        def step_volumes() -> None:
+            ComposeConfig.ensure_volumes()
 
-        if not ctx.docker.wait_healthy(answers.api_port):
-            ctx.docker.view_logs(60)
-            raise ManageError("服务启动超时，请根据上方日志排查。")
+        def step_certs() -> None:
+            ensure_signing_kek()
+            self.ensure_signing_certificate(answers)
+            self.ensure_encryption_certificate(answers, interactive=interactive)
+            if answers.encryption_pfx:
+                out(f"  加密证书: {answers.encryption_pfx}")
+
+        def step_start() -> None:
+            ctx.docker.ensure_docker()
+            ctx.docker.start(image, answers)
+            out(f"  容器已启动: {image} (public:{answers.public_port} api:{answers.api_port})")
+
+        def step_health() -> None:
+            out(f"==> 等待健康检查 http://127.0.0.1:{answers.api_port}/health/ready ...")
+            # 取消超时自动取消，超过 300s 仅警告（按用户要求）
+            healthy = ctx.docker.wait_healthy(answers.api_port, timeout=None, warn_after=300)
+            if not healthy:
+                ctx.docker.dump_diagnostics(tail=200)
+                # 失败时保留现场，询问是否清理（yes_mode 则默认保留）
+                if not yes_mode and not interactive:
+                    # 非交互非 yes 模式（CLI --yes 已在外层）默认保留，提示手动清理
+                    pass
+                elif not yes_mode:
+                    out("\n[提示] 安装失败，现场已保留以便排查。")
+                    if ask_bool("是否清理本次创建的容器与数据卷（保留则可手动排查）？", False):
+                        out("==> 清理中...")
+                        with suppress(Exception):
+                            ctx.docker.compose("down", "-v", check=False)
+                raise ManageError("服务启动失败，请根据上方诊断信息排查。")
+
+        steps = [
+            ("校验输入与弱密码预检", step_validate),
+            ("生成配置", step_config),
+            ("生成 Compose", step_compose),
+            ("创建数据卷", step_volumes),
+            ("准备证书与 KEK", step_certs),
+            ("启动容器", step_start),
+            ("健康检查", step_health),
+        ]
+
+        total = len(steps)
+        for idx, (label, fn) in enumerate(steps, 1):
+            out(f"\n[{idx}/{total}] {label} ...")
+            try:
+                fn()
+                out(f"  ✓ {label} 完成")
+            except ManageError:
+                out(f"  ✗ {label} 失败")
+                # 任何一步失败后，若已生成 compose 则提示诊断
+                if idx >= 3:
+                    with suppress(Exception):
+                        ctx.docker.dump_diagnostics(tail=100)
+                raise
+            except Exception as exc:
+                out(f"  ✗ {label} 异常: {exc}")
+                raise ManageError(f"{label} 失败: {exc}") from exc
 
         self.save_state(tar_path, image, answers)
         self.print_summary(answers)
-
         out("提示：建议使用主机 Nginx 反代，主菜单 [8] 可生成配置模板。")
 
     def fix_container_hosts(self) -> None:
         config = self.ctx.config
 
         connection_string = str(config.get_value("Database", "ConnectionString", ""))
-        if "Host=127.0.0.1" in connection_string:
-            new_connection_string = connection_string.replace(
-                "Host=127.0.0.1",
-                "Host=postgres",
-            )
-            config.set_block_value(
-                "[Database]",
-                "ConnectionString",
-                toml_str(new_connection_string),
-            )
+        # 兼容 127.0.0.1 / localhost / 空主机 均修正为 postgres
+        for old in ("Host=127.0.0.1", "Host=localhost"):
+            if old in connection_string:
+                connection_string = connection_string.replace(old, "Host=postgres")
+                config.set_block_value(
+                    "[Database]",
+                    "ConnectionString",
+                    toml_str(connection_string),
+                )
+                break
 
         redis_host = str(config.get_value("Redis", "Host", ""))
-        if redis_host == "127.0.0.1":
+        if redis_host in {"127.0.0.1", "localhost"}:
             config.set_block_value("[Redis]", "Host", toml_str("redis"))
             config.set_block_value("[Redis]", "Port", "6379")
 
@@ -2560,11 +2866,16 @@ class UpdateService:
         self.preflight_config(image)
 
         ctx.docker.set_backend_image(image)
+        # 预检 compose 语法
+        try:
+            ctx.docker.validate_compose()
+        except ManageError as e:
+            raise ManageError(f"Compose 校验失败: {e}") from e
         ctx.docker.compose("up", "-d", "--remove-orphans", timeout=300)
 
-        if not ctx.docker.wait_healthy(ctx.state.api_port):
-            ctx.docker.view_logs(60)
-            raise ManageError("更新后健康检查未通过，请查看日志。")
+        if not ctx.docker.wait_healthy(ctx.state.api_port, timeout=None, warn_after=300):
+            ctx.docker.dump_diagnostics(tail=200)
+            raise ManageError("更新后健康检查未通过，请查看上方诊断。")
 
         ctx.state.set("version", version)
         ctx.state.set("architecture", arch)
@@ -4355,6 +4666,11 @@ def build_parser() -> argparse.ArgumentParser:
     install_p = subparsers.add_parser("install", help="安装 Pylai")
     install_p.add_argument("--config-file", dest="pylai_config", help="从现有 pylai.toml 非交互安装")
     install_p.add_argument("--env-file", help="从 .env 文件非交互安装")
+    install_p.add_argument(
+        "--compat",
+        action="store_true",
+        help="兼容模式：镜像未提供 pylai.template.toml 时回退到 pylai.example.toml（不推荐）",
+    )
 
     update_p = subparsers.add_parser("update", help="更新 Pylai")
     update_p.add_argument("--check-only", action="store_true", help="只检查更新，不执行")

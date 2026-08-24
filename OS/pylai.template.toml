@@ -1,0 +1,278 @@
+# =============================================================================
+# Pylaios 配置模板（供 ManagePylai.py 渲染）
+# 变量语法: ${name} 由 InstallAnswers.to_template_context() 提供
+# 列表/布尔变量已预格式化为 TOML 字面量，无需再加引号
+# =============================================================================
+
+[Server]
+Url = "${server_url}"
+AllowedHosts = ${allowed_hosts}
+MaxRequestBodyMB = 2
+
+[Cors]
+Enabled = true
+AllowedOrigins = ${allowed_origins}
+AllowedMethods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+AllowedHeaders = ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"]
+AllowCredentials = true
+
+[Frontend]
+Url = "${frontend_url}"
+
+[IpResolution]
+TrustedProxies = ${trusted_proxies}
+TrustedHeaders = ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"]
+IpWhitelist = []
+ForwardedHeadersEnabled = true
+TrustedNetworks = ${trusted_networks}
+
+[Database]
+ConnectionString = "${db_connection_string}"
+
+[Redis]
+Host = "redis"
+Port = 6379
+Password = "${redis_password}"
+Database = 0
+ConnectTimeoutMs = 5000
+
+[Backup]
+Directory = "${backup_dir}"
+
+[Identity]
+EmailCodeExpireMinutes = 10
+
+[Identity.Password]
+RequiredLength = 12
+AdminRequiredLength = 14
+CheckBreachedPasswords = true
+RequireDigit = true
+RequireLowercase = false
+RequireUppercase = false
+RequireNonAlphanumeric = false
+
+[Identity.Lockout]
+DefaultTimeoutMinutes = 5
+MaxFailedAttempts = 5
+
+[Cookie]
+Name = "Pylaios.Auth"
+SessionName = "Pylaios.Session"
+HttpOnly = true
+SameSite = "Lax"
+SecurePolicy = "${secure_policy}"
+ExpireDays = 14
+SlidingExpiration = true
+
+[DataProtection]
+KeyDirectory = "/var/lib/pylai/dataprotection"
+
+[Deployment]
+BundledNginx = true
+
+[OpenIddict]
+Issuer = "${issuer}"
+RequireHttps = ${require_https}
+
+[OpenIddict.AccessToken]
+LifetimeHours = 1
+DisableEncryption = false
+
+[OpenIddict.RefreshToken]
+LifetimeDays = 7
+
+[OpenIddict.IdentityToken]
+LifetimeHours = 1
+
+[OpenIddict.Endpoints]
+Authorize = "/connect/authorize"
+Token = "/connect/token"
+UserInfo = "/connect/userinfo"
+Introspect = "/connect/introspect"
+EndSession = "/connect/logout"
+
+[OpenIddict.Grants]
+AuthorizationCode = true
+RefreshToken = true
+ClientCredentials = true
+
+[OpenIddict.Scopes]
+openId = true
+profileBasic = true
+profileMail = true
+profileRole = true
+offlineAccess = true
+
+[OpenIddict.Certificates.Signing]
+Path = "${signing_pfx_path}"
+Password = "${signing_pfx_password}"
+# 数据库托管模式使用 KeyFile
+KeyFile = "${signing_key_file}"
+
+[OpenIddict.Certificates.Encryption]
+Path = "${encryption_pfx_path}"
+Password = "${encryption_pfx_password}"
+
+[OpenIddict.SigningKeyEncryption]
+KeyFile = "${signing_key_file}"
+
+[ExternalLogin.Facebook]
+AppId = ""
+AppSecret = ""
+
+[ExternalLogin.Microsoft]
+ClientId = ""
+ClientSecret = ""
+
+[ExternalLogin.Github]
+ClientId = ""
+ClientSecret = ""
+
+[Email]
+FromName = "Pylaios"
+FromAddress = "${smtp_from}"
+
+[Email.Smtp]
+Host = "${smtp_host}"
+Port = ${smtp_port}
+Security = "${smtp_security}"
+Username = "${smtp_user}"
+Password = "${smtp_password}"
+
+[MailTheme.Register]
+Title = "注册 Pylai！"
+Context = '''
+你正在网页端注册 Pylai 通行证，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.Bind]
+Title = "绑定邮箱"
+Context = '''
+你正在网页端为 Pylai 通行证绑定邮箱，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.Change]
+Title = "更换邮箱"
+Context = '''
+你正在网页端更换 Pylai 通行证的邮箱，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[MailTheme.PasswordReset]
+Title = "密码重置"
+Context = '''
+你正在网页端重置 Pylai 通行证的密码，请仔细核查以下信息，然后输入验证码：
+
+浏览器：%%Browser%%
+IP地址：%%IPAddress%%
+
+你的验证码是：%%CaptchaCode%%
+验证码 %%ExpireMinutes%% 分钟内有效，过期后请重新获取。
+
+Kirsmax(Bot),
+Poeat Team.
+
+------
+此邮件由系统自动生成并发送，如果不是本人操作，可以选择：
+- 忽略邮件，可能是有人输入了错误的电子邮件地址。
+- 如果频繁收到此邮件，请联系管理员。
+'''
+
+[Logging]
+DefaultLevel = "Information"
+MicrosoftAspNetCoreLevel = "Warning"
+PylaiosLevel = "Information"
+
+[TokenCleanup]
+Enabled = true
+
+[LoginRateLimit]
+MaxFailuresPerIp = 10
+BanDurationMinutes = [15, 60, 1440, -1]
+CooldownDays = 3
+
+[AdminRateLimit]
+MaxFailuresFirstBan = 5
+FirstBanDurationSeconds = 30
+MaxFailuresSecondBan = 20
+SecondBanDurationHours = 24
+
+[InviteCode]
+ServerPepper = "${server_pepper}"
+MaxFailuresPerIp = 20
+BanDurationHours = 48
+EmailCodeBanDurationHours = 24
+UsernameCheckMaxPerHourPerIp = 100
+MaxRedemptions = 10
+DefaultLifetimeHours = 168
+
+[Seeds.DefaultAdmin]
+Email = "${seed_admin_email}"
+Password = "${seed_admin_password}"
+DisplayName = "${seed_admin_display_name}"
+
+[Seeds.DefaultUser]
+Email = "${seed_user_email}"
+Password = "${seed_user_password}"
+DisplayName = "${seed_user_display_name}"
+
+[Seeds.DefaultMax]
+Email = "${seed_max_email}"
+Password = "${seed_max_password}"
+DisplayName = "${seed_max_display_name}"
+
+[UserToken]
+DefaultLifetimeDays = 60
+
+[ConfirmationRateLimit]
+MaxFailures = 10
+BanDurationHours = 24
+
+[Mfa]
+RelyingPartyId = "${relying_party_id}"
+RelyingPartyName = "Pylaios"
+Origins = ${mfa_origins}
+ChallengeLifetimeMinutes = 5
+RequireForAdmin = ${mfa_require_for_admin}
+RequireWebAuthnForMax = ${mfa_require_webauthn_for_max}

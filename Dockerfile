@@ -37,6 +37,7 @@ COPY --from=backend /app /opt/pylai
 ARG PYLAI_VERSION
 ARG PYLAI_DB_SCHEMA
 COPY OS/pylai.example.toml /opt/pylai/pylai.example.toml
+COPY OS/pylai.template.toml /opt/pylai/pylai.template.toml
 COPY dev/entrypoint.sh /usr/local/bin/pylai-dev-entrypoint
 COPY dev/nginx.conf /etc/nginx/sites-available/pylai-dev
 COPY dev/supervisord.conf /etc/supervisor/conf.d/pylai.conf
