@@ -11,6 +11,8 @@
 #        mkdir -p config/certs
 #   2) 生成签名证书后放入 config/certs/（entrypoint 会将其复制到数据卷）。
 #   3) 容器内 Pylaios 以 pylai 用户运行，配置目录只读挂载；数据落在 appdata 命名卷。
+#      PYLAI_DB_PASSWORD / PYLAI_REDIS_PASSWORD 必须显式提供（无默认值，弱默认值会被
+#      entrypoint Fail Closed 拒绝启动）。
 #
 # 本配置为演示/可选部署：TLS 由主机 Nginx 或云负载均衡负责（ManagePylai.py 可生成主机 Nginx 模板）。
 
@@ -25,14 +27,14 @@ services:
       PYLAI_ROLE: server
       PYLAI_UI_URL: ${PYLAI_UI_URL:-http://localhost:8080}
       PYLAI_DB_USER: ${PYLAI_DB_USER:-pylai}
-      PYLAI_DB_PASSWORD: ${PYLAI_DB_PASSWORD:-change-me}
+      PYLAI_DB_PASSWORD: ${PYLAI_DB_PASSWORD:?请在环境变量或 .env 中设置 PYLAI_DB_PASSWORD}
       PYLAI_DB_NAME: ${PYLAI_DB_NAME:-pylai}
-      PYLAI_REDIS_PASSWORD: ${PYLAI_REDIS_PASSWORD:-change-me}
+      PYLAI_REDIS_PASSWORD: ${PYLAI_REDIS_PASSWORD:?请在环境变量或 .env 中设置 PYLAI_REDIS_PASSWORD}
     ports:
       - "${PYLAI_PUBLIC_PORT:-80}:80"
       - "127.0.0.1:${PYLAI_API_PORT:-5000}:5000"
     volumes:
-      - ./config:/etc/pylai
+      - ./config:/etc/pylai:ro
       - appdata:/var/lib/pylai
       - appdata-pg:/var/lib/postgresql
 

@@ -242,7 +242,7 @@ public class LoggingConfig
 {
     public string DefaultLevel { get; set; } = "Information";
     public string MicrosoftAspNetCoreLevel { get; set; } = "Warning";
-    public string PylaiosLevel { get; set; } = "Debug";
+    public string PylaiosLevel { get; set; } = "Information";
 }
 
 [ConfigFile("pylai.toml")]

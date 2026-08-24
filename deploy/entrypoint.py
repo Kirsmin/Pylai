@@ -38,11 +38,18 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return result
 
 # ============ 阶段 1: 环境检查 ============
+# 已知弱默认值：命中即拒绝启动（Fail Closed），杜绝示例密码进入生产
+WEAK_SECRETS = {"change-me", "changeme", "password", "secret", "123456", "pylai"}
+
 def check_env() -> None:
     required = ["PYLAI_DB_USER", "PYLAI_DB_PASSWORD", "PYLAI_DB_NAME", "PYLAI_REDIS_PASSWORD"]
     for var in required:
         if not os.environ.get(var):
             fatal(f"{var} is required")
+    for var in ("PYLAI_DB_PASSWORD", "PYLAI_REDIS_PASSWORD"):
+        value = os.environ[var].strip().lower()
+        if value in WEAK_SECRETS:
+            fatal(f"{var} 为已知默认/弱值，拒绝启动。请改为随机生成的强密码")
 
 # ============ 阶段 2: 配置重映射 ============
 def remap_config() -> None:

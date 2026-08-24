@@ -195,6 +195,10 @@ jobs:
         run: |
           set -euo pipefail
           docker image inspect pylai-dev:latest --format '{{json .Config.ExposedPorts}}' | grep -q '80' || exit 1
+          # 根 compose 演示文件：配置目录必须只读挂载、秘密不得有默认值
+          grep -q './config:/etc/pylai:ro' docker-compose.yml || { echo "==> docker-compose.yml 缺少 /etc/pylai:ro"; exit 1; }
+          # 仅拦截 :-默认值 形式（:?必填报错形式是预期写法）
+          ! grep -Eq '\$\{PYLAI_(DB|REDIS)_PASSWORD:-' docker-compose.yml || { echo "==> docker-compose.yml 秘密存在默认值"; exit 1; }
           docker run --rm --entrypoint sh pylai-dev:latest -c '
             set -e
             grep -q "user = pylai" /etc/supervisor/conf.d/pylai.conf
@@ -226,6 +230,14 @@ jobs:
           done
 
           curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
+
+          # 运行时进程用户断言（比配置文件 grep 更强）：backend=pylai、redis=redis
+          TOP=$(docker top smoke -o user,args)
+          echo "$TOP" | grep -Eq '^pylai[[:space:]].*Pylaios serve' \
+            || { echo "==> backend 未以 pylai 用户运行"; echo "$TOP"; exit 1; }
+          echo "$TOP" | grep -Eq '^redis[[:space:]].*redis-server' \
+            || { echo "==> redis-server 未以 redis 用户运行"; echo "$TOP"; exit 1; }
+          echo "==> 进程用户断言 OK（backend=pylai, redis=redis）"
 
           SECRETS=$(docker exec smoke cat /var/lib/pylai/.secrets)
           USER_PW=$(awk -F= '/^USER_PASSWORD=/{gsub(/'"'"'/,"",$2); print $2; exit}' <<< "$SECRETS")

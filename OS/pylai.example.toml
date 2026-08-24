@@ -244,11 +244,12 @@ Poeat Team.
 - 如果频繁收到此邮件，请联系管理员。
 '''
 
-# 日志级别
+# 日志级别（生产默认 Information；排障时临时调高 Debug/Trace，勿长期开启——
+# Debug 及以下会记录 UID、邮箱、IP 等认证流程元数据）
 [Logging]
-DefaultLevel = "Debug"
+DefaultLevel = "Information"
 MicrosoftAspNetCoreLevel = "Warning"
-PylaiosLevel = "Trace"
+PylaiosLevel = "Information"
 
 # Token 清理（OpenIddict Quartz 后台任务，定期清除过期 token）
 [TokenCleanup]
