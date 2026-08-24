@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api } from '@/utils/api'
+import { api, ensureCsrfToken } from '@/utils/api'
 export { API_BASE, apiFetch } from '@/utils/api'
 
 export interface User {
@@ -28,6 +28,7 @@ export const useAuthStore = defineStore('auth', () => {
   // by the authentication cookie and never by local/sessionStorage.
   function login(userData: User, _remember = false) {
     user.value = userData
+    void ensureCsrfToken()
   }
 
   async function logout() {
@@ -48,6 +49,7 @@ export const useAuthStore = defineStore('auth', () => {
         signal: controller.signal
       })
       user.value = data.user
+      await ensureCsrfToken()
       return true
     } catch (err) {
       // Fail Closed: network errors, timeout, 401, and revoked cookies all become signed-out state.

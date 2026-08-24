@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { NButton, NDivider } from 'naive-ui'
-import { api, apiFetch } from '@/utils/api'
+import { api, apiFetch, csrfHeaders } from '@/utils/api'
 
 const props = defineProps<{ initialError?: string }>()
 const providers = ref<string[]>([])
@@ -19,7 +19,7 @@ onMounted(async () => {
 async function start(provider: string) {
   error.value = ''
   try {
-    const res = await apiFetch('/api/auth/external-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) })
+    const res = await apiFetch('/api/auth/external-login', { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrfHeaders() }, body: JSON.stringify({ provider }) })
     const location = res.headers.get('location')
     if (location) { window.location.href = location; return }
     const data = await res.json().catch(() => null)

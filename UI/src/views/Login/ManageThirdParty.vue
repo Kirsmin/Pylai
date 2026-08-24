@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { NAlert, NButton, NPopconfirm, NSpin } from 'naive-ui'
-import { api, apiFetch } from '@/utils/api'
+import { api, apiFetch, csrfHeaders } from '@/utils/api'
 
 interface ThirdPartyLogin { provider: string; displayName: string; boundAt: string }
 defineEmits<{ back: [] }>()
@@ -26,7 +26,7 @@ function isBound(provider: string) { return logins.value.some(l => l.provider.to
 async function bind(provider: string) {
   error.value = ''
   try {
-    const res = await apiFetch('/api/auth/external-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider }) })
+    const res = await apiFetch('/api/auth/external-login', { method: 'POST', headers: { 'Content-Type': 'application/json', ...csrfHeaders() }, body: JSON.stringify({ provider }) })
     const location = res.headers.get('location')
     if (location) { window.location.href = location; return }
     const body = await res.json().catch(() => null); error.value = body?.error || '无法发起绑定'

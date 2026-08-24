@@ -30,6 +30,49 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   })
 }
 
+// Cookie-CSRF（双提交）：经 Pylaios.Auth Cookie 发起的状态修改请求必须附带 X-CSRF-Token，
+// token 由 GET /api/auth/csrf 签发（可读 Cookie Pylaios.Csrf）；Bearer UserToken 路径不受影响。
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+const CSRF_COOKIE_PATTERN = /(?:^|;\s*)Pylaios\.Csrf=([^;]*)/
+
+function readCsrfToken(): string | null {
+  const match = document.cookie.match(CSRF_COOKIE_PATTERN)?.[1]
+  return match ? decodeURIComponent(match) : null
+}
+
+/** 确保存在 CSRF Cookie（仅在已认证会话下有意义；失败静默，由 403 自愈兜底）。 */
+export async function ensureCsrfToken(): Promise<void> {
+  try {
+    await apiFetch('/api/auth/csrf')
+  } catch {
+    // 忽略：匿名状态下无需 CSRF token
+  }
+}
+
+/** 手工构造 fetch（如需自行处理 302）时附带 CSRF 头；匿名状态返回空对象。 */
+export function csrfHeaders(): Record<string, string> {
+  const token = readCsrfToken()
+  return token ? { 'X-CSRF-Token': token } : {}
+}
+
+async function performRequest(path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers)
+  if (init?.body !== undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (UNSAFE_METHODS.has((init?.method ?? 'GET').toUpperCase())) {
+    const token = readCsrfToken()
+    if (token) headers.set('X-CSRF-Token', token)
+  }
+  return apiFetch(path, { ...init, headers })
+}
+
+async function isCsrfChallenge(res: Response, method: string | undefined): Promise<boolean> {
+  if (res.status !== 403 || !UNSAFE_METHODS.has((method ?? 'GET').toUpperCase())) return false
+  const probe = await readEnvelope(res.clone())
+  return probe?.errorCode === 'csrf_invalid'
+}
+
 async function readEnvelope(res: Response): Promise<ApiEnvelope | null> {
   const text = await res.text()
   if (!text) return null
@@ -42,11 +85,13 @@ async function readEnvelope(res: Response): Promise<ApiEnvelope | null> {
 }
 
 export async function api<T = ApiEnvelope>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers)
-  if (init?.body !== undefined && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json')
+  let res = await performRequest(path, init)
+
+  // 自愈：CSRF Cookie 缺失/过期时补签一次并重放（仅一次）
+  if (await isCsrfChallenge(res, init?.method)) {
+    await ensureCsrfToken()
+    res = await performRequest(path, init)
   }
-  const res = await apiFetch(path, { ...init, headers })
 
   // Keep explicit redirect semantics for OAuth/external-login flows when fetch() uses redirect=manual.
   if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
