@@ -232,11 +232,16 @@ jobs:
           curl -sf --max-time 5 -o /dev/null http://localhost:8080/ || { echo "UI 不可访问"; exit 1; }
 
           # 运行时进程用户断言（比配置文件 grep 更强）：backend=pylai、redis=redis
-          TOP=$(docker top smoke -o user,args)
-          echo "$TOP" | grep -Eq '^pylai[[:space:]].*Pylaios serve' \
-            || { echo "==> backend 未以 pylai 用户运行"; echo "$TOP"; exit 1; }
-          echo "$TOP" | grep -Eq '^redis[[:space:]].*redis-server' \
-            || { echo "==> redis-server 未以 redis 用户运行"; echo "$TOP"; exit 1; }
+          # docker top 的 USER 列由宿主机 passwd 解析（runner 无 pylai/redis 用户会显示数字），
+          # 故先取容器内 UID 再按数值断言；ps 输出必须含 PID 列，且行首为 PID
+          PYLAI_UID=$(docker exec smoke id -u pylai)
+          REDIS_UID=$(docker exec smoke id -u redis)
+          TOP=$(docker top smoke -o pid,user,args)
+          echo "$TOP"
+          echo "$TOP" | awk -v u="$PYLAI_UID" 'NR>1 && $2==u && $0~/Pylaios serve/ {ok=1} END {exit !ok}' \
+            || { echo "==> backend 未以 pylai(uid=$PYLAI_UID) 用户运行"; exit 1; }
+          echo "$TOP" | awk -v u="$REDIS_UID" 'NR>1 && $2==u && $0~/redis-server/ {ok=1} END {exit !ok}' \
+            || { echo "==> redis-server 未以 redis(uid=$REDIS_UID) 用户运行"; exit 1; }
           echo "==> 进程用户断言 OK（backend=pylai, redis=redis）"
 
           SECRETS=$(docker exec smoke cat /var/lib/pylai/.secrets)
