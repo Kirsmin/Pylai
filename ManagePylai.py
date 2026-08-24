@@ -15,8 +15,11 @@ import platform as host_platform
 import re
 import secrets
 import shutil
+import socket
+import string
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
@@ -26,6 +29,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from string import Template
 from typing import Any, Literal, Self, TypeVar
@@ -2974,6 +2978,781 @@ class SecurityService:
         )
 
 
+# ============================================================================
+# 网页配置编辑器（config web-edit / 主菜单 [7] 置顶入口）
+# ============================================================================
+def find_free_port() -> int:
+    """获取一个 127.0.0.1 上当前无占用的端口。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def generate_editor_password() -> str:
+    """临时密码：前四位大写字母，后四位数字，例如 PAHE-0123。"""
+    letters = "".join(secrets.choice(string.ascii_uppercase) for _ in range(4))
+    digits = "".join(secrets.choice(string.digits) for _ in range(4))
+    return f"{letters}-{digits}"
+
+
+def editor_value_kind(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    return "string"
+
+
+def serialize_editor_value(change: Json) -> str:
+    """把网页端提交的 JSON 值序列化为 TOML 字面量。"""
+    kind = change.get("type")
+    value = change.get("value")
+
+    if kind == "boolean":
+        return "true" if value else "false"
+    if kind == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ManageError(f"数值类型非法: {value!r}")
+        return str(value)
+    if kind == "array":
+        items = value if isinstance(value, list) else []
+        parts = [
+            str(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else toml_str(str(x))
+            for x in items
+        ]
+        return f"[{', '.join(parts)}]"
+    return toml_str("" if value is None else str(value))
+
+
+def strip_multiline_value(text: str, marker: str, key: str) -> str:
+    """替换多行字符串（''' / \"\"\"）前，先移除其续行，避免残留导致 TOML 非法。"""
+    try:
+        start, end = _toml_section_span(text, marker)
+    except ValueError:
+        return text
+
+    block = text[start:end]
+    lines = block.splitlines(keepends=True)
+    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=\s*(?P<rhs>.*)$")
+
+    for index, line in enumerate(lines):
+        match = key_re.match(line)
+        if not match:
+            continue
+        rhs = match.group("rhs")
+        opener = re.match(r"^('''|\"\"\")", rhs)
+        if not opener or opener.group(1) in rhs[3:]:
+            return text  # 单行值，无需处理
+        quote = opener.group(1)
+        for tail in range(index + 1, len(lines)):
+            if quote in lines[tail]:
+                del lines[index + 1 : tail + 1]
+                break
+        return text[:start] + "".join(lines) + text[end:]
+
+    return text
+
+
+class ConfigEditorServer(ThreadingHTTPServer):
+    """仅监听 127.0.0.1 的一次性配置编辑器服务。"""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, port: int, password: str) -> None:
+        self.password = password
+        self.token = secrets.token_hex(16)
+        super().__init__(("127.0.0.1", port), ConfigEditorHandler)
+
+
+class ConfigEditorHandler(BaseHTTPRequestHandler):
+    server: ConfigEditorServer  # type: ignore[assignment]
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass
+
+    # ---- 基础工具 ----
+    def _send_json(self, payload: Json, status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self) -> Json:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 1 << 20:
+            raise ManageError("请求体过大")
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ManageError(f"请求不是合法 JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ManageError("请求体必须是 JSON 对象")
+        return data
+
+    def _authorized(self) -> bool:
+        return self.headers.get("Authorization") == f"Bearer {self.server.token}"
+
+    # ---- 路由 ----
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+
+        if path in ("/", "/index.html"):
+            body = CONFIG_EDITOR_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/config":
+            if not self._authorized():
+                self._send_json({"error": "未授权"}, 401)
+                return
+            try:
+                self._send_json(self._config_payload())
+            except ManageError as exc:
+                self._send_json({"error": str(exc)}, 500)
+            return
+
+        self._send_json({"error": "Not Found"}, 404)
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+
+        try:
+            data = self._read_json()
+        except ManageError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+
+        if path == "/api/auth":
+            if secrets.compare_digest(str(data.get("password", "")), self.server.password):
+                self._send_json({"token": self.server.token})
+            else:
+                time.sleep(0.5)  # 减缓口令爆破
+                self._send_json({"error": "临时密码错误"}, 401)
+            return
+
+        if path == "/api/save":
+            if not self._authorized():
+                self._send_json({"error": "未授权"}, 401)
+                return
+            try:
+                preview = self._apply_changes(data.get("changes"))
+            except ManageError as exc:
+                self._send_json({"error": str(exc)}, 400)
+                return
+            self._send_json({"ok": True, "preview": preview})
+            return
+
+        self._send_json({"error": "Not Found"}, 404)
+
+    # ---- 业务 ----
+    def _config_payload(self) -> Json:
+        if not CONFIG_FILE.is_file():
+            raise ManageError("配置文件不存在")
+
+        text = CONFIG_FILE.read_text(encoding="utf-8")
+        try:
+            parsed = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ManageError(f"配置解析失败: {exc}") from exc
+
+        sections: list[Json] = []
+
+        def visit(path: str, table: Json) -> None:
+            entries = []
+            for key, value in table.items():
+                if isinstance(value, dict):
+                    continue
+                entries.append({
+                    "key": key,
+                    "type": editor_value_kind(value),
+                    "value": value,
+                    "secret": bool(re.search(r"Password|Secret|ConnectionString", key, re.IGNORECASE)),
+                })
+            if entries:
+                sections.append({"name": path, "entries": entries})
+            for key, value in table.items():
+                if isinstance(value, dict):
+                    visit(f"{path}.{key}" if path else key, value)
+
+        for key, value in parsed.items():
+            if isinstance(value, dict):
+                visit(key, value)
+
+        return {
+            "path": str(CONFIG_FILE),
+            "sections": sections,
+            "preview": mask_config_text(text),
+        }
+
+    def _apply_changes(self, changes: Any) -> str:
+        if not CONFIG_FILE.is_file():
+            raise ManageError("配置文件不存在")
+        if not isinstance(changes, list) or not changes:
+            raise ManageError("没有需要提交的变更")
+        if len(changes) > 500:
+            raise ManageError("单次变更过多")
+
+        text = CONFIG_FILE.read_text(encoding="utf-8")
+        t = TomlText(text)
+
+        for change in changes:
+            if not isinstance(change, dict):
+                raise ManageError("变更格式非法")
+            section = str(change.get("section", ""))
+            key = str(change.get("key", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*", section):
+                raise ManageError(f"非法的配置段落: {section!r}")
+            if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+                raise ManageError(f"非法的配置键: {key!r}")
+
+            marker = f"[{section}]"
+            t.text = strip_multiline_value(t.text, marker, key)
+            t.set(marker, key, serialize_editor_value(change), required=True)
+
+        new_text = str(t)
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ManageError(f"变更后配置不是合法 TOML，已放弃写入: {exc}") from exc
+
+        atomic_write(CONFIG_FILE, new_text)
+        return mask_config_text(new_text)
+
+
+
+CONFIG_EDITOR_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pylai 配置编辑器</title>
+<style>
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --border: #e4e7ec;
+  --text: #1d2433;
+  --muted: #667085;
+  --accent: #3b6ef6;
+  --accent-soft: #eef3fe;
+  --danger: #d92d20;
+  --radius: 12px;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+button { font: inherit; cursor: pointer; }
+
+/* ---------- 密码验证 ---------- */
+#gate {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+  z-index: 50;
+}
+.gate-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px 44px;
+  text-align: center;
+  box-shadow: 0 12px 40px rgba(16, 24, 40, .08);
+}
+.gate-card h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+.gate-card p { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+.code-row { display: flex; gap: 8px; align-items: center; justify-content: center; }
+.code-row input {
+  width: 44px; height: 54px;
+  font-size: 22px; font-family: var(--mono);
+  text-align: center; text-transform: uppercase;
+  border: 1.5px solid var(--border); border-radius: 10px;
+  outline: none; transition: border-color .15s, box-shadow .15s;
+  background: #fbfcfd;
+}
+.code-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.code-dash { color: var(--muted); font-size: 20px; }
+#gate-btn {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: none; background: var(--accent); color: #fff;
+  font-size: 18px; margin-left: 10px;
+  display: none; align-items: center; justify-content: center;
+  transition: transform .15s, background .15s;
+}
+#gate-btn:hover { transform: scale(1.06); background: #2f5de0; }
+#gate-err { color: var(--danger); font-size: 13px; margin-top: 16px; min-height: 18px; }
+.shake { animation: shake .3s; }
+@keyframes shake {
+  25% { transform: translateX(-6px); } 50% { transform: translateX(6px); } 75% { transform: translateX(-4px); }
+}
+
+/* ---------- 主界面 ---------- */
+#app { display: none; flex-direction: column; height: 100vh; }
+.topbar {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+  padding: 0 20px; height: 52px; flex: none;
+}
+.brand { font-weight: 600; font-size: 15px; margin-right: 16px; }
+.brand span { color: var(--accent); }
+.tab {
+  border: none; background: none; color: var(--muted);
+  padding: 6px 14px; border-radius: 8px; font-size: 14px;
+  transition: background .15s, color .15s;
+}
+.tab:hover { background: var(--bg); color: var(--text); }
+.tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.topbar .spacer { flex: 1; }
+#dirty-dot { color: #f79009; font-size: 12px; display: none; }
+#submit-btn {
+  border: none; background: var(--accent); color: #fff;
+  padding: 7px 20px; border-radius: 8px; font-size: 14px;
+  transition: background .15s, opacity .15s;
+}
+#submit-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.main { display: flex; flex: 1; min-height: 0; }
+
+/* 目录 */
+#sidebar {
+  width: 220px; flex: none; background: var(--panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 12px 8px;
+}
+#sidebar h2 { font-size: 12px; color: var(--muted); padding: 6px 12px; font-weight: 500; }
+.sec-item {
+  display: block; width: 100%; text-align: left;
+  border: none; background: none; border-radius: 8px;
+  padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
+  color: var(--text); transition: background .12s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sec-item:hover { background: var(--bg); }
+.sec-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.sec-item .badge { float: right; font-size: 11px; color: #f79009; }
+
+/* 编辑区 */
+#editor { flex: 1; overflow-y: auto; padding: 24px 32px; min-width: 0; }
+#editor h2 { font-size: 17px; margin-bottom: 4px; font-family: var(--mono); }
+#editor .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 20px; }
+.field {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px;
+  transition: border-color .15s;
+}
+.field.changed { border-color: #f79009; }
+.field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.field label .type { font-size: 11px; color: var(--muted); font-weight: 400; font-family: var(--mono); }
+.field label .secret-tag { font-size: 11px; color: var(--danger); background: #fef3f2; padding: 1px 7px; border-radius: 6px; }
+.field input[type=text], .field input[type=number], .field input[type=password], .field textarea, .field select {
+  width: 100%; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
+  outline: none; background: #fbfcfd; transition: border-color .15s, box-shadow .15s;
+}
+.field textarea { min-height: 120px; resize: vertical; line-height: 1.6; }
+.field input:focus, .field textarea:focus, .field select:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: #fff;
+}
+.empty { color: var(--muted); font-size: 14px; padding: 40px; text-align: center; }
+
+/* 预览 */
+#preview {
+  width: 400px; flex: none; background: #101828;
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; min-height: 0;
+}
+#preview h2 {
+  font-size: 12px; color: #98a2b3; font-weight: 500;
+  padding: 12px 16px; border-bottom: 1px solid #1d2939; flex: none;
+}
+#preview pre {
+  flex: 1; overflow: auto; padding: 14px 16px;
+  color: #d1d5db; font-size: 12px; font-family: var(--mono); line-height: 1.7;
+  white-space: pre-wrap; word-break: break-all;
+}
+
+/* 弹窗 */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(16,24,40,.45);
+  display: none; align-items: center; justify-content: center; z-index: 40;
+}
+.modal {
+  background: var(--panel); border-radius: 16px; width: 560px; max-width: 92vw;
+  max-height: 80vh; display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(16,24,40,.25);
+}
+.modal h3 { padding: 20px 24px 0; font-size: 16px; }
+.modal .body { padding: 16px 24px; overflow-y: auto; flex: 1; }
+.diff-item {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; margin-bottom: 10px; font-size: 13px;
+}
+.diff-item .k { font-family: var(--mono); font-weight: 600; margin-bottom: 6px; }
+.diff-item .old { color: var(--danger); text-decoration: line-through; word-break: break-all; }
+.diff-item .new { color: #027a48; word-break: break-all; }
+.diff-item .old, .diff-item .new { font-family: var(--mono); font-size: 12px; display: block; }
+.modal .foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 20px; }
+.btn { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 18px; font-size: 14px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: #2f5de0; }
+
+#toast {
+  position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
+  background: #101828; color: #fff; padding: 10px 22px; border-radius: 10px;
+  font-size: 13.5px; display: none; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+}
+#status-modal .body p { font-size: 13.5px; margin-bottom: 10px; color: var(--text); }
+#status-modal .body b { font-family: var(--mono); font-weight: 600; }
+@media (max-width: 1000px) { #preview { display: none; } }
+@media (max-width: 720px) { #sidebar { display: none; } }
+</style>
+</head>
+<body>
+
+<!-- 临时密码验证 -->
+<div id="gate">
+  <div class="gate-card" id="gate-card">
+    <h1>Pylai 配置编辑器</h1>
+    <p>验证临时密码</p>
+    <div class="code-row" id="code-row">
+      <input maxlength="1" autocomplete="off"><input maxlength="1" autocomplete="off">
+      <input maxlength="1" autocomplete="off"><input maxlength="1" autocomplete="off">
+      <span class="code-dash">-</span>
+      <input maxlength="1" autocomplete="off"><input maxlength="1" autocomplete="off">
+      <input maxlength="1" autocomplete="off"><input maxlength="1" autocomplete="off">
+      <button id="gate-btn" title="验证">&#10140;</button>
+    </div>
+    <div id="gate-err"></div>
+  </div>
+</div>
+
+<!-- 编辑器主界面 -->
+<div id="app">
+  <div class="topbar">
+    <div class="brand">Pylai <span>配置编辑器</span></div>
+    <button class="tab active" data-tab="catalog">目录</button>
+    <button class="tab" data-tab="editor">编辑器</button>
+    <button class="tab" data-tab="status">状态</button>
+    <div class="spacer"></div>
+    <span id="dirty-dot">&#9679; 有未提交变更</span>
+    <button id="submit-btn" disabled>提交</button>
+  </div>
+  <div class="main">
+    <aside id="sidebar"><h2>目录</h2><div id="sec-list"></div></aside>
+    <section id="editor"><div class="empty">正在加载配置…</div></section>
+    <aside id="preview"><h2>配置文件预览（脱敏）</h2><pre id="preview-pre"></pre></aside>
+  </div>
+</div>
+
+<!-- 提交确认弹窗 -->
+<div class="modal-mask" id="diff-modal">
+  <div class="modal">
+    <h3>确认以下变更</h3>
+    <div class="body" id="diff-body"></div>
+    <div class="foot">
+      <button class="btn" id="diff-cancel">取消</button>
+      <button class="btn primary" id="diff-confirm">确认提交</button>
+    </div>
+  </div>
+</div>
+
+<!-- 状态弹窗 -->
+<div class="modal-mask" id="status-modal">
+  <div class="modal">
+    <h3>状态</h3>
+    <div class="body" id="status-body"></div>
+    <div class="foot"><button class="btn" id="status-close">关闭</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+let token = null;
+let configData = null;          // { sections, preview, path }
+let original = new Map();       // "Section.Key" -> value
+let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret}
+let activeSection = null;
+
+/* ---------- 临时密码 ---------- */
+const boxes = [...document.querySelectorAll("#code-row input")];
+const gateBtn = $("#gate-btn");
+
+boxes.forEach((box, i) => {
+  box.addEventListener("input", () => {
+    box.value = box.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (box.value && i < boxes.length - 1) boxes[i + 1].focus();
+    gateBtn.style.display = boxes.every(b => b.value) ? "inline-flex" : "none";
+  });
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Backspace" && !box.value && i > 0) boxes[i - 1].focus();
+    if (e.key === "Enter" && boxes.every(b => b.value)) doAuth();
+  });
+  box.addEventListener("paste", (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData.getData("text") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    [...text].slice(0, 8).forEach((ch, j) => { if (boxes[j]) boxes[j].value = ch; });
+    boxes[Math.min(text.length, 7)].focus();
+    gateBtn.style.display = boxes.every(b => b.value) ? "inline-flex" : "none";
+  });
+});
+boxes[0].focus();
+gateBtn.addEventListener("click", doAuth);
+
+async function doAuth() {
+  const password = boxes.slice(0, 4).map(b => b.value).join("") + "-" + boxes.slice(4).map(b => b.value).join("");
+  try {
+    const res = await fetch("/api/auth", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "验证失败");
+    token = data.token;
+    $("#gate").style.display = "none";
+    $("#app").style.display = "flex";
+    document.title = "Pylai 配置编辑器";
+    await loadConfig();
+  } catch (err) {
+    $("#gate-err").textContent = err.message;
+    $("#gate-card").classList.remove("shake");
+    void $("#gate-card").offsetWidth;
+    $("#gate-card").classList.add("shake");
+    boxes.forEach(b => b.value = "");
+    gateBtn.style.display = "none";
+    boxes[0].focus();
+  }
+}
+
+/* ---------- 数据加载 ---------- */
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, ...(options.headers || {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("请求失败: " + res.status));
+  return data;
+}
+
+async function loadConfig() {
+  configData = await api("/api/config");
+  original.clear(); edits.clear();
+  for (const sec of configData.sections)
+    for (const e of sec.entries)
+      original.set(sec.name + "." + e.key, e.value);
+  activeSection = configData.sections[0]?.name ?? null;
+  renderSidebar(); renderEditor(); renderPreview(); refreshDirty();
+}
+
+/* ---------- 序列化（与服务端 TomlText 一致） ---------- */
+function serialize(type, value) {
+  if (type === "boolean") return value ? "true" : "false";
+  if (type === "number") return String(value);
+  if (type === "array") {
+    return "[" + value.map(x => (typeof x === "number") ? String(x) : JSON.stringify(String(x))).join(", ") + "]";
+  }
+  return JSON.stringify(String(value));
+}
+function displayValue(v, secret) {
+  if (secret) return '"***"';
+  if (typeof v === "string") return JSON.stringify(v);
+  return Array.isArray(v) ? "[" + v.join(", ") + "]" : String(v);
+}
+
+/* ---------- 目录 ---------- */
+function renderSidebar() {
+  const list = $("#sec-list");
+  list.innerHTML = "";
+  for (const sec of configData.sections) {
+    const btn = document.createElement("button");
+    btn.className = "sec-item" + (sec.name === activeSection ? " active" : "");
+    const changed = sec.entries.some(e => edits.has(sec.name + "." + e.key));
+    btn.innerHTML = escapeHtml("[" + sec.name + "]") + (changed ? '<span class="badge">●</span>' : "");
+    btn.onclick = () => { activeSection = sec.name; renderSidebar(); renderEditor(); setTab("editor"); };
+    list.appendChild(btn);
+  }
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+/* ---------- 表单编辑 ---------- */
+function renderEditor() {
+  const sec = configData.sections.find(s => s.name === activeSection);
+  const box = $("#editor");
+  if (!sec) { box.innerHTML = '<div class="empty">没有可编辑的配置段落</div>'; return; }
+  box.innerHTML = "<h2>[" + escapeHtml(sec.name) + "]</h2>" +
+    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改后点击右上角「提交」</div>';
+  for (const entry of sec.entries) {
+    const id = sec.name + "." + entry.key;
+    const current = edits.has(id) ? edits.get(id).value : entry.value;
+    const field = document.createElement("div");
+    field.className = "field" + (edits.has(id) ? " changed" : "");
+    field.dataset.id = id;
+    const label = '<label><span>' + escapeHtml(entry.key) + "</span>" +
+      '<span class="type">' + entry.type + "</span>" +
+      (entry.secret ? '<span class="secret-tag">敏感</span>' : "") + "</label>";
+    let control = "";
+    if (entry.type === "boolean") {
+      control = '<select><option value="true"' + (current ? " selected" : "") + '>true</option>' +
+        '<option value="false"' + (!current ? " selected" : "") + ">false</option></select>";
+    } else if (entry.type === "number") {
+      control = '<input type="number" step="any" value="' + escapeHtml(String(current)) + '">';
+    } else if (entry.type === "array") {
+      control = '<input type="text" value="' + escapeHtml(current.join(", ")) + '" placeholder="以英文逗号分隔">';
+    } else if (typeof current === "string" && current.includes("\n")) {
+      control = "<textarea>" + escapeHtml(current) + "</textarea>";
+    } else {
+      control = '<input type="' + (entry.secret ? "password" : "text") + '" value="' + escapeHtml(String(current)) + '">';
+    }
+    field.innerHTML = label + control;
+    const input = field.querySelector("input,select,textarea");
+    input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
+    input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
+    box.appendChild(field);
+  }
+}
+
+function onEdit(section, entry, raw) {
+  const id = section + "." + entry.key;
+  let value;
+  if (entry.type === "boolean") value = raw === "true";
+  else if (entry.type === "number") value = raw === "" ? 0 : Number(raw);
+  else if (entry.type === "array") {
+    const parts = raw.split(",").map(s => s.trim()).filter(s => s !== "");
+    const numeric = Array.isArray(entry.value) && entry.value.every(x => typeof x === "number");
+    value = numeric ? parts.map(Number).filter(n => !Number.isNaN(n)) : parts;
+  } else value = raw;
+
+  if (JSON.stringify(value) === JSON.stringify(original.get(id))) edits.delete(id);
+  else edits.set(id, { section, key: entry.key, type: entry.type, value, secret: entry.secret });
+
+  const field = document.querySelector('.field[data-id="' + CSS.escape(id) + '"]');
+  if (field) field.classList.toggle("changed", edits.has(id));
+  renderSidebar(); renderPreview(); refreshDirty();
+}
+
+/* ---------- 预览（在脱敏原文上打补丁） ---------- */
+function patchPreview(text, section, key, serialized) {
+  const lines = text.split("\n");
+  let inSec = false;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*\[([^\]]+)\]\s*$/);
+    if (m) { inSec = m[1].trim() === section; continue; }
+    if (!inSec) continue;
+    const km = lines[i].match(new RegExp("^(\\s*" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*=\\s*)(.*)$"));
+    if (!km) continue;
+    const rhs = km[2];
+    const triple = rhs.match(/^('''|\"\"\")/);
+    let end = i;
+    if (triple && rhs.indexOf(triple[1], 3) === -1) {
+      for (let j = i + 1; j < lines.length; j++) { end = j; if (lines[j].includes(triple[1])) break; }
+    }
+    lines.splice(i, end - i + 1, km[1] + serialized);
+    return lines.join("\n");
+  }
+  return text;
+}
+
+function renderPreview() {
+  let text = configData.preview;
+  for (const e of edits.values()) {
+    const serialized = e.secret ? '"***"' : serialize(e.type, e.value);
+    text = patchPreview(text, e.section, e.key, serialized);
+  }
+  $("#preview-pre").textContent = text;
+}
+
+/* ---------- 提交 ---------- */
+function refreshDirty() {
+  const dirty = edits.size > 0;
+  $("#submit-btn").disabled = !dirty;
+  $("#dirty-dot").style.display = dirty ? "inline" : "none";
+}
+
+$("#submit-btn").addEventListener("click", () => {
+  const body = $("#diff-body");
+  body.innerHTML = "";
+  for (const e of edits.values()) {
+    const oldV = displayValue(original.get(e.section + "." + e.key), e.secret);
+    const newV = displayValue(e.value, e.secret);
+    const div = document.createElement("div");
+    div.className = "diff-item";
+    div.innerHTML = '<div class="k">[' + escapeHtml(e.section) + "] " + escapeHtml(e.key) + "</div>" +
+      '<span class="old">' + escapeHtml(oldV) + "</span>" +
+      '<span class="new">' + escapeHtml(newV) + "</span>";
+    body.appendChild(div);
+  }
+  $("#diff-modal").style.display = "flex";
+});
+$("#diff-cancel").addEventListener("click", () => $("#diff-modal").style.display = "none");
+
+$("#diff-confirm").addEventListener("click", async () => {
+  $("#diff-modal").style.display = "none";
+  try {
+    const changes = [...edits.values()].map(e => ({ section: e.section, key: e.key, type: e.type, value: e.value }));
+    const result = await api("/api/save", { method: "POST", body: JSON.stringify({ changes }) });
+    configData.preview = result.preview;
+    edits.clear();
+    await loadConfig();
+    toast("配置已写入，重启实例后生效");
+  } catch (err) {
+    toast("提交失败：" + err.message);
+  }
+});
+
+/* ---------- 页签 / 状态 ---------- */
+function setTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+}
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => {
+  setTab(t.dataset.tab);
+  if (t.dataset.tab === "catalog") $("#sidebar").scrollIntoView();
+  if (t.dataset.tab === "editor") $("#editor").scrollIntoView();
+  if (t.dataset.tab === "status") {
+    $("#status-body").innerHTML =
+      "<p>配置文件：<b>" + escapeHtml(configData.path) + "</b></p>" +
+      "<p>段落数：<b>" + configData.sections.length + "</b></p>" +
+      "<p>未提交变更：<b>" + edits.size + "</b> 项</p>" +
+      "<p>配置以 0600 权限原子写入；修改后需重启实例生效。</p>";
+    $("#status-modal").style.display = "flex";
+  }
+}));
+$("#status-close").addEventListener("click", () => $("#status-modal").style.display = "none");
+document.querySelectorAll(".modal-mask").forEach(m =>
+  m.addEventListener("click", (e) => { if (e.target === m) m.style.display = "none"; }));
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $("#toast");
+  el.textContent = msg; el.style.display = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.style.display = "none", 3200);
+}
+</script>
+</body>
+</html>
+"""
+
+
 class ConfigService:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
@@ -2988,6 +3767,31 @@ class ConfigService:
     def edit(self) -> None:
         editor = os.environ.get("EDITOR", "nano")
         subprocess.run([editor, str(CONFIG_FILE)])
+
+    def edit_in_web(self) -> None:
+        if not CONFIG_FILE.is_file():
+            out("配置文件不存在")
+            return
+
+        port = find_free_port()
+        password = generate_editor_password()
+        server = ConfigEditorServer(port, password)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        out(f"编辑器就绪，访问 http://127.0.0.1:{port} 编辑配置文件")
+        out(f"临时密码 {password}")
+        out("（按回车键关闭编辑器并返回上级菜单）")
+
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            out()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        out("网页编辑器已关闭。")
 
     def validate(self) -> None:
         self.ctx.config.validate()
@@ -3322,6 +4126,7 @@ class InteractiveMenu:
             "修改配置",
             "主菜单",
             [
+                ("在网页编辑 ->", config_service.edit_in_web),
                 ("修改公开地址", config_service.change_url),
                 ("修改端口", config_service.change_ports),
                 ("修改 SMTP 邮件配置", config_service.change_smtp),
@@ -3445,12 +4250,14 @@ def cmd_config(ctx: AppContext, args: argparse.Namespace) -> None:
             service.view()
         case "edit":
             service.edit()
+        case "web-edit":
+            service.edit_in_web()
         case "validate":
             service.validate()
         case "generate-nginx":
             service.generate_nginx()
         case _:
-            raise ManageError("请指定 config 子命令: view / edit / validate / generate-nginx")
+            raise ManageError("请指定 config 子命令: view / edit / web-edit / validate / generate-nginx")
 
 
 def cmd_backup(ctx: AppContext, args: argparse.Namespace) -> None:
@@ -3570,6 +4377,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config_p.add_subparsers(dest="config_cmd")
     config_sub.add_parser("view", help="查看当前配置（脱敏）")
     config_sub.add_parser("edit", help="编辑 pylai.toml")
+    config_sub.add_parser("web-edit", help="在网页中编辑配置（临时密码验证）")
     config_sub.add_parser("validate", help="验证配置合法性")
     config_sub.add_parser("generate-nginx", help="生成主机 Nginx 配置模板")
 
