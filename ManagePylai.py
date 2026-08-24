@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""ManagePylai - Pylai Docker 部署管理工具。
+"""ManagePylai - Pylai Docker Compose 部署管理工具（Python 3.12+ 重构版）。
 
-仅使用 Python 标准库和 docker CLI。Release 页面同时提供
-Pylai-<version>-Linux-<arch>.tar 与本脚本，下载后放在同一目录运行即可。
+仅使用 Python 标准库和 docker CLI。
+Release 页面同时提供 Pylai-<version>-Linux-<arch>.tar 与本脚本，
+下载后放在同一目录运行即可。
 """
-from __future__ import annotations
 
+import argparse
+import getpass
+import hashlib
 import json
 import os
 import platform as host_platform
@@ -18,31 +21,58 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
-from datetime import datetime, timezone
-from pathlib import Path
-import argparse
-from string import Template
 
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from string import Template
+from typing import Any, Literal, Self, TypeVar
+from urllib.parse import urlparse
+
+
+# ============================================================================
+# 类型别名
+# ============================================================================
+type Json = dict[str, Any]
+type EnvMap = dict[str, str]
+type TarMeta = tuple[str, str]
+type ServiceName = Literal["backend", "postgres", "redis", "nginx"]
+type SmtpSecurity = Literal["SslOnConnect", "StartTls", "None"]
+type UserGroup = Literal["normal", "admin", "max"]
+type UserStatus = Literal["active", "banned"]
+
+
+# ============================================================================
+# 常量
+# ============================================================================
 APP_NAME = "Pylai"
 CONTAINER = "pylai"
-# 镜像把发布产物放在 /opt/pylai，但该目录不在容器 PATH 中，
-# 因此 docker exec 必须写完整路径（entrypoint/supervisor 均使用 /opt/pylai/Pylaios）。
 PYLAIOS_BIN = "/opt/pylai/Pylaios"
+PYLAI_CONFIG_ARG = "/etc/pylai/pylai.toml"
+
 HOME = Path(os.environ.get("PYLAI_HOME", "~/.pylai")).expanduser()
 STATE_FILE = HOME / "state.json"
 CONFIG_DIR = HOME / "config"
 CONFIG_FILE = CONFIG_DIR / "pylai.toml"
 CERT_DIR = CONFIG_DIR / "certs"
-# 容器内挂载路径（CONFIG_DIR -> /etc/pylai），写入 TOML 的证书路径必须使用该路径
 CONTAINER_CONFIG_DIR = "/etc/pylai"
 CONTAINER_CERT_DIR = f"{CONTAINER_CONFIG_DIR}/certs"
 DATA_DIR = HOME / "data"
-PG_DATA_DIR = HOME / "pgdata"
 BACKUP_DIR = HOME / "backups"
 HOST_NGINX_FILE = HOME / "host-nginx.conf"
 
 TAR_PATTERN = re.compile(r"^Pylai-(.+)-Linux-(AMD64|ARM64)\.tar$")
+BACKEND_IMAGE_RE = re.compile(
+    r"^(  backend:\s*\n(?:    .*\n)*?    image: ).*$",
+    re.MULTILINE,
+)
+SECRET_LINE = re.compile(
+    r"^(\s*[^=]*\b(?:Password|Secret|ConnectionString)\s*=\s*).*$",
+    re.IGNORECASE,
+)
+
 SUPPORTED_ARCH = {
     "x86_64": "AMD64",
     "amd64": "AMD64",
@@ -50,18 +80,1049 @@ SUPPORTED_ARCH = {
     "arm64": "ARM64",
 }
 
+GROUP_OPTIONS: list[tuple[str, str]] = [
+    ("normal — 普通用户", "normal"),
+    ("admin — 管理员", "admin"),
+    ("max — 超级管理员", "max"),
+]
+STATUS_OPTIONS: list[tuple[str, str]] = [
+    ("active — 正常", "active"),
+    ("banned — 封禁", "banned"),
+]
+
 __version__ = "1.0.0"
-MANAGER_CONFIG_FILE = HOME / "ManagerConfig.toml"
 
 
+class ManageError(Exception):
+    """统一管理错误。"""
+
+
+# ============================================================================
+# 基础工具
+# ============================================================================
+T = TypeVar("T")
+
+
+def out(message: object = "") -> None:
+    print(message, flush=True)
+
+
+def utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def ensure_home() -> None:
+    for path in (CONFIG_DIR, CERT_DIR, DATA_DIR, BACKUP_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
+    ensure_home()
+    path.write_text(content, encoding="utf-8")
+    path.chmod(mode)
+
+
+def toml_str(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def toml_list(values: Iterable[str]) -> str:
+    return f"[{', '.join(map(toml_str, values))}]"
+
+
+def mask_config_text(text: str) -> str:
+    lines = [SECRET_LINE.sub(r'\1"***"', line) for line in text.splitlines()]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def run(
+    cmd: Sequence[str | Path],
+    /,
+    *,
+    check: bool = True,
+    timeout: int | None = None,
+    stdin: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        [str(x) for x in cmd],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        input=stdin,
+    )
+
+    if check and result.returncode != 0:
+        raise ManageError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"命令失败: {' '.join(map(str, cmd))}"
+        )
+
+    return result
+
+
+def host_arch() -> str:
+    return SUPPORTED_ARCH.get(host_platform.machine().lower(), "AMD64")
+
+
+def discover_tars() -> list[Path]:
+    return sorted(p for p in Path.cwd().glob("Pylai-*.tar") if TAR_PATTERN.match(p.name))
+
+
+def parse_tar(path: Path) -> TarMeta | None:
+    if m := TAR_PATTERN.match(path.name):
+        return m.group(1), m.group(2)
+    return None
+
+
+def parse_env_file(path: Path) -> EnvMap:
+    if not path.is_file():
+        raise ManageError(f".env 文件不存在: {path}")
+
+    env: EnvMap = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip().strip('"').strip("'")
+
+    return env
+
+
+def nested_get(data: Json, key_path: str, default: Any = None) -> Any:
+    current: Any = data
+    for key in key_path.split("."):
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def as_int(value: Any, default: int) -> int:
+    with suppress(TypeError, ValueError):
+        return int(value)
+    return default
+
+
+def env_bool(value: str | None) -> bool:
+    return str(value or "").lower() in {"true", "1", "yes"}
+
+
+def split_csv(raw: str) -> list[str]:
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _toml_section_span(text: str, marker: str) -> tuple[int, int]:
+    start = text.index(marker)
+    after = start + len(marker)
+    next_section = re.search(r"(?m)^\s*\[", text[after:])
+    end = after + next_section.start() if next_section else len(text)
+    return start, end
+
+
+def replace_toml_block_value(text: str, marker: str, key: str, value: str) -> str:
+    try:
+        start, end = _toml_section_span(text, marker)
+    except ValueError as exc:
+        raise ManageError(f"未找到 TOML 段落: {marker}") from exc
+
+    block = text[start:end]
+    pattern = re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*).*$")
+
+    if pattern.search(block):
+        block = pattern.sub(lambda m: f"{m.group(1)}{value}", block, count=1)
+    else:
+        block = block.rstrip("\n") + f"\n{key} = {value}\n"
+
+    return text[:start] + block + text[end:]
+
+
+class TomlText:
+    """链式 TOML 片段修改器，取代散落各处的 set_if/replace_if 闭包。"""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def set(self, marker: str, key: str, value: str, *, required: bool = False) -> Self:
+        if required or marker in self.text:
+            self.text = replace_toml_block_value(self.text, marker, key, value)
+        return self
+
+    def set_many(self, marker: str, values: dict[str, str]) -> Self:
+        for key, value in values.items():
+            self.set(marker, key, value)
+        return self
+
+    def strip_line(self, pattern: str) -> Self:
+        self.text = re.sub(pattern, "", self.text)
+        return self
+
+    def __str__(self) -> str:
+        return self.text
+
+
+# ============================================================================
+# 交互输入
+# ============================================================================
+def ask(
+    prompt: str,
+    default: str | None = None,
+    *,
+    secret: bool = False,
+    allow_blank: bool = False,
+) -> str:
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    prompt_line = f"{prompt}{suffix}: "
+
+    while True:
+        try:
+            raw = getpass.getpass(prompt_line) if secret else input(prompt_line)
+        except (EOFError, KeyboardInterrupt):
+            out("\n已退出。")
+            raise SystemExit(0)
+
+        value = raw.strip()
+
+        if value:
+            return value
+        if default is not None:
+            return default
+        if allow_blank:
+            return ""
+
+        out("该项不能为空。")
+
+
+def ask_bool(prompt: str, default: bool = True) -> bool:
+    suffix = " [Y/n]" if default else " [y/N]"
+
+    while True:
+        value = ask(f"{prompt}{suffix}", allow_blank=True).strip().lower()
+
+        if not value:
+            return default
+        if value in {"y", "yes", "1"}:
+            return True
+        if value in {"n", "no", "0"}:
+            return False
+
+        out("请输入 y 或 n。")
+
+
+def ask_int(prompt: str, default: int, *, minimum: int = 1, maximum: int = 65535) -> int:
+    while True:
+        raw = ask(prompt, str(default))
+
+        with suppress(ValueError):
+            value = int(raw)
+            if minimum <= value <= maximum:
+                return value
+
+        out(f"请输入 {minimum}-{maximum} 之间的数字。")
+
+
+def choose(options: Sequence[tuple[str, T]], prompt: str = "请选择") -> T | None:
+    if not options:
+        out("没有可选项。")
+        return None
+
+    while True:
+        for index, (label, _) in enumerate(options, 1):
+            out(f"  [{index}] {label}")
+
+        raw = ask(prompt, "1")
+
+        with suppress(ValueError, IndexError):
+            return options[int(raw) - 1][1]
+
+        out("选择无效。\n")
+
+
+def confirm_danger(text: str, *, required_word: str = "DELETE") -> bool:
+    out(f"危险操作：{text}")
+    return ask(f"请输入 {required_word} 确认").strip() == required_word
+
+
+def random_password(length: int = 12) -> str:
+    return f"{secrets.token_urlsafe(length)}Aa1"
+
+
+def reveal_credentials(credentials: Iterable[tuple[str, str]], *, yes_mode: bool = False) -> None:
+    credentials = list(credentials)
+    if not credentials:
+        return
+
+    cred_file = HOME / ".install-credentials"
+    ensure_home()
+
+    with cred_file.open("a", encoding="utf-8") as f:
+        f.writelines(f"{label}: {value}\n" for label, value in credentials)
+    cred_file.chmod(0o600)
+
+    if yes_mode:
+        return
+
+    for label, value in credentials:
+        out(f"  {label}: {value}")
+
+    out(f"  {'=' * 60}")
+    out("  ⚠️  请妥善保存以上凭据，按回车后此信息将从屏幕消失")
+
+    with suppress(EOFError, KeyboardInterrupt):
+        input()
+
+    lines = 2 + len(credentials)
+    sys.stdout.write(f"\033[{lines}F\033[J")
+    sys.stdout.flush()
+    out("  [凭据已隐藏，如需查看请检查 ~/.pylai/.install-credentials]")
+
+
+def run_submenu(
+    title: str,
+    parent_title: str,
+    entries: Sequence[tuple[str, Callable[[], None]]],
+) -> None:
+    while True:
+        out(f"\n### {title} ###")
+        for index, (label, _) in enumerate(entries, 1):
+            out(f"[{index}] {label}")
+        out(f"[0] 返回 {parent_title}")
+
+        try:
+            raw = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            out()
+            return
+
+        if raw in {"0", "back", "return"}:
+            return
+
+        try:
+            action = entries[int(raw) - 1][1]
+        except (ValueError, IndexError):
+            out("选择无效。")
+            continue
+
+        try:
+            action()
+        except ManageError as exc:
+            out(f"错误: {exc}")
+
+
+# ============================================================================
+# 密码策略
+# ============================================================================
+def read_password_policy() -> Json:
+    defaults: Json = {
+        "RequiredLength": 12,
+        "AdminRequiredLength": 14,
+        "RequireDigit": True,
+        "RequireLowercase": False,
+        "RequireUppercase": False,
+        "RequireNonAlphanumeric": False,
+        "CheckBreachedPasswords": True,
+    }
+
+    if not CONFIG_FILE.is_file():
+        return defaults
+
+    with suppress(OSError, tomllib.TOMLDecodeError):
+        with CONFIG_FILE.open("rb") as f:
+            data = tomllib.load(f)
+
+        pwd = nested_get(data, "Identity.Password", {})
+        if isinstance(pwd, dict):
+            return {**defaults, **{k: pwd[k] for k in defaults if k in pwd}}
+
+    return defaults
+
+
+def validate_password_local(password: str, policy: Json, *, privileged: bool) -> list[str]:
+    if not password:
+        return ["密码不能为空。"]
+
+    required = as_int(
+        policy.get("AdminRequiredLength" if privileged else "RequiredLength"),
+        14 if privileged else 12,
+    )
+
+    errors: list[str] = []
+
+    if len(password) < required:
+        errors.append(f"密码长度至少为 {required} 个字符。")
+    if policy.get("RequireDigit") and not any(c.isdigit() for c in password):
+        errors.append("密码必须包含数字。")
+    if policy.get("RequireLowercase") and not any(c.islower() for c in password):
+        errors.append("密码必须包含小写字母。")
+    if policy.get("RequireUppercase") and not any(c.isupper() for c in password):
+        errors.append("密码必须包含大写字母。")
+    if policy.get("RequireNonAlphanumeric") and all(c.isalnum() for c in password):
+        errors.append("密码必须包含非字母数字字符。")
+
+    return errors
+
+
+# ============================================================================
+# SMTP / 证书 / 账号模型
+# ============================================================================
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SmtpSettings:
+    host: str = ""
+    port: int = 587
+    security: SmtpSecurity = "StartTls"
+    user: str = ""
+    password: str = ""
+    sender: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.host)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SeedAccount:
+    role: Literal["max", "admin", "user"]
+    email: str = ""
+    password: str = ""
+    display_name: str = ""
+
+    @property
+    def manual_password(self) -> bool:
+        return bool(self.password)
+
+
+SMTP_SECURITY_DESCRIPTIONS: dict[SmtpSecurity, str] = {
+    "SslOnConnect": "SMTPS / 隐式 TLS（服务端从连接开始即 TLS，常见端口 465）",
+    "StartTls": "STARTTLS（先明文连接再升级 TLS，常见端口 587）",
+    "None": "无加密（仅限可信内网，不推荐）",
+}
+
+
+def ask_smtp_security(default: SmtpSecurity = "StartTls") -> SmtpSecurity:
+    options: list[tuple[str, SmtpSecurity]] = [
+        ("SslOnConnect — 隐式 TLS，465 端口通常选这个", "SslOnConnect"),
+        ("StartTls — STARTTLS，587 端口通常选这个（推荐）", "StartTls"),
+        ("None — 不加密，仅限可信内网", "None"),
+    ]
+
+    while True:
+        out("SMTP 加密方式：")
+        default_index = 1
+
+        for index, (label, value) in enumerate(options, 1):
+            if value == default:
+                default_index = index
+                marker = " <="
+            else:
+                marker = ""
+            out(f"  [{index}] {label}{marker}")
+
+        raw = ask("请选择", str(default_index))
+
+        with suppress(ValueError, IndexError):
+            return options[int(raw) - 1][1]
+
+        out("选择无效。\n")
+
+
+def configure_smtp_interactive() -> SmtpSettings | None:
+    if not ask_bool("配置 SMTP 邮件发送？", False):
+        return None
+
+    host = ask("SMTP 服务器")
+
+    while True:
+        out("\nSMTP 端口（请按邮件服务商文档选择）：")
+        out("  [1] 465 — SMTPS / 隐式 TLS（阿里云企业邮箱等）")
+        out("  [2] 587 — STARTTLS（通用推荐）")
+        out("  [3] 25  — 无加密（不推荐）")
+        out("  [4] 自定义端口")
+
+        raw = ask("请选择", "2")
+
+        match raw:
+            case "1":
+                port, security = 465, "SslOnConnect"
+            case "2":
+                port, security = 587, "StartTls"
+            case "3":
+                port, security = 25, "None"
+            case "4":
+                port = ask_int("SMTP 端口", 587)
+                security = ask_smtp_security()
+            case _:
+                out("选择无效。\n")
+                continue
+
+        out(f"\n已选择 SMTP：{host}:{port}")
+        out(f"加密方式：{security} — {SMTP_SECURITY_DESCRIPTIONS[security]}")
+
+        if ask_bool("确认以上端口与加密方式？", True):
+            break
+
+        out()
+
+    user = ask("SMTP 用户名（无认证可留空）", "", allow_blank=True)
+    password = ask("SMTP 密码（无认证可留空）", "", secret=True, allow_blank=True)
+    sender = ask("发件人邮箱")
+
+    return SmtpSettings(
+        host=host,
+        port=port,
+        security=security,
+        user=user,
+        password=password,
+        sender=sender,
+    )
+
+
+def ensure_signing_kek() -> Path:
+    path = CERT_DIR / "signing-kek"
+    if not path.is_file():
+        ensure_home()
+        path.write_text(secrets.token_hex(32), encoding="ascii")
+        path.chmod(0o600)
+    return path
+
+
+def import_pfx(src: Path, dest_name: str) -> str:
+    if not src.is_file():
+        raise ManageError(f"PFX 文件不存在: {src}")
+
+    ensure_home()
+    dest = CERT_DIR / dest_name
+    shutil.copy2(src, dest)
+    dest.chmod(0o600)
+    return f"{CONTAINER_CERT_DIR}/{dest_name}"
+
+
+def generate_encryption_pfx() -> tuple[str, str]:
+    ensure_home()
+
+    host_pfx = CERT_DIR / "encryption.pfx"
+    key_file = CERT_DIR / "encryption-key.pem"
+    cert_file = CERT_DIR / "encryption-cert.pem"
+    password = secrets.token_urlsafe(12)
+
+    run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            key_file,
+            "-out",
+            cert_file,
+            "-days",
+            "3650",
+            "-subj",
+            "/CN=Pylai Encryption",
+        ],
+        timeout=300,
+    )
+
+    run(
+        [
+            "openssl",
+            "pkcs12",
+            "-export",
+            "-out",
+            host_pfx,
+            "-inkey",
+            key_file,
+            "-in",
+            cert_file,
+            "-passout",
+            f"pass:{password}",
+        ],
+        timeout=300,
+    )
+
+    host_pfx.chmod(0o600)
+    key_file.unlink(missing_ok=True)
+    cert_file.unlink(missing_ok=True)
+
+    return f"{CONTAINER_CERT_DIR}/encryption.pfx", password
+
+
+@dataclass(slots=True, kw_only=True)
+class InstallAnswers:
+    public_url: str
+    public_port: int = 8080
+    api_port: int = 5000
+
+    db_user: str = "pylai"
+    db_name: str = "pylai"
+    db_password: str = field(default_factory=lambda: secrets.token_hex(16))
+    redis_password: str = field(default_factory=lambda: secrets.token_hex(16))
+    invite_pepper: str = field(default_factory=lambda: secrets.token_hex(32))
+
+    max_account: SeedAccount = field(
+        default_factory=lambda: SeedAccount(
+            role="max",
+            email="max@pylai.local",
+            display_name="Max User",
+        )
+    )
+    admin_account: SeedAccount | None = None
+    user_account: SeedAccount | None = None
+
+    smtp: SmtpSettings = field(default_factory=SmtpSettings)
+
+    signing_pfx: str = ""
+    signing_pfx_password: str = ""
+    encryption_pfx: str = ""
+    encryption_pfx_password: str = ""
+
+    trusted_proxies: list[str] = field(default_factory=lambda: ["127.0.0.1", "::1"])
+    trusted_networks: list[str] = field(default_factory=lambda: ["172.16.0.0/12"])
+    extra_cors_origins: list[str] = field(default_factory=list)
+
+    mfa_for_admin: bool = False
+    mfa_webauthn_for_max: bool = False
+
+    @property
+    def origin(self) -> str:
+        return self.public_url.rstrip("/")
+
+    @property
+    def hostname(self) -> str:
+        return urlparse(self.public_url).hostname or "localhost"
+
+    @property
+    def is_https(self) -> bool:
+        return self.origin.startswith("https://")
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [self.origin, *self.extra_cors_origins]
+
+    @property
+    def allowed_hosts(self) -> list[str]:
+        hosts = [self.hostname]
+        if self.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            hosts.extend(("localhost", "127.0.0.1"))
+        return hosts
+
+    def account(self, role: Literal["admin", "user", "max"]) -> SeedAccount:
+        match role:
+            case "max":
+                return self.max_account
+            case "admin":
+                return self.admin_account or SeedAccount(
+                    role="admin",
+                    display_name="Administrator",
+                )
+            case "user":
+                return self.user_account or SeedAccount(
+                    role="user",
+                    display_name="Test User",
+                )
+
+    def env_lines(self) -> list[str]:
+        return [
+            f"PYLAI_PUBLIC_PORT={self.public_port}",
+            f"PYLAI_API_PORT={self.api_port}",
+            f"PYLAI_DB_USER={self.db_user}",
+            f"PYLAI_DB_PASSWORD={self.db_password}",
+            f"PYLAI_DB_NAME={self.db_name}",
+            f"PYLAI_REDIS_PASSWORD={self.redis_password}",
+        ]
+
+    def to_template_context(self) -> dict[str, str]:
+        db_connection_string = (
+            f"Host=postgres;Port=5432;"
+            f"Database={self.db_name};"
+            f"Username={self.db_user};"
+            f"Password={self.db_password}"
+        )
+
+        subs: dict[str, str] = {
+            "server_url": "http://0.0.0.0:5000",
+            "frontend_url": self.public_url,
+            "db_connection_string": db_connection_string,
+            "redis_password": self.redis_password,
+            "server_pepper": self.invite_pepper,
+            "backup_dir": "/var/lib/pylai/backups",
+            "trusted_proxies": toml_list(self.trusted_proxies),
+            "trusted_networks": toml_list(self.trusted_networks),
+            "signing_key_file": "/etc/pylai/certs/signing-kek",
+            "allowed_origins": toml_list(self.cors_origins),
+            "issuer": self.origin,
+            "allowed_hosts": toml_list(self.allowed_hosts),
+            "relying_party_id": self.hostname,
+            "mfa_origins": toml_list(self.cors_origins),
+            "require_https": "true" if self.is_https else "false",
+            "secure_policy": "Always" if self.is_https else "SameAsRequest",
+            "mfa_require_for_admin": "true" if self.mfa_for_admin else "false",
+            "mfa_require_webauthn_for_max": "true" if self.mfa_webauthn_for_max else "false",
+        }
+
+        for role in ("admin", "user", "max"):
+            account = self.account(role)
+            prefix = f"seed_{role}"
+            subs[f"{prefix}_email"] = account.email
+            subs[f"{prefix}_password"] = account.password
+            subs[f"{prefix}_display_name"] = account.display_name or role.title()
+
+        if self.smtp.enabled:
+            subs.update(
+                {
+                    "smtp_from": self.smtp.sender,
+                    "smtp_host": self.smtp.host,
+                    "smtp_port": str(self.smtp.port),
+                    "smtp_security": self.smtp.security,
+                    "smtp_user": self.smtp.user,
+                    "smtp_password": self.smtp.password,
+                }
+            )
+
+        if self.signing_pfx:
+            subs.update(
+                {
+                    "signing_pfx_path": self.signing_pfx,
+                    "signing_pfx_password": self.signing_pfx_password,
+                }
+            )
+
+        if self.encryption_pfx:
+            subs.update(
+                {
+                    "encryption_pfx_path": self.encryption_pfx,
+                    "encryption_pfx_password": self.encryption_pfx_password,
+                }
+            )
+
+        return subs
+
+    @property
+    def credentials(self) -> list[tuple[str, str]]:
+        creds: list[tuple[str, str]] = [
+            ("PostgreSQL 密码", self.db_password),
+            ("Redis 密码", self.redis_password),
+        ]
+
+        for account in (self.max_account, self.admin_account, self.user_account):
+            if account and account.email and account.password:
+                creds.append(
+                    (
+                        f"{account.role.title()} 账号 ({account.email})",
+                        account.password,
+                    )
+                )
+
+        if self.encryption_pfx_password:
+            creds.append(("加密证书密码", self.encryption_pfx_password))
+
+        return creds
+
+    @property
+    def auto_generated_accounts(self) -> list[str]:
+        return [
+            account.role.title()
+            for account in (self.max_account, self.admin_account, self.user_account)
+            if account and account.email and not account.password
+        ]
+
+    @classmethod
+    def from_env(cls, env: EnvMap) -> Self:
+        public_url = env.get("PYLAI_PUBLIC_URL", "http://localhost:8080")
+        origin = public_url.rstrip("/")
+
+        max_account = SeedAccount(
+            role="max",
+            email=env.get("PYLAI_MAX_EMAIL", "max@pylai.local"),
+            password=env.get("PYLAI_MAX_PASSWORD", ""),
+            display_name="Max User",
+        )
+
+        admin_email = env.get("PYLAI_ADMIN_EMAIL", "")
+        admin_account = (
+            SeedAccount(
+                role="admin",
+                email=admin_email,
+                password=env.get("PYLAI_ADMIN_PASSWORD", ""),
+                display_name="Administrator",
+            )
+            if admin_email
+            else None
+        )
+
+        user_email = env.get("PYLAI_USER_EMAIL", "")
+        user_account = (
+            SeedAccount(
+                role="user",
+                email=user_email,
+                password=env.get("PYLAI_USER_PASSWORD", ""),
+                display_name="Test User",
+            )
+            if user_email
+            else None
+        )
+
+        smtp_host = env.get("PYLAI_SMTP_HOST", "")
+        smtp = (
+            SmtpSettings(
+                host=smtp_host,
+                port=as_int(env.get("PYLAI_SMTP_PORT"), 587),
+                security=env.get("PYLAI_SMTP_SECURITY", "StartTls"),
+                user=env.get("PYLAI_SMTP_USER", ""),
+                password=env.get("PYLAI_SMTP_PASSWORD", ""),
+                sender=env.get("PYLAI_SMTP_FROM", ""),
+            )
+            if smtp_host
+            else SmtpSettings()
+        )
+
+        extra_cors = [
+            x for x in split_csv(env.get("PYLAI_CORS_ORIGINS", "")) if x != origin
+        ]
+
+        return cls(
+            public_url=public_url,
+            public_port=as_int(env.get("PYLAI_PUBLIC_PORT"), 8080),
+            api_port=as_int(env.get("PYLAI_API_PORT"), 5000),
+            db_user=env.get("PYLAI_DB_USER", "pylai"),
+            db_name=env.get("PYLAI_DB_NAME", "pylai"),
+            db_password=env.get("PYLAI_DB_PASSWORD") or secrets.token_hex(16),
+            redis_password=env.get("PYLAI_REDIS_PASSWORD") or secrets.token_hex(16),
+            max_account=max_account,
+            admin_account=admin_account,
+            user_account=user_account,
+            smtp=smtp,
+            signing_pfx=env.get("PYLAI_SIGNING_PFX", ""),
+            signing_pfx_password=env.get("PYLAI_SIGNING_PFX_PASSWORD", ""),
+            encryption_pfx=env.get("PYLAI_ENCRYPTION_PFX", ""),
+            encryption_pfx_password=env.get("PYLAI_ENCRYPTION_PFX_PASSWORD", ""),
+            trusted_proxies=split_csv(env.get("PYLAI_TRUSTED_PROXIES", "127.0.0.1,::1")),
+            trusted_networks=split_csv(env.get("PYLAI_TRUSTED_NETWORKS", "172.16.0.0/12")),
+            extra_cors_origins=extra_cors,
+            mfa_for_admin=env_bool(env.get("PYLAI_MFA_FOR_ADMIN")),
+            mfa_webauthn_for_max=env_bool(env.get("PYLAI_MFA_WEBAUTHN_FOR_MAX")),
+        )
+
+    @classmethod
+    def from_mapping(cls, data: Json) -> Self:
+        public_url = str(data.get("public_url", "http://localhost:8080"))
+        origin = public_url.rstrip("/")
+
+        max_account = SeedAccount(
+            role="max",
+            email=str(data.get("max_email", "max@pylai.local")),
+            password=str(data.get("max_password", "")),
+            display_name="Max User",
+        )
+
+        admin_email = str(data.get("admin_email", ""))
+        admin_account = (
+            SeedAccount(
+                role="admin",
+                email=admin_email,
+                password=str(data.get("admin_password", "")),
+                display_name="Administrator",
+            )
+            if admin_email
+            else None
+        )
+
+        user_email = str(data.get("user_email", ""))
+        user_account = (
+            SeedAccount(
+                role="user",
+                email=user_email,
+                password=str(data.get("user_password", "")),
+                display_name="Test User",
+            )
+            if user_email
+            else None
+        )
+
+        smtp_enabled = bool(data.get("smtp_enabled") or data.get("smtp_host"))
+        smtp = (
+            SmtpSettings(
+                host=str(data.get("smtp_host", "")),
+                port=as_int(data.get("smtp_port"), 587),
+                security=str(data.get("smtp_security", "StartTls")),
+                user=str(data.get("smtp_user", "")),
+                password=str(data.get("smtp_password", "")),
+                sender=str(data.get("smtp_from", "")),
+            )
+            if smtp_enabled
+            else SmtpSettings()
+        )
+
+        cors_origins = [str(x) for x in data.get("cors_origins", [])]
+        extra_cors = [x for x in cors_origins if x != origin]
+
+        return cls(
+            public_url=public_url,
+            public_port=as_int(data.get("public_port"), 8080),
+            api_port=as_int(data.get("api_port"), 5000),
+            db_user=str(data.get("db_user", "pylai")),
+            db_name=str(data.get("db_name", "pylai")),
+            db_password=str(data.get("db_password") or secrets.token_hex(16)),
+            redis_password=str(data.get("redis_password") or secrets.token_hex(16)),
+            invite_pepper=str(data.get("invite_pepper") or secrets.token_hex(32)),
+            max_account=max_account,
+            admin_account=admin_account,
+            user_account=user_account,
+            smtp=smtp,
+            signing_pfx=str(data.get("signing_pfx", "")),
+            signing_pfx_password=str(data.get("signing_pfx_password", "")),
+            encryption_pfx=str(data.get("encryption_pfx", "")),
+            encryption_pfx_password=str(data.get("encryption_pfx_password", "")),
+            trusted_proxies=[str(x) for x in data.get("trusted_proxies", [])],
+            trusted_networks=[str(x) for x in data.get("trusted_networks", [])],
+            extra_cors_origins=extra_cors,
+            mfa_for_admin=bool(data.get("mfa_for_admin", False)),
+            mfa_webauthn_for_max=bool(data.get("mfa_webauthn_for_max", False)),
+        )
+
+    @classmethod
+    def collect_interactive(cls) -> Self:
+        ensure_home()
+
+        public_url = ask("对外访问地址（浏览器访问 Pylai 的 URL）", "http://localhost:8080")
+        public_port = ask_int("容器 80 映射到主机端口", 8080)
+        api_port = ask_int("后端 5000 映射到本机端口（仅绑定 127.0.0.1）", 5000)
+
+        out("\n-- 数据库 / Redis --")
+        db_user = ask("PostgreSQL 用户名", "pylai")
+        db_name = ask("PostgreSQL 数据库名", "pylai")
+        db_password = secrets.token_hex(16)
+        redis_password = secrets.token_hex(16)
+
+        ensure_signing_kek()
+
+        out("\n-- 初始账号 --")
+        max_email = ask("Max 账号邮箱/登录名", "max@pylai.local")
+        max_password = ask("Max 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+        max_account = SeedAccount(
+            role="max",
+            email=max_email,
+            password=max_password,
+            display_name="Max User",
+        )
+
+        admin_account: SeedAccount | None = None
+        if ask_bool("创建初始 Admin 账号？", True):
+            admin_email = ask("Admin 账号邮箱/登录名", "admin@pylai.local")
+            admin_password = ask(
+                "Admin 账号密码（留空自动生成）",
+                "",
+                secret=True,
+                allow_blank=True,
+            )
+            admin_account = SeedAccount(
+                role="admin",
+                email=admin_email,
+                password=admin_password,
+                display_name="Administrator",
+            )
+
+        user_account: SeedAccount | None = None
+        if ask_bool("创建初始 Normal 测试账号？", False):
+            user_email = ask("Normal 账号邮箱/登录名", "user@pylai.local")
+            user_password = ask(
+                "Normal 账号密码（留空自动生成）",
+                "",
+                secret=True,
+                allow_blank=True,
+            )
+            user_account = SeedAccount(
+                role="user",
+                email=user_email,
+                password=user_password,
+                display_name="Test User",
+            )
+
+        out("\n-- 邮件 --")
+        smtp = configure_smtp_interactive() or SmtpSettings()
+
+        out("\n-- 安全 --")
+        signing_pfx = ""
+        signing_pfx_password = ""
+
+        if ask_bool("使用数据库托管签名密钥（推荐，后续用菜单手动轮换）？", True):
+            pass
+        else:
+            path = ask("签名 PFX 文件路径（留空则继续使用数据库托管）", "", allow_blank=True).strip()
+            if path:
+                signing_pfx_password = ask("签名 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
+                signing_pfx = import_pfx(Path(path).expanduser(), "signing.pfx")
+
+        encryption_pfx = ""
+        encryption_pfx_password = ""
+
+        if ask_bool("自动生成加密证书（推荐，生产环境必需）？", True) and shutil.which("openssl"):
+            encryption_pfx, encryption_pfx_password = generate_encryption_pfx()
+        else:
+            if shutil.which("openssl") is None:
+                out("未找到 openssl，无法自动生成加密证书。")
+
+            path = ask("请提供加密 PFX 文件路径（生产环境必需）", "", allow_blank=True).strip()
+            if not path or not Path(path).expanduser().is_file():
+                raise ManageError("生产环境必须配置持久化 OpenIddict 加密证书。")
+
+            encryption_pfx_password = ask("加密 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
+            encryption_pfx = import_pfx(Path(path).expanduser(), "encryption.pfx")
+
+        trusted_proxies = ask("可信代理 IP（逗号分隔，主机 Nginx 与本机）", "127.0.0.1,::1")
+        trusted_networks = ask("可信代理 CIDR（逗号分隔）", "172.16.0.0/12")
+
+        extra_cors = ask("额外 CORS Origin（逗号分隔，没有留空）", "", allow_blank=True)
+
+        out("\n-- 高权限账户 MFA --")
+        out("MFA 可保护 Admin/Max 账户安全。HTTP/局域网部署时 WebAuthn 不可用，建议关闭或仅使用 TOTP。")
+
+        mfa_for_admin = ask_bool("Admin 及以上角色登录时强制要求 MFA？", False)
+        mfa_webauthn_for_max = (
+            ask_bool(
+                "Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？",
+                False,
+            )
+            if mfa_for_admin
+            else False
+        )
+
+        return cls(
+            public_url=public_url,
+            public_port=public_port,
+            api_port=api_port,
+            db_user=db_user,
+            db_name=db_name,
+            db_password=db_password,
+            redis_password=redis_password,
+            max_account=max_account,
+            admin_account=admin_account,
+            user_account=user_account,
+            smtp=smtp,
+            signing_pfx=signing_pfx,
+            signing_pfx_password=signing_pfx_password,
+            encryption_pfx=encryption_pfx,
+            encryption_pfx_password=encryption_pfx_password,
+            trusted_proxies=split_csv(trusted_proxies),
+            trusted_networks=split_csv(trusted_networks),
+            extra_cors_origins=split_csv(extra_cors),
+            mfa_for_admin=mfa_for_admin,
+            mfa_webauthn_for_max=mfa_webauthn_for_max,
+        )
+
+
+# ============================================================================
+# ManagerConfig / State
+# ============================================================================
+@dataclass(slots=True)
 class ManagerConfig:
-    """ManagePylai 自身配置（~/.pylai/ManagerConfig.toml）读写。
-
-    使用 tomllib 读取；因标准库无 TOML 写入，save() 基于硬编码模板
-    拼接，足以覆盖 ManagerConfig 的扁平结构。
-    """
-
-    DEFAULT_PATH = HOME / "ManagerConfig.toml"
+    path: Path = HOME / "ManagerConfig.toml"
+    _data: Json = field(default_factory=dict, init=False, repr=False)
 
     _DEFAULT_TOML = """\
 [Manager]
@@ -83,142 +1144,120 @@ BackupRetentionDays = {retention}
 Level = "{level}"
 """
 
-    def __init__(self, path: Path | None = None) -> None:
-        self.path = path or self.DEFAULT_PATH
-        self._data: dict = {}
-        self._load()
-
-    def _load(self) -> None:
+    def __post_init__(self) -> None:
         if self.path.is_file():
-            try:
+            with suppress(OSError, tomllib.TOMLDecodeError):
                 self._data = tomllib.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError):
-                self._data = {}
+
+    def get(self, *keys: str, default: Any = None) -> Any:
+        current: Any = self._data
+        for key in keys:
+            if not isinstance(current, dict) or key not in current:
+                return default
+            current = current[key]
+        return current
+
+    def set(self, *keys: str, value: Any) -> None:
+        current: Json = self._data
+
+        for key in keys[:-1]:
+            nxt = current.get(key)
+            if not isinstance(nxt, dict):
+                nxt = current[key] = {}
+            current = nxt
+
+        current[keys[-1]] = value
 
     def save(self) -> None:
         ensure_home()
-        mgr = self._data.get("Manager", {})
-        state = self._data.get("Manager.State", {})
-        sec = self._data.get("Security", {})
-        log = self._data.get("Logging", {})
 
-        skip = state.get("SkipVersion")
+        skip = self.get("Manager", "State", "SkipVersion")
         skip_version_line = f"SkipVersion = {json.dumps(skip)}" if skip else ""
 
         text = self._DEFAULT_TOML.format(
-            version=mgr.get("Version", __version__),
-            mirror=mgr.get("mirror", "Github"),
-            last_check=state.get("LastCheck", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
+            version=self.get("Manager", "Version", default=__version__),
+            mirror=self.get("Manager", "mirror", default="Github"),
+            last_check=self.get("Manager", "State", "LastCheck", default=utc_now_iso()),
             skip_version_line=skip_version_line,
-            project_name=self._data.get("Compose", {}).get("ProjectName", "pylai"),
-            auto_backup="true" if sec.get("AutoBackupBeforeUpdate", True) else "false",
-            retention=sec.get("BackupRetentionDays", 7),
-            level=log.get("Level", "info"),
+            project_name=self.get("Compose", "ProjectName", default="pylai"),
+            auto_backup="true" if self.get("Security", "AutoBackupBeforeUpdate", default=True) else "false",
+            retention=self.get("Security", "BackupRetentionDays", default=7),
+            level=self.get("Logging", "Level", default="info"),
         )
 
-        # 追加自定义 mirror
-        custom = self._data.get("Manager.Custom", {})
+        custom = self.get("Manager", "Custom", default={}) or {}
         if custom:
             text += "\n[Manager.Custom]\n"
-            for k, v in custom.items():
-                text += f'{k} = {json.dumps(v)}\n'
+            text += "".join(f"{k} = {json.dumps(v)}\n" for k, v in custom.items())
 
-        # 追加服务镜像覆盖
-        services = self._data.get("Compose.Services", {})
+        services = self.get("Compose", "Services", default={}) or {}
         if services:
             text += "\n[Compose.Services]\n"
-            for k, v in services.items():
-                text += f'{k} = {json.dumps(v)}\n'
+            text += "".join(f"{k} = {json.dumps(v)}\n" for k, v in services.items())
 
-        self.path.write_text(text, encoding="utf-8")
-        self.path.chmod(0o600)
-
-    def get(self, *keys: str, default=None):
-        d = self._data
-        for k in keys:
-            if isinstance(d, dict) and k in d:
-                d = d[k]
-            else:
-                return default
-        return d
-
-    def set(self, *keys: str, value) -> None:
-        d = self._data
-        for k in keys[:-1]:
-            if k not in d:
-                d[k] = {}
-            d = d[k]
-        d[keys[-1]] = value
+        atomic_write(self.path, text)
 
     @property
     def mirror(self) -> str:
-        return self.get("Manager", "mirror", default="Github")
+        return str(self.get("Manager", "mirror", default="Github"))
 
     @property
     def version(self) -> str:
-        return self.get("Manager", "Version", default=__version__)
+        return str(self.get("Manager", "Version", default=__version__))
 
     @property
     def logging_level(self) -> str:
-        return self.get("Logging", "Level", default="info")
+        return str(self.get("Logging", "Level", default="info"))
 
     @property
     def project_name(self) -> str:
-        return self.get("Compose", "ProjectName", default="pylai")
+        return str(self.get("Compose", "ProjectName", default="pylai"))
 
     @property
     def auto_backup(self) -> bool:
-        return self.get("Security", "AutoBackupBeforeUpdate", default=True)
-
-    # ---------- Phase 2 新增 ----------
+        return bool(self.get("Security", "AutoBackupBeforeUpdate", default=True))
 
     @property
     def skip_version(self) -> str | None:
-        """用户选择跳过的 ManagePylai.py 版本。"""
-        return self.get("Manager.State", "SkipVersion", default=None)
+        value = self.get("Manager", "State", "SkipVersion", default=None)
+        return str(value) if value else None
 
     def set_skip_version(self, version: str | None) -> None:
-        self.set("Manager.State", "SkipVersion", version)
+        if version is None:
+            state = self._data.get("Manager", {}).get("State", {})
+            state.pop("SkipVersion", None)
+        else:
+            self.set("Manager", "State", "SkipVersion", value=version)
         self.save()
 
     @property
     def custom_mirror_base(self) -> str | None:
-        """自定义镜像源 base_url（仅当 mirror == 'Custom' 时生效）。"""
-        return self.get("Manager.Custom", "base_url", default=None)
+        value = self.get("Manager", "Custom", "base_url", default=None)
+        return str(value) if value else None
 
 
+@dataclass(slots=True)
 class State:
-    """Pylai 安装状态（~/.pylai/state.json）—— 兼容层。
+    path: Path = STATE_FILE
+    _data: Json = field(default_factory=dict, init=False, repr=False)
 
-    将原有的 load_state / save_state 过程封装为类，后续可扩展
-    版本迁移、schema 校验等逻辑。
-    """
-
-    FILE = HOME / "state.json"
-
-    def __init__(self) -> None:
-        self._data: dict = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self.FILE.is_file():
-            try:
-                self._data = json.loads(self.FILE.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self._data = {}
+    def __post_init__(self) -> None:
+        if self.path.is_file():
+            with suppress(OSError, ValueError):
+                self._data = json.loads(self.path.read_text(encoding="utf-8"))
 
     def save(self) -> None:
         ensure_home()
-        self.FILE.write_text(
+        self.path.write_text(
             json.dumps(self._data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        self.FILE.chmod(0o600)
+        self.path.chmod(0o600)
 
-    def get(self, key: str, default=None):
+    def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
-    def set(self, key: str, value) -> None:
+    def set(self, key: str, value: Any) -> None:
         self._data[key] = value
 
     def clear(self) -> None:
@@ -230,365 +1269,191 @@ class State:
 
     @property
     def version(self) -> str:
-        return self._data.get("version", "0.0.1")
+        return str(self._data.get("version", "0.0.1"))
+
+    @property
+    def architecture(self) -> str:
+        return str(self._data.get("architecture", host_arch()))
 
     @property
     def image(self) -> str:
-        return self._data.get("image", "pylaios:unknown")
+        return str(self._data.get("image", "pylaios:unknown"))
 
     @property
     def public_url(self) -> str:
-        return self._data.get("public_url", "http://localhost")
+        return str(self._data.get("public_url", "http://localhost"))
 
     @property
     def public_port(self) -> int:
-        return int(self._data.get("public_port", 8080))
+        return as_int(self._data.get("public_port"), 8080)
 
     @property
     def api_port(self) -> int:
-        return int(self._data.get("api_port", 5000))
+        return as_int(self._data.get("api_port"), 5000)
 
     @property
     def mode(self) -> str:
-        """部署模式: 'monolith' | 'compose'"""
-        return self._data.get("mode", "monolith")
+        return str(self._data.get("mode", "compose"))
 
 
-def parse_env_file(path: Path) -> dict[str, str]:
-    """解析 .env 文件为字典。支持 KEY=VALUE 和 # 注释，忽略引号包裹。"""
-    env: dict[str, str] = {}
-    if not path.is_file():
-        raise ManageError(f".env 文件不存在: {path}")
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        env[key] = value
-    return env
-
-
-def build_answers_from_env(env: dict[str, str]) -> dict:
-    """从环境变量字典构建安装 answers（用于非交互安装）。"""
-    public_url = env.get("PYLAI_PUBLIC_URL", "http://localhost:8080")
-    origin = public_url.rstrip("/")
-    external_host = urlparse(public_url).hostname or "localhost"
-    allowed_hosts = [external_host]
-    if external_host not in ("localhost", "127.0.0.1", "::1"):
-        allowed_hosts.extend(("localhost", "127.0.0.1"))
-
-    cors_raw = env.get("PYLAI_CORS_ORIGINS", "")
-    cors_origins = [origin]
-    if cors_raw:
-        cors_origins.extend(x.strip() for x in cors_raw.split(",") if x.strip())
-
-    proxies_raw = env.get("PYLAI_TRUSTED_PROXIES", "127.0.0.1,::1")
-    networks_raw = env.get("PYLAI_TRUSTED_NETWORKS", "172.16.0.0/12")
-
-    public_port = int(env.get("PYLAI_PUBLIC_PORT", "8080"))
-    api_port = int(env.get("PYLAI_API_PORT", "5000"))
-
-    db_user = env.get("PYLAI_DB_USER", "pylai")
-    db_name = env.get("PYLAI_DB_NAME", "pylai")
-    db_password = env.get("PYLAI_DB_PASSWORD", secrets.token_hex(16))
-    redis_password = env.get("PYLAI_REDIS_PASSWORD", secrets.token_hex(16))
-
-    max_email = env.get("PYLAI_MAX_EMAIL", "max@pylai.local")
-    max_password = env.get("PYLAI_MAX_PASSWORD", "")
-    admin_email = env.get("PYLAI_ADMIN_EMAIL", "")
-    admin_password = env.get("PYLAI_ADMIN_PASSWORD", "")
-    user_email = env.get("PYLAI_USER_EMAIL", "")
-    user_password = env.get("PYLAI_USER_PASSWORD", "")
-
-    smtp_enabled = bool(env.get("PYLAI_SMTP_HOST"))
-    smtp_host = env.get("PYLAI_SMTP_HOST", "")
-    smtp_port = int(env.get("PYLAI_SMTP_PORT", "587"))
-    smtp_security = env.get("PYLAI_SMTP_SECURITY", "StartTls")
-    smtp_user = env.get("PYLAI_SMTP_USER", "")
-    smtp_password = env.get("PYLAI_SMTP_PASSWORD", "")
-    smtp_from = env.get("PYLAI_SMTP_FROM", "")
-
-    mfa_for_admin = env.get("PYLAI_MFA_FOR_ADMIN", "false").lower() in ("true", "1", "yes")
-    mfa_webauthn_for_max = env.get("PYLAI_MFA_WEBAUTHN_FOR_MAX", "false").lower() in ("true", "1", "yes")
-
-    signing_pfx = env.get("PYLAI_SIGNING_PFX", "")
-    signing_pfx_password = env.get("PYLAI_SIGNING_PFX_PASSWORD", "")
-    encryption_pfx = env.get("PYLAI_ENCRYPTION_PFX", "")
-    encryption_pfx_password = env.get("PYLAI_ENCRYPTION_PFX_PASSWORD", "")
-
-    return {
-        "public_url": public_url,
-        "origin": origin,
-        "public_port": public_port,
-        "api_port": api_port,
-        "db_user": db_user,
-        "db_name": db_name,
-        "db_password": db_password,
-        "redis_password": redis_password,
-        "invite_pepper": secrets.token_hex(32),
-        "max_email": max_email,
-        "max_password": max_password,
-        "max_password_input": bool(max_password),
-        "admin_email": admin_email,
-        "admin_password": admin_password,
-        "admin_password_input": bool(admin_password),
-        "user_email": user_email,
-        "user_password": user_password,
-        "user_password_input": bool(user_password),
-        "smtp_enabled": smtp_enabled,
-        "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
-        "smtp_security": smtp_security,
-        "smtp_user": smtp_user,
-        "smtp_password": smtp_password,
-        "smtp_from": smtp_from,
-        "signing_pfx": signing_pfx,
-        "signing_pfx_password": signing_pfx_password,
-        "encryption_pfx": encryption_pfx,
-        "encryption_pfx_password": encryption_pfx_password,
-        "trusted_proxies": [x.strip() for x in proxies_raw.split(",") if x.strip()],
-        "trusted_networks": [x.strip() for x in networks_raw.split(",") if x.strip()],
-        "cors_origins": cors_origins,
-        "mfa_for_admin": mfa_for_admin,
-        "mfa_webauthn_for_max": mfa_webauthn_for_max,
-    }
-
-
+# ============================================================================
+# PylaiConfig
+# ============================================================================
 class PylaiConfig:
-    """pylai.toml 配置管理：生成（string.Template）、读写、校验、脱敏。
-
-    生成策略：
-      1. 优先从镜像读取 pylai.template.toml（$var 占位符），用
-         string.Template.safe_substitute() 生成。
-      2. 若镜像未提供新模板，回退到 pylai.example.toml + 旧字符串替换。
-    """
-
     FILE = CONFIG_DIR / "pylai.toml"
     TEMPLATE_NAME = "pylai.template.toml"
     EXAMPLE_NAME = "pylai.example.toml"
 
     def __init__(self) -> None:
-        self._text: str = ""
+        self._text = ""
+        self._parsed: Json | None = None
+
         if self.FILE.is_file():
             self._text = self.FILE.read_text(encoding="utf-8")
+            self._try_parse()
+
+    def _try_parse(self) -> None:
+        try:
+            self._parsed = tomllib.loads(self._text)
+        except tomllib.TOMLDecodeError:
+            self._parsed = None
 
     @classmethod
-    def from_existing(cls, source: Path) -> "PylaiConfig":
-        """从现有 pylai.toml 复制到标准位置并加载。"""
+    def from_existing(cls, source: Path) -> Self:
         if not source.is_file():
             raise ManageError(f"配置文件不存在: {source}")
+
         text = source.read_text(encoding="utf-8")
+
         try:
             tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             raise ManageError(f"提供的配置不是合法 TOML: {exc}") from exc
+
         ensure_home()
         cls.FILE.write_text(text, encoding="utf-8")
         cls.FILE.chmod(0o600)
+
         instance = cls()
         instance._text = text
+        instance._try_parse()
         return instance
 
-    def extract_container_params(self) -> dict:
-        """从现有 pylai.toml 提取启动容器所需的参数（含完整 answers 用于 summary）。"""
-        params: dict = {}
-        try:
-            data = tomllib.loads(self._text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ManageError(f"配置解析失败: {exc}") from exc
+    def extract_answers(self) -> InstallAnswers:
+        data = self._parsed
+        if data is None and self._text:
+            try:
+                data = tomllib.loads(self._text)
+            except tomllib.TOMLDecodeError as exc:
+                raise ManageError(f"配置解析失败: {exc}") from exc
 
-        # URL
-        frontend_url = data.get("Frontend", {}).get("Url", "http://localhost:8080")
-        params["public_url"] = frontend_url
-        params["origin"] = frontend_url.rstrip("/")
+        data = data or {}
 
-        # Database
-        cs = data.get("Database", {}).get("ConnectionString", "")
-        for key, pattern in (
+        frontend_url = str(nested_get(data, "Frontend.Url", "http://localhost:8080"))
+        connection_string = str(nested_get(data, "Database.ConnectionString", ""))
+
+        params: Json = {"public_url": frontend_url}
+
+        for attr, pattern in (
             ("db_user", r"(?:Username|User ID)=([^;]+)"),
             ("db_password", r"Password=([^;]+)"),
             ("db_name", r"Database=([^;]+)"),
         ):
-            m = re.search(pattern, cs)
-            if m:
-                params[key] = m.group(1)
+            if m := re.search(pattern, connection_string):
+                params[attr] = m.group(1)
+
         params.setdefault("db_user", "pylai")
         params.setdefault("db_name", "pylai")
         params.setdefault("db_password", "")
-        params.setdefault("redis_password", "")
-
-        # Redis
-        redis = data.get("Redis", {})
-        if isinstance(redis, dict):
-            params["redis_password"] = redis.get("Password", "")
-
-        # 端口（非交互时可通过环境变量覆盖）
-        params["public_port"] = 8080
+        params["redis_password"] = str(nested_get(data, "Redis.Password", ""))
         params["api_port"] = 5000
+        params["public_port"] = 8080
+        params["invite_pepper"] = str(nested_get(data, "Identity.ServerPepper", secrets.token_hex(32)))
 
-        # 其他 summary 所需字段
-        params["invite_pepper"] = data.get("Identity", {}).get("ServerPepper", secrets.token_hex(32))
-        params["trusted_proxies"] = data.get("Server", {}).get("TrustedProxies", ["127.0.0.1", "::1"])
-        params["trusted_networks"] = data.get("Server", {}).get("TrustedNetworks", ["172.16.0.0/12"])
-        params["cors_origins"] = data.get("Cors", {}).get("AllowedOrigins", [frontend_url])
+        for key in ("trusted_proxies", "trusted_networks", "cors_origins"):
+            value = nested_get(
+                data,
+                {
+                    "trusted_proxies": "Server.TrustedProxies",
+                    "trusted_networks": "Server.TrustedNetworks",
+                    "cors_origins": "Cors.AllowedOrigins",
+                }[key],
+                [],
+            )
+            params[key] = [str(x) for x in value] if isinstance(value, list) else []
 
-        # 种子用户
-        for section, email_key, pwd_key in [
-            ("Seeds.DefaultMax", "max_email", "max_password"),
-            ("Seeds.DefaultAdmin", "admin_email", "admin_password"),
-            ("Seeds.DefaultUser", "user_email", "user_password"),
-        ]:
-            parts = section.split(".")
-            d = data
-            for p in parts:
-                d = d.get(p, {}) if isinstance(d, dict) else {}
-            if isinstance(d, dict):
-                params[email_key] = d.get("Email", "")
-                params[pwd_key] = d.get("Password", "")
+        if not params["cors_origins"]:
+            params["cors_origins"] = [frontend_url]
 
-        # MFA
-        mfa = data.get("Mfa", {})
-        if isinstance(mfa, dict):
-            params["mfa_for_admin"] = mfa.get("RequireForAdmin", False)
-            params["mfa_webauthn_for_max"] = mfa.get("RequireWebAuthnForMax", False)
+        params["max_email"] = str(nested_get(data, "Seeds.DefaultMax.Email", ""))
+        params["max_password"] = str(nested_get(data, "Seeds.DefaultMax.Password", ""))
+        params["admin_email"] = str(nested_get(data, "Seeds.DefaultAdmin.Email", ""))
+        params["admin_password"] = str(nested_get(data, "Seeds.DefaultAdmin.Password", ""))
+        params["user_email"] = str(nested_get(data, "Seeds.DefaultUser.Email", ""))
+        params["user_password"] = str(nested_get(data, "Seeds.DefaultUser.Password", ""))
 
-        # 证书
-        signing = data.get("OpenIddict", {}).get("Certificates", {}).get("Signing", {})
-        if isinstance(signing, dict) and signing.get("Path"):
-            params["signing_pfx"] = signing["Path"]
-            params["signing_pfx_password"] = signing.get("Password", "")
-        encryption = data.get("OpenIddict", {}).get("Certificates", {}).get("Encryption", {})
-        if isinstance(encryption, dict) and encryption.get("Path"):
-            params["encryption_pfx"] = encryption["Path"]
-            params["encryption_pfx_password"] = encryption.get("Password", "")
+        params["mfa_for_admin"] = bool(nested_get(data, "Mfa.RequireForAdmin", False))
+        params["mfa_webauthn_for_max"] = bool(nested_get(data, "Mfa.RequireWebAuthnForMax", False))
 
-        # SMTP
-        email = data.get("Email", {})
-        if isinstance(email, dict) and email.get("FromAddress"):
-            params["smtp_enabled"] = True
-            params["smtp_from"] = email.get("FromAddress", "")
-            smtp = data.get("Email", {}).get("Smtp", {})
-            if isinstance(smtp, dict):
-                params["smtp_host"] = smtp.get("Host", "")
-                params["smtp_port"] = smtp.get("Port", 587)
-                params["smtp_security"] = smtp.get("Security", "StartTls")
-                params["smtp_user"] = smtp.get("Username", "")
-                params["smtp_password"] = smtp.get("Password", "")
-        else:
-            params["smtp_enabled"] = False
-            params["smtp_host"] = ""
-            params["smtp_port"] = 587
-            params["smtp_security"] = "StartTls"
-            params["smtp_user"] = ""
-            params["smtp_password"] = ""
-            params["smtp_from"] = ""
+        signing_path = str(nested_get(data, "OpenIddict.Certificates.Signing.Path", ""))
+        if signing_path:
+            params["signing_pfx"] = signing_path
+            params["signing_pfx_password"] = str(
+                nested_get(data, "OpenIddict.Certificates.Signing.Password", "")
+            )
 
-        return params
+        encryption_path = str(nested_get(data, "OpenIddict.Certificates.Encryption.Path", ""))
+        if encryption_path:
+            params["encryption_pfx"] = encryption_path
+            params["encryption_pfx_password"] = str(
+                nested_get(data, "OpenIddict.Certificates.Encryption.Password", "")
+            )
 
-    # ---------- 生成 ----------
+        smtp_host = str(nested_get(data, "Email.Smtp.Host", ""))
+        smtp_enabled = bool(nested_get(data, "Email.FromAddress", "")) or bool(smtp_host)
+
+        params["smtp_enabled"] = smtp_enabled
+        params["smtp_host"] = smtp_host
+        params["smtp_port"] = as_int(nested_get(data, "Email.Smtp.Port"), 587)
+        params["smtp_security"] = str(nested_get(data, "Email.Smtp.Security", "StartTls"))
+        params["smtp_user"] = str(nested_get(data, "Email.Smtp.Username", ""))
+        params["smtp_password"] = str(nested_get(data, "Email.Smtp.Password", ""))
+        params["smtp_from"] = str(nested_get(data, "Email.FromAddress", ""))
+
+        return InstallAnswers.from_mapping(params)
 
     @classmethod
-    def generate_from_template(cls, image: str, answers: dict) -> "PylaiConfig":
-        """从镜像模板生成新配置；优先 string.Template，回退旧替换方式。"""
+    def generate_from_template(cls, image: str, answers: InstallAnswers) -> Self:
         template_text = cls._read_from_image(image, cls.TEMPLATE_NAME)
         if template_text:
-            return cls._generate_via_template(image, template_text, answers)
+            return cls._generate_via_template(template_text, answers)
 
         out("提示：镜像未提供 pylai.template.toml，使用兼容模式生成配置。")
+
         example_text = cls._read_from_image(image, cls.EXAMPLE_NAME)
         if not example_text:
             raise ManageError("无法从镜像读取配置模板")
-        return cls._generate_via_replace(image, example_text, answers)
+
+        return cls._generate_via_replace(example_text, answers)
 
     @classmethod
     def _read_from_image(cls, image: str, filename: str) -> str | None:
-        result = docker(
-            "run", "--rm", "--entrypoint", "cat", image,
-            f"/opt/pylai/{filename}", check=False, timeout=120,
+        result = run(
+            ["docker", "run", "--rm", "--entrypoint", "cat", image, f"/opt/pylai/{filename}"],
+            check=False,
+            timeout=120,
         )
         return result.stdout if result.returncode == 0 else None
 
     @classmethod
-    def _generate_via_template(cls, image: str, template_text: str, answers: dict) -> "PylaiConfig":
-        """string.Template 方式生成配置。"""
-        origin = answers["public_url"].rstrip("/")
-        external_host = urlparse(answers["public_url"]).hostname or "localhost"
-        allowed_hosts = [external_host]
-        if external_host not in ("localhost", "127.0.0.1", "::1"):
-            allowed_hosts.extend(("localhost", "127.0.0.1"))
+    def _generate_via_template(cls, template_text: str, answers: InstallAnswers) -> Self:
+        text = Template(template_text).safe_substitute(answers.to_template_context())
 
-        cs = (
-            f'Host=127.0.0.1;Port=5432;'
-            f'Database={answers["db_name"]};'
-            f'Username={answers["db_user"]};'
-            f'Password={answers["db_password"]}'
-        )
-
-        is_https = origin.startswith("https://")
-
-        subs: dict[str, str] = {
-            "server_url": "http://0.0.0.0:5000",
-            "frontend_url": answers["public_url"],
-            "db_connection_string": cs,
-            "redis_password": answers["redis_password"],
-            "server_pepper": answers["invite_pepper"],
-            "backup_dir": "/var/lib/pylai/backups",
-            "trusted_proxies": toml_string_list(answers["trusted_proxies"]),
-            "trusted_networks": toml_string_list(answers["trusted_networks"]),
-            "signing_key_file": "/etc/pylai/certs/signing-kek",
-            "allowed_origins": toml_string_list(answers["cors_origins"]),
-            "issuer": origin,
-            "allowed_hosts": toml_string_list(allowed_hosts),
-            "relying_party_id": external_host,
-            "mfa_origins": toml_string_list(answers["cors_origins"]),
-            "require_https": "true" if is_https else "false",
-            "secure_policy": "Always" if is_https else "SameAsRequest",
-            "mfa_require_for_admin": "true" if answers.get("mfa_for_admin", False) else "false",
-            "mfa_require_webauthn_for_max": "true" if answers.get("mfa_webauthn_for_max", False) else "false",
-        }
-
-        # 种子用户
-        seed_map = [
-            ("seed_admin", "admin_email", "admin_password", "Administrator"),
-            ("seed_user", "user_email", "user_password", "Test User"),
-            ("seed_max", "max_email", "max_password", "Max User"),
-        ]
-        for prefix, email_key, pwd_key, display in seed_map:
-            subs[f"{prefix}_email"] = answers[email_key]
-            subs[f"{prefix}_password"] = answers[pwd_key]
-            subs[f"{prefix}_display_name"] = display
-
-        # SMTP
-        if answers.get("smtp_enabled"):
-            subs["smtp_from"] = answers["smtp_from"]
-            subs["smtp_host"] = answers["smtp_host"]
-            subs["smtp_port"] = str(answers["smtp_port"])
-            subs["smtp_security"] = answers["smtp_security"]
-            subs["smtp_user"] = answers["smtp_user"]
-            subs["smtp_password"] = answers["smtp_password"]
-
-        # 证书
-        if answers.get("signing_pfx"):
-            subs["signing_pfx_path"] = answers["signing_pfx"]
-            subs["signing_pfx_password"] = answers["signing_pfx_password"]
-        if answers.get("encryption_pfx"):
-            subs["encryption_pfx_path"] = answers["encryption_pfx"]
-            subs["encryption_pfx_password"] = answers["encryption_pfx_password"]
-
-        template = Template(template_text)
-        text = template.safe_substitute(subs)
-
-        # 检查未替换的占位符（排除 TOML 中可能的 $ 字面量）
-        unmatched = re.findall(r'\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?', text)
-        placeholders = {v for v in unmatched if v[0].islower() or v.startswith("seed_")}
+        unmatched = re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", text)
+        placeholders = {v for v in unmatched if v and (v[0].islower() or v.startswith("seed_"))}
         if placeholders:
             out(f"警告：模板中有未替换的变量: {placeholders}")
 
-        # Fail Closed
         try:
             tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
@@ -596,22 +1461,94 @@ class PylaiConfig:
 
         instance = cls()
         instance._text = text
+        instance._try_parse()
         instance._write()
         return instance
 
     @classmethod
-    def _generate_via_replace(cls, image: str, text: str, answers: dict) -> "PylaiConfig":
-        """回退：复用现有 generate_config 逻辑（旧字符串替换方式）。"""
-        # 旧 generate_config 会自己 read_template，这里直接调用
-        generate_config(image, answers)
-        return cls()
+    def _generate_via_replace(cls, text: str, answers: InstallAnswers) -> Self:
+        connection_string = (
+            f"Host=postgres;Port=5432;"
+            f"Database={answers.db_name};"
+            f"Username={answers.db_user};"
+            f"Password={answers.db_password}"
+        )
 
-    # ---------- 读写 ----------
+        t = TomlText(text)
+        t.set("[Server]", "Url", toml_str("http://0.0.0.0:5000"))
+        t.set("[Frontend]", "Url", toml_str(answers.public_url))
+        t.set("[Database]", "ConnectionString", toml_str(connection_string))
+        t.set_many("[Redis]", {
+            "Host": toml_str("redis"),
+            "Port": "6379",
+            "Password": toml_str(answers.redis_password),
+        })
+        t.set("[Identity]", "ServerPepper", toml_str(answers.invite_pepper))
+        t.set("[Backup]", "Directory", toml_str("/var/lib/pylai/backups"))
+        t.set("[Server]", "TrustedProxies", toml_list(answers.trusted_proxies))
+        t.set("[Server]", "TrustedNetworks", toml_list(answers.trusted_networks))
+        t.set("[OpenIddict]", "Issuer", toml_str(answers.origin))
+        t.set("[OpenIddict]", "RequireHttps", "true" if answers.is_https else "false")
+        t.set("[Server]", "AllowedHosts", toml_list(answers.allowed_hosts))
+        t.set("[Mfa]", "RelyingPartyId", toml_str(answers.hostname))
+        t.set("[Mfa]", "Origins", toml_list(answers.cors_origins))
+        t.set("[Cors]", "AllowedOrigins", toml_list(answers.cors_origins))
+        t.set("[Cookie]", "SecurePolicy", toml_str("Always" if answers.is_https else "SameAsRequest"))
+        t.set("[OpenIddict.Certificates.Signing]", "KeyFile", toml_str("/etc/pylai/certs/signing-kek"))
+
+        if answers.signing_pfx:
+            t.set_many("[OpenIddict.Certificates.Signing]", {
+                "Path": toml_str(answers.signing_pfx),
+                "Password": toml_str(answers.signing_pfx_password),
+            })
+
+        if answers.encryption_pfx:
+            t.set_many("[OpenIddict.Certificates.Encryption]", {
+                "Path": toml_str(answers.encryption_pfx),
+                "Password": toml_str(answers.encryption_pfx_password),
+            })
+
+        for section, role in (
+            ("Seeds.DefaultAdmin", "admin"),
+            ("Seeds.DefaultUser", "user"),
+            ("Seeds.DefaultMax", "max"),
+        ):
+            account = answers.account(role)
+            t.set_many(f"[{section}]", {
+                "Email": toml_str(account.email),
+                "Password": toml_str(account.password),
+                "DisplayName": toml_str(account.display_name or role.title()),
+            })
+
+        if answers.smtp.enabled:
+            t.set("[Email]", "FromAddress", toml_str(answers.smtp.sender))
+            t.set_many("[Email.Smtp]", {
+                "Host": toml_str(answers.smtp.host),
+                "Port": str(answers.smtp.port),
+                "Security": toml_str(answers.smtp.security),
+                "Username": toml_str(answers.smtp.user),
+                "Password": toml_str(answers.smtp.password),
+            })
+
+        t.strip_line(r"(?m)^[ \t]*UseSsl[ \t]*=.*\n")
+        t.set("[Mfa]", "RequireForAdmin", "true" if answers.mfa_for_admin else "false")
+        t.set("[Mfa]", "RequireWebAuthnForMax", "true" if answers.mfa_webauthn_for_max else "false")
+
+        text = str(t)
+
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ManageError(f"生成的 pylai.toml 不是合法 TOML: {exc}") from exc
+
+        instance = cls()
+        instance._text = text
+        instance._try_parse()
+        instance._write()
+        return instance
 
     def _write(self) -> None:
-        ensure_home()
-        self.FILE.write_text(self._text, encoding="utf-8")
-        self.FILE.chmod(0o600)
+        atomic_write(self.FILE, self._text)
 
     def read(self) -> str:
         return self._text
@@ -619,352 +1556,203 @@ class PylaiConfig:
     def reload(self) -> None:
         if self.FILE.is_file():
             self._text = self.FILE.read_text(encoding="utf-8")
+            self._try_parse()
 
-    def get_value(self, section: str, key: str, default=None):
-        """从 TOML 解析获取指定段键值。"""
-        try:
-            data = tomllib.loads(self._text)
-            sec = data.get(section, {})
-            return sec.get(key, default) if isinstance(sec, dict) else default
-        except tomllib.TOMLDecodeError:
+    def get_value(self, section: str, key: str, default: Any = None) -> Any:
+        data = self._parsed
+        if data is None and self._text:
+            with suppress(tomllib.TOMLDecodeError):
+                data = tomllib.loads(self._text)
+
+        if data is None:
             return default
 
+        return nested_get(data, f"{section}.{key}", default)
+
     def set_block_value(self, marker: str, key: str, value: str) -> None:
-        """替换 TOML 段内指定键值；键不存在时插到段首行之后。"""
-        self._text = _replace_toml_block_value(self._text, marker, key, value)
+        self._text = replace_toml_block_value(self._text, marker, key, value)
         self._write()
+        self._try_parse()
 
     def mask(self) -> str:
-        """脱敏显示。"""
         return mask_config_text(self._text)
 
     def validate(self) -> None:
-        """Fail Closed：校验整体为合法 TOML。"""
         try:
             tomllib.loads(self._text)
         except tomllib.TOMLDecodeError as exc:
             raise ManageError(f"配置不是合法 TOML: {exc}") from exc
 
 
+# ============================================================================
+# Docker Compose
+# ============================================================================
+@dataclass(slots=True)
 class DockerCompose:
-    """Docker / docker compose 操作封装。
-
-    同时支持单容器（monolith）和多服务（compose）两种部署模式。
-    所有生命周期方法根据 self.mode 自动路由到正确路径。
-    """
-
-    CONTAINER = "pylai"
-    PROJECT_NAME = "pylai"
-    COMPOSE_FILE = HOME / "docker-compose.yml"
-
-    def __init__(self, container: str | None = None, project: str | None = None,
-                 mode: str = "monolith") -> None:
-        self.container = container or self.CONTAINER
-        self.project = project or self.PROJECT_NAME
-        self.mode = mode  # "monolith" | "compose"
-
-    # --- 基础 ---
+    project: str = "pylai"
+    compose_file: Path = HOME / "docker-compose.yml"
 
     def ensure_docker(self) -> None:
         if shutil.which("docker") is None:
             raise ManageError("未找到 docker，请先安装 Docker。")
-        result = run(["docker", "info"], check=False)
-        if result.returncode != 0:
+
+        if run(["docker", "info"], check=False).returncode != 0:
             raise ManageError("Docker daemon 不可用，请启动 Docker 服务。")
 
-    def _docker(self, *args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
-        return run(["docker", *args], check=check, timeout=timeout)
+    def compose(
+        self,
+        *args: str | Path,
+        check: bool = True,
+        timeout: int | None = None,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return run(
+            ["docker", "compose", "-p", self.project, "-f", self.compose_file, *args],
+            check=check,
+            timeout=timeout,
+            stdin=stdin,
+        )
 
-    def _compose(self, *args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
-        cmd = ["docker", "compose", "-p", self.project, "-f", str(self.COMPOSE_FILE)]
-        cmd.extend(args)
-        return run(cmd, check=check, timeout=timeout)
+    def docker(
+        self,
+        *args: str | Path,
+        check: bool = True,
+        timeout: int | None = None,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return run(["docker", *args], check=check, timeout=timeout, stdin=stdin)
 
-    # --- 模式检测 ---
+    def service_exists(self, service: ServiceName = "backend") -> bool:
+        return bool(self.compose("ps", "-q", service, check=False).stdout.strip())
 
-    def is_compose(self) -> bool:
-        return self.mode == "compose"
+    def service_status(self, service: ServiceName = "backend") -> Literal["running", "exited"]:
+        return "running" if self.service_exists(service) else "exited"
 
-    # --- 容器/服务状态 ---
+    def service_running(self, service: ServiceName = "backend") -> bool:
+        return self.service_status(service) == "running"
 
-    def container_exists(self) -> bool:
-        if self.is_compose():
-            result = self._compose("ps", "-q", "backend", check=False)
-            return bool(result.stdout.strip())
-        result = self._docker("inspect", self.container, check=False)
-        return result.returncode == 0
+    def write_env(self, answers: InstallAnswers) -> None:
+        atomic_write(HOME / ".env", "\n".join(answers.env_lines()) + "\n")
 
-    def container_status(self) -> str | None:
-        if self.is_compose():
-            result = self._compose("ps", "-q", "backend", check=False)
-            return "running" if result.stdout.strip() else "exited"
-        result = self._docker("inspect", "-f", "{{.State.Status}}", self.container, check=False)
-        return result.stdout.strip() if result.returncode == 0 else None
-
-    def container_running(self) -> bool:
-        return self.container_status() == "running"
-
-    def container_restart_count(self) -> int | None:
-        if self.is_compose():
-            return 0
-        result = self._docker("inspect", "-f", "{{.RestartCount}}", self.container, check=False)
-        if result.returncode != 0:
-            return None
-        try:
-            return int(result.stdout.strip())
-        except ValueError:
-            return None
-
-    # --- 生命周期 ---
-
-    def start(self, image: str, answers: dict, read_only: bool = True) -> None:
-        if self.is_compose():
-            self._compose_up(image, answers)
-            return
-
-        # monolith 路径（保留现有 start_container 逻辑）
-        if self.container_exists():
-            self._docker("rm", "-f", self.container)
-        ensure_home()
-        cmd = [
-            "docker", "run", "-d", "--name", self.container,
-            "--restart", "unless-stopped",
-        ]
-        if read_only:
-            cmd.append("--read-only")
-        cmd += [
-            "--cap-drop", "ALL",
-            "--cap-add", "CHOWN",
-            "--cap-add", "DAC_OVERRIDE",
-            "--cap-add", "FOWNER",
-            "--cap-add", "SETGID",
-            "--cap-add", "SETUID",
-            "--cap-add", "NET_BIND_SERVICE",
-            "--cap-add", "KILL",
-            "--tmpfs", "/tmp:rw,nosuid,size=64m",
-            "--tmpfs", "/run:rw,nosuid,size=16m",
-            "--security-opt", "no-new-privileges:true",
-            "--pids-limit", "512",
-            "-p", f"{answers['public_port']}:80",
-            "-p", f"127.0.0.1:{answers['api_port']}:5000",
-            "-v", f"{CONFIG_DIR}:/etc/pylai",
-            "-v", "pylai_data:/var/lib/pylai",
-            "-v", "pylai_pgdata:/var/lib/postgresql",
-            "-e", "PYLAI_ROLE=server",
-            "-e", f"PYLAI_UI_URL={answers['public_url']}",
-            "-e", f"PYLAI_DB_USER={answers['db_user']}",
-            "-e", f"PYLAI_DB_PASSWORD={answers['db_password']}",
-            "-e", f"PYLAI_DB_NAME={answers['db_name']}",
-            "-e", f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
-            image,
-        ]
-        run(cmd, timeout=120)
-
-    def _compose_up(self, image: str, answers: dict) -> None:
-        """Compose 模式：更新 .env 与镜像标签后 up -d。"""
-        if not self.COMPOSE_FILE.is_file():
+    def set_backend_image(self, image: str) -> None:
+        if not self.compose_file.is_file():
             raise ManageError("docker-compose.yml 不存在，请先执行安装。")
 
-        # 更新 .env
-        env_file = HOME / ".env"
-        env_lines = [
-            f"PYLAI_PUBLIC_PORT={answers['public_port']}",
-            f"PYLAI_API_PORT={answers['api_port']}",
-            f"PYLAI_DB_USER={answers['db_user']}",
-            f"PYLAI_DB_PASSWORD={answers['db_password']}",
-            f"PYLAI_DB_NAME={answers['db_name']}",
-            f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
-        ]
-        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
-        env_file.chmod(0o600)
+        text = self.compose_file.read_text(encoding="utf-8")
+        text = BACKEND_IMAGE_RE.sub(rf"\1{image}", text)
+        self.compose_file.write_text(text, encoding="utf-8")
 
-        # 更新 compose 文件中的 backend 镜像
-        text = self.COMPOSE_FILE.read_text(encoding="utf-8")
-        text = re.sub(
-            r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
-            rf'\1{image}',
-            text,
-            flags=re.MULTILINE,
-        )
-        self.COMPOSE_FILE.write_text(text, encoding="utf-8")
-
-        self._compose("up", "-d", "--remove-orphans", timeout=300)
+    def start(self, image: str, answers: InstallAnswers) -> None:
+        self.write_env(answers)
+        self.set_backend_image(image)
+        self.compose("up", "-d", "--remove-orphans", timeout=300)
 
     def stop(self, timeout_sec: int = 30) -> None:
-        if self.is_compose():
-            self._compose("down", timeout=120)
-            return
-        self._docker("stop", "-t", str(timeout_sec), self.container, timeout=120)
+        self.compose("stop", "-t", str(timeout_sec), timeout=120)
 
     def restart(self, timeout_sec: int = 30) -> None:
-        if self.is_compose():
-            self._compose("restart", "backend", timeout=120)
-            return
-        self._docker("restart", "-t", str(timeout_sec), self.container, timeout=120)
+        self.compose("restart", "-t", str(timeout_sec), "backend", timeout=120)
 
-    def rm(self, force: bool = True) -> None:
-        if self.is_compose():
-            self._compose("down", "-v", timeout=120)
-            return
-        args = ["rm", "-f"] if force else ["rm"]
-        self._docker(*args, self.container, check=False)
+    def down(self) -> None:
+        self.compose("down", "-v", timeout=120)
 
-    # --- 日志 ---
+    def logs_text(
+        self,
+        tail: int | str = 200,
+        *,
+        follow: bool = False,
+        service: ServiceName | Literal["all"] = "all",
+    ) -> str:
+        cmd: list[str | Path] = ["logs", "--timestamps", "--tail", str(tail)]
 
-    def logs_text(self, tail: int | str = 200, follow: bool = False,
-                  service: str = "all") -> str:
-        if self.is_compose():
-            svc = "" if service == "all" else service
-            cmd = ["docker", "compose", "-p", self.project, "-f", str(self.COMPOSE_FILE),
-                   "logs", "--timestamps", "--tail", str(tail)]
-            if follow:
-                cmd.append("-f")
-            if svc:
-                cmd.append(svc)
-            result = run(cmd, check=False)
-            return result.stdout + result.stderr
-        cmd = ["docker", "logs", "--timestamps", "--tail", str(tail)]
         if follow:
             cmd.append("-f")
-        cmd.append(self.container)
-        result = run(cmd, check=False)
+        if service != "all":
+            cmd.append(service)
+
+        result = self.compose(*cmd, check=False)
         return result.stdout + result.stderr
 
-    def view_logs(self, tail: int | str = 200, follow: bool = False,
-                  service: str = "all") -> None:
-        if not self.container_exists():
+    def view_logs(
+        self,
+        tail: int | str = 200,
+        *,
+        follow: bool = False,
+        service: ServiceName | Literal["all"] = "all",
+    ) -> None:
+        if not self.service_exists("backend"):
             out("尚未安装或服务不存在。")
             return
-        if self.is_compose():
-            text = self.logs_text(tail, follow, service)
-            out(text.strip() or "（暂无日志输出）")
-            return
-        cmd = ["docker", "logs", "--timestamps", "--tail", str(tail)]
-        if follow:
-            cmd.append("-f")
-        cmd.append(self.container)
-        less = shutil.which("less")
-        if less is None:
-            subprocess.run(cmd, check=False)
-            return
-        if follow:
-            out("已进入持续跟踪：Ctrl+C 停止跟踪，按 q 退出；退出后返回日志菜单。\n")
-        try:
-            with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as docker_proc:
-                less_cmd = [less, "-R"]
-                if follow:
-                    less_cmd.append("+F")
-                subprocess.run(less_cmd, stdin=docker_proc.stdout, check=False)
-                if docker_proc.stdout is not None:
-                    docker_proc.stdout.close()
-                try:
-                    docker_proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    docker_proc.terminate()
-                    try:
-                        docker_proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        docker_proc.kill()
-        except (OSError, subprocess.SubprocessError) as exc:
-            out(f"日志查看失败: {exc}")
 
-    # --- 执行 ---
+        text = self.logs_text(tail, follow=follow, service=service)
+        out(text.strip() or "（暂无日志输出）")
 
-    def exec(self, *args: str, check: bool = True, timeout: int | None = None,
-             input_text: str | None = None, service: str | None = None) -> subprocess.CompletedProcess:
-        if self.is_compose():
-            svc = service or "backend"
-            return self._compose("exec", "-T", svc, *args, check=check, timeout=timeout, input_text=input_text)
-        return self._docker("exec", *args, self.container, check=check, timeout=timeout, input_text=input_text)
-
-    def exec_pylaios(self, *args: str, check: bool = True, timeout: int | None = None,
-                     input_text: str | None = None, service: str | None = None) -> subprocess.CompletedProcess:
-        if self.is_compose():
-            return self.exec("-i", PYLAIOS_BIN, *args, check=check, timeout=timeout,
-                           input_text=input_text, service=service or "backend")
-        return self.exec("-i", PYLAIOS_BIN, *args, check=check, timeout=timeout, input_text=input_text)
-
-    # --- 镜像 ---
+    def exec_pylaios(
+        self,
+        *args: str,
+        check: bool = True,
+        timeout: int | None = None,
+        stdin: str | None = None,
+        service: ServiceName = "backend",
+    ) -> subprocess.CompletedProcess[str]:
+        return self.compose(
+            "exec",
+            "-T",
+            service,
+            "-i",
+            PYLAIOS_BIN,
+            *args,
+            check=check,
+            timeout=timeout,
+            stdin=stdin,
+        )
 
     def load_image_tar(self, tar_path: Path) -> str:
         out(f"==> 加载镜像 {tar_path.name} ...")
-        result = self._docker("load", "-i", str(tar_path), timeout=1200)
+
+        result = self.docker("load", "-i", tar_path, timeout=1200)
         version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
         expected = f"pylaios:{version}-{arch}"
-        lines = result.stdout.splitlines() + result.stderr.splitlines()
-        for line in lines:
-            if "Loaded image" in line:
-                name = line.split(":", 1)[1].strip() if ":" in line else ""
-                if name:
-                    return name
-        inspect = self._docker("image", "inspect", expected, check=False)
-        if inspect.returncode == 0:
+
+        for line in (result.stdout + result.stderr).splitlines():
+            if "Loaded image" in line and ":" in line:
+                return line.split(":", 1)[1].strip()
+
+        if self.docker("image", "inspect", expected, check=False).returncode == 0:
             return expected
-        raise ManageError(f"无法确定镜像名称，请手动确认: {result.stdout}\n{result.stderr}")
 
-    def read_env(self) -> dict[str, str]:
-        if self.is_compose():
-            env_file = HOME / ".env"
-            if env_file.is_file():
-                return parse_env_file(env_file)
-            return {}
-        result = self._docker(
-            "inspect", self.container, "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}",
+        raise ManageError(
+            f"无法确定镜像名称，请手动确认:\n{result.stdout}\n{result.stderr}"
         )
-        env: dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                env[key] = value
-        return env
 
-    # --- 健康检查 ---
+    def read_env(self) -> EnvMap:
+        env_file = HOME / ".env"
+        if env_file.is_file():
+            return parse_env_file(env_file)
+        return {}
 
     def wait_healthy(self, api_port: int, timeout: int = 180) -> bool:
         url = f"http://127.0.0.1:{api_port}/health/ready"
-        if self.is_compose():
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                try:
-                    with urllib.request.urlopen(url, timeout=3) as resp:
-                        if resp.status == 200:
-                            return True
-                except (OSError, urllib.error.URLError):
-                    pass
-                status = self.container_status()
-                if status not in ("running", None):
-                    return False
-                time.sleep(3)
-            return False
-
-        restart_count = self.container_restart_count()
-        if restart_count is None:
-            return False
         deadline = time.monotonic() + timeout
+
         while time.monotonic() < deadline:
-            if self.container_status() != "running":
-                return False
-            current = self.container_restart_count()
-            if current is None or current > restart_count:
-                return False
-            try:
+            with suppress(OSError, urllib.error.URLError):
                 with urllib.request.urlopen(url, timeout=3) as resp:
                     if resp.status == 200:
                         return True
-            except (OSError, urllib.error.URLError):
-                pass
+
+            if self.service_status("backend") != "running":
+                return False
+
             time.sleep(3)
+
         return False
 
 
+# ============================================================================
+# Compose 配置
+# ============================================================================
 class ComposeConfig:
-    """多服务 Docker Compose 配置管理。
-
-    生成 docker-compose.yml、.env 和 nginx.conf（Compose 模式下 nginx
-    服务使用，将所有请求反向代理到 backend:5000）。
-    """
-
     COMPOSE_FILE = HOME / "docker-compose.yml"
     ENV_FILE = HOME / ".env"
 
@@ -975,11 +1763,11 @@ services:
     volumes:
       - pylai_pgdata:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: ${PYLAI_DB_USER}
-      POSTGRES_PASSWORD: ${PYLAI_DB_PASSWORD}
-      POSTGRES_DB: ${PYLAI_DB_NAME}
+      POSTGRES_USER: ${{PYLAI_DB_USER}}
+      POSTGRES_PASSWORD: ${{PYLAI_DB_PASSWORD}}
+      POSTGRES_DB: ${{PYLAI_DB_NAME}}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PYLAI_DB_USER} -d ${PYLAI_DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U ${{PYLAI_DB_USER}} -d ${{PYLAI_DB_NAME}}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -990,7 +1778,7 @@ services:
       - pylai_redisdata:/data
     command: >
       redis-server
-      --requirepass ${PYLAI_REDIS_PASSWORD}
+      --requirepass ${{PYLAI_REDIS_PASSWORD}}
       --appendonly yes
       --save ""
     healthcheck:
@@ -1010,7 +1798,7 @@ services:
       - {config_dir}:/etc/pylai:ro
       - pylai_data:/var/lib/pylai
     ports:
-      - "127.0.0.1:${PYLAI_API_PORT}:5000"
+      - "127.0.0.1:${{PYLAI_API_PORT}}:5000"
     environment:
       PYLAI_CONFIG: /etc/pylai/pylai.toml
       PYLAI_DP_KEK_FILE: /var/lib/pylai/secrets/dp-kek
@@ -1025,7 +1813,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "${PYLAI_PUBLIC_PORT}:80"
+      - "${{PYLAI_PUBLIC_PORT}}:80"
     volumes:
       - {config_dir}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
@@ -1036,48 +1824,31 @@ volumes:
 """
 
     @classmethod
-    def generate(cls, answers: dict, manager_cfg: ManagerConfig | None = None,
-                 image: str = "pylaios:latest") -> "ComposeConfig":
-        """生成 docker-compose.yml、.env 和 nginx.conf。"""
+    def generate(
+        cls,
+        answers: InstallAnswers,
+        manager: ManagerConfig | None = None,
+        image: str = "pylaios:latest",
+    ) -> None:
         ensure_home()
 
-        services_cfg = manager_cfg.get("Compose.Services", default={}) if manager_cfg else {}
-        postgres_image = services_cfg.get("PostgresImage", "postgres:17-alpine")
-        redis_image = services_cfg.get("RedisImage", "redis:7-alpine")
-        backend_image = services_cfg.get("BackendImage", image)
-        nginx_image = services_cfg.get("NginxImage", "nginx:alpine")
+        services_cfg = manager.get("Compose", "Services", default={}) if manager else {}
+        services_cfg = services_cfg or {}
 
         compose_text = cls._COMPOSE_TEMPLATE.format(
-            postgres_image=postgres_image,
-            redis_image=redis_image,
-            backend_image=backend_image,
-            nginx_image=nginx_image,
-            config_dir=str(CONFIG_DIR),
+            postgres_image=services_cfg.get("PostgresImage", "postgres:17-alpine"),
+            redis_image=services_cfg.get("RedisImage", "redis:7-alpine"),
+            backend_image=services_cfg.get("BackendImage", image),
+            nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
+            config_dir=CONFIG_DIR,
         )
 
-        env_lines = [
-            f"PYLAI_PUBLIC_PORT={answers['public_port']}",
-            f"PYLAI_API_PORT={answers['api_port']}",
-            f"PYLAI_DB_USER={answers['db_user']}",
-            f"PYLAI_DB_PASSWORD={answers['db_password']}",
-            f"PYLAI_DB_NAME={answers['db_name']}",
-            f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
-        ]
-        env_file = cls.ENV_FILE
-        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
-        env_file.chmod(0o600)
-
-        compose_file = cls.COMPOSE_FILE
-        compose_file.write_text(compose_text, encoding="utf-8")
-        compose_file.chmod(0o600)
-
+        atomic_write(cls.ENV_FILE, "\n".join(answers.env_lines()) + "\n")
+        atomic_write(cls.COMPOSE_FILE, compose_text)
         cls.write_nginx_conf()
-        return cls()
 
     @classmethod
     def write_nginx_conf(cls) -> None:
-        """生成 nginx.conf 到 config 目录（Compose 模式下使用）。"""
-        nginx_conf = CONFIG_DIR / "nginx.conf"
         template = """\
 server {
     listen 80;
@@ -1092,211 +1863,179 @@ server {
     }
 }
 """
-        ensure_home()
-        nginx_conf.write_text(template, encoding="utf-8")
-        nginx_conf.chmod(0o644)
+        atomic_write(CONFIG_DIR / "nginx.conf", template, mode=0o644)
 
     @classmethod
     def ensure_volumes(cls) -> None:
-        """确保 Compose 命名卷已创建（避免首次 up 时延迟）。"""
         for vol in ("pylai_pgdata", "pylai_redisdata", "pylai_data"):
             run(["docker", "volume", "create", vol], check=False)
 
 
+# ============================================================================
+# Release 客户端与自更新
+# ============================================================================
 class ReleaseClient:
-    """GitHub Release / 镜像源 客户端。
-
-    支持三种模式：
-      1. Github  — 直接调用 GitHub API
-      2. ghproxy — 通过 ghproxy 代理访问 GitHub API
-      3. Custom  — 用户自定义 CDN，直接读取 {base_url}/releases/latest.json
-    """
-
     REPO = "Kirsmin/Pylai"
     USER_AGENT = f"ManagePylai/{__version__}"
 
-    # 预定义镜像的 API 根（仅用于 GitHub 原生 API 调用）
     PREDEFINED_API: dict[str, str] = {
         "Github": "https://api.github.com",
         "ghproxy": "https://ghproxy.com/https://api.github.com",
     }
 
-    # 预定义镜像的 Raw 下载根
     PREDEFINED_RAW: dict[str, str] = {
         "Github": "https://github.com",
         "ghproxy": "https://ghproxy.com/https://github.com",
     }
 
-    def __init__(self, manager_cfg: ManagerConfig) -> None:
-        self.cfg = manager_cfg
-        self.mirror = manager_cfg.mirror
-        self.custom_base = manager_cfg.custom_mirror_base
-        self._is_custom = self.mirror == "Custom" and bool(self.custom_base)
+    def __init__(self, manager: ManagerConfig) -> None:
+        self.manager = manager
+        self.mirror = manager.mirror
+        self.custom_base = manager.custom_mirror_base
+        self.is_custom = self.mirror == "Custom" and bool(self.custom_base)
 
     def _api_url(self, path: str) -> str:
-        if self._is_custom:
+        if self.is_custom:
             raise ManageError("自定义镜像源不支持 GitHub API 调用")
+
         base = self.PREDEFINED_API.get(self.mirror, self.PREDEFINED_API["Github"])
         return f"{base}/repos/{self.REPO}/{path}"
 
     def _release_url(self, version: str, filename: str) -> str:
-        if self._is_custom:
-            base = self.custom_base.rstrip("/")
+        if self.is_custom:
+            base = (self.custom_base or "").rstrip("/")
             return f"{base}/releases/v{version}/{filename}"
+
         base = self.PREDEFINED_RAW.get(self.mirror, self.PREDEFINED_RAW["Github"])
         return f"{base}/{self.REPO}/releases/download/v{version}/{filename}"
 
     def _latest_url(self) -> str:
-        if self._is_custom:
-            return f"{self.custom_base.rstrip('/')}/releases/latest.json"
+        if self.is_custom:
+            base = (self.custom_base or "").rstrip("/")
+            return f"{base}/releases/latest.json"
         return self._api_url("releases/latest")
 
-    def check_latest(self) -> tuple[str, str, dict] | None:
-        """返回 (version, tag_or_ref, release_info_dict) 或 None。
+    def check_latest(self) -> tuple[str, str, Json] | None:
+        headers = {"User-Agent": self.USER_AGENT}
 
-        release_info_dict 在 Custom 模式下就是 latest.json 本身；
-        在 GitHub 模式下是 releases/latest API 的完整 JSON。
-        """
-        try:
-            headers: dict[str, str] = {
-                "User-Agent": self.USER_AGENT,
-            }
-            if not self._is_custom:
-                headers["Accept"] = "application/vnd.github+json"
-                headers["X-GitHub-Api-Version"] = "2022-11-28"
+        if not self.is_custom:
+            headers.update(
+                {
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                }
+            )
 
-            req = urllib.request.Request(self._latest_url(), headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+        with suppress(OSError, urllib.error.URLError, json.JSONDecodeError):
+            request = urllib.request.Request(self._latest_url(), headers=headers)
+
+            with urllib.request.urlopen(request, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
-            if self._is_custom:
+            if self.is_custom:
                 version = str(data.get("version", ""))
                 return version, f"v{version}", data
-            else:
-                tag = data.get("tag_name", "")
-                version = tag.lstrip("v")
-                return version, tag, data
-        except (OSError, urllib.error.URLError, json.JSONDecodeError):
-            return None
 
-    def fetch_release_json(self, version: str) -> dict | None:
-        """获取 release.json 用于 dbSchemaVersion 兼容性校验。
+            tag = str(data.get("tag_name", ""))
+            return tag.removeprefix("v"), tag, data
 
-        Custom 镜像源同样支持 {base_url}/releases/v{X.Y.Z}/release.json。
-        """
-        if self._is_custom:
-            url = f"{self.custom_base.rstrip('/')}/releases/v{version}/release.json"
+        return None
+
+    def fetch_release_json(self, version: str) -> Json | None:
+        if self.is_custom:
+            base = (self.custom_base or "").rstrip("/")
+            url = f"{base}/releases/v{version}/release.json"
         else:
             url = self._release_url(version, "release.json")
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, json.JSONDecodeError):
-            return None
 
-    def download(self, version: str, filename: str, dest: Path,
-                 sha256_expected: str | None = None) -> None:
-        """下载 release 文件；可选 SHA256 校验。"""
+        with suppress(OSError, urllib.error.URLError, json.JSONDecodeError):
+            request = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
+            with urllib.request.urlopen(request, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        return None
+
+    def download(
+        self,
+        version: str,
+        filename: str,
+        dest: Path,
+        *,
+        sha256_expected: str | None = None,
+    ) -> None:
         url = self._release_url(version, filename)
         out(f"==> 下载 {filename} ...")
+
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = resp.read()
+            request = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
+            with urllib.request.urlopen(request, timeout=300) as resp:
+                dest.write_bytes(resp.read())
         except (OSError, urllib.error.URLError) as exc:
             raise ManageError(f"下载失败: {exc}") from exc
 
         if sha256_expected:
-            import hashlib
-            actual = hashlib.sha256(data).hexdigest()
+            actual = hashlib.sha256(dest.read_bytes()).hexdigest()
             if actual != sha256_expected:
-                raise ManageError(
-                    f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}"
-                )
-
-        dest.write_bytes(data)
+                raise ManageError(f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}")
 
 
 class SelfUpdater:
-    """ManagePylai.py 自更新逻辑。
-
-    流程：
-      1. 读取 ManagerConfig 中的 mirror / skip_version
-      2. 调用 ReleaseClient 获取 latest（含 release_info）
-      3. 版本比较 + 跳过版本过滤
-      4. dbSchemaVersion 兼容性校验（需要 State 中的当前 Pylai 版本）
-      5. 下载 ManagePylai.py.new + .sha256
-      6. SHA256 校验
-      7. 备份旧脚本 → 原子替换 → 清除 skip_version
-    """
-
     def __init__(
         self,
         client: ReleaseClient,
-        manager_cfg: ManagerConfig,
+        manager: ManagerConfig,
         state: State | None = None,
         script_path: Path | None = None,
     ) -> None:
         self.client = client
-        self.cfg = manager_cfg
+        self.manager = manager
         self.state = state
         self.script_path = script_path or Path(__file__).resolve()
 
-    # ---------- 版本检查 ----------
+    @staticmethod
+    def version_key(version: str) -> tuple[int, ...]:
+        parts = [
+            int(m.group()) if (m := re.match(r"\d+", part)) else 0
+            for part in version.split(".")
+        ]
+        return (*parts, *[0] * max(0, 3 - len(parts)))
 
-    def check(self) -> tuple[str, dict] | None:
-        """返回 (version, release_info) 或 None（无更新/网络失败/已跳过）。"""
+    @classmethod
+    def version_gt(cls, a: str, b: str) -> bool:
+        return cls.version_key(a) > cls.version_key(b)
+
+    def check(self) -> tuple[str, Json] | None:
         result = self.client.check_latest()
         if not result:
             return None
+
         version, _, info = result
 
-        if not self._version_gt(version, __version__):
+        if not self.version_gt(version, __version__):
             return None
 
-        skip = self.cfg.skip_version
-        if skip and version == skip:
+        if self.manager.skip_version == version:
             out(f"版本 {version} 已标记为跳过。")
             return None
 
         return version, info
 
-    @staticmethod
-    def _version_gt(a: str, b: str) -> bool:
-        """语义化版本比较：a > b。支持 X.Y.Z，忽略非数字后缀。"""
-        def _parts(v: str) -> list[int]:
-            parts: list[int] = []
-            for x in v.split("."):
-                m = re.match(r"(\d+)", x)
-                parts.append(int(m.group(1)) if m else 0)
-            while len(parts) < 3:
-                parts.append(0)
-            return parts
-        return _parts(a) > _parts(b)
-
-    # ---------- Schema 兼容性 ----------
-
-    def _check_schema_compat(self, release_info: dict) -> bool:
-        """检查 dbSchemaVersion 兼容性。返回 True 表示可以继续更新。
-
-        逻辑：
-          - release_info 无 dbSchemaVersion → 兼容（旧版本）
-          - 未安装 Pylai（state 为空）    → 兼容
-          - 当前版本 release.json 无法获取 → 警告并放行
-          - 当前 schema == 目标 schema      → 兼容
-          - 否则                           → 不兼容，需手动迁移
-        """
+    def _check_schema_compat(self, release_info: Json) -> bool:
         remote_schema = release_info.get("dbSchemaVersion")
         if not remote_schema:
             return True
+
         if not self.state or not self.state.installed:
             return True
 
-        current_pylai_ver = self.state.version
-        current_release = self.client.fetch_release_json(current_pylai_ver)
+        current_pylai_version = self.state.version
+        current_release = self.client.fetch_release_json(current_pylai_version)
+
         if not current_release:
-            out(f"警告：无法获取当前 Pylai {current_pylai_ver} 的 release.json，跳过 schema 兼容性检查。")
+            out(
+                f"警告：无法获取当前 Pylai {current_pylai_version} 的 release.json，"
+                "跳过 schema 兼容性检查。"
+            )
             return True
 
         current_schema = current_release.get("dbSchemaVersion", "0")
@@ -1307,32 +2046,34 @@ class SelfUpdater:
         out("此更新需要手动数据库迁移，请查看迁移文档后手动执行。")
         return False
 
-    # ---------- 执行更新 ----------
-
-    def update(self, force: bool = False, dry_run: bool = False,
-               skip_prompt: bool = False) -> bool:
-        """执行自更新；返回是否成功。"""
+    def update(
+        self,
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+        skip_prompt: bool = False,
+    ) -> bool:
         result = self.client.check_latest()
         if not result:
             out("无法获取最新版本信息。")
             return False
+
         version, _, info = result
 
-        if not force and not self._version_gt(version, __version__):
+        if not force and not self.version_gt(version, __version__):
             out(f"当前已是最新版本 {__version__}。")
             return False
 
         out(f"==> 更新 ManagePylai.py: {__version__} -> {version}")
 
-        # 1. dbSchemaVersion 兼容性校验
         if not self._check_schema_compat(info):
             if skip_prompt:
                 out("Schema 不兼容且非交互模式，跳过更新。")
                 return False
-            if not ask_yes_no("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
+
+            if not ask_bool("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
                 return False
 
-        # 2. 下载 ManagePylai.py.new
         new_script = self.script_path.with_suffix(".py.new")
         sha256_file = self.script_path.with_suffix(".py.sha256")
 
@@ -1343,19 +2084,16 @@ class SelfUpdater:
             new_script.unlink(missing_ok=True)
             return False
 
-        # 3. 下载并解析 SHA256
         sha256_expected: str | None = None
+
         try:
             self.client.download(version, "ManagePylai.py.sha256", sha256_file)
             sha256_content = sha256_file.read_text(encoding="ascii").strip()
-            # 支持两种格式: "hash" 或 "hash  filename"
             sha256_expected = sha256_content.split()[0]
         except (ManageError, OSError):
             out("警告：无法下载或读取 SHA256 校验文件")
 
-        # 4. SHA256 校验
         if sha256_expected:
-            import hashlib
             actual = hashlib.sha256(new_script.read_bytes()).hexdigest()
             if actual != sha256_expected:
                 out(f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}")
@@ -1370,13 +2108,11 @@ class SelfUpdater:
             sha256_file.unlink(missing_ok=True)
             return True
 
-        # 5. 备份 + 原子替换
         try:
             backup = self.script_path.with_suffix(f".py.bak.{__version__}")
             shutil.copy2(self.script_path, backup)
             os.replace(new_script, self.script_path)
-            # 更新成功后清除 skip_version
-            self.cfg.set_skip_version(None)
+            self.manager.set_skip_version(None)
             out(f"ManagePylai.py 已更新至 {version}，请重新运行脚本。")
             return True
         except OSError as exc:
@@ -1385,1489 +2121,119 @@ class SelfUpdater:
         finally:
             sha256_file.unlink(missing_ok=True)
 
-    # ---------- 更新前钩子 ----------
-
-    def ensure_up_to_date(self, yes: bool = False) -> None:
-        """在 `update` 命令开始时检查并提示/强制自更新。
-
-        如果更新成功，直接 sys.exit(0) 要求用户重新运行。
-        """
+    def ensure_up_to_date(self, *, yes: bool = False) -> None:
         result = self.check()
         if not result:
             return
+
         version, info = result
+        message = f"ManagePylai.py 有新版本 {version}，是否先更新管理工具？"
 
-        msg = f"ManagePylai.py 有新版本 {version}，是否先更新管理工具？"
         if yes:
-            out(msg + " [Y/n] Y (非交互模式)")
-            self.update(skip_prompt=yes)
-            out("管理工具已更新，请重新运行命令。")
-            sys.exit(0)
+            out(message + " [Y/n] Y (非交互模式)")
+            if self.update(skip_prompt=yes):
+                out("管理工具已更新，请重新运行命令。")
+                sys.exit(0)
+            return
 
-        if ask_yes_no(msg, default=True):
-            self.update()
-            out("管理工具已更新，请重新运行命令。")
-            sys.exit(0)
+        if ask_bool(message, True):
+            if self.update():
+                out("管理工具已更新，请重新运行命令。")
+                sys.exit(0)
         else:
-            # 用户拒绝更新，询问是否跳过此版本
-            if ask_yes_no(f"是否跳过版本 {version} 的后续提醒？", False):
-                self.cfg.set_skip_version(version)
+            if ask_bool(f"是否跳过版本 {version} 的后续提醒？", False):
+                self.manager.set_skip_version(version)
                 out(f"已设置跳过版本 {version}。")
+
             out("警告：使用旧版本管理工具更新可能存在兼容性问题。")
 
 
-class InteractiveMenu:
-    """旧交互式菜单（兼容层）。
-
-    Phase 1 中直接代理到原有全局函数，保持所有交互行为不变。
-    后续 Phase 可逐步将 action/submenu 函数内联为类方法。
-    """
-
-    def __init__(self, docker: DockerCompose, state: State, config: PylaiConfig) -> None:
-        self.docker = docker
-        self.state = state
-        self.config = config
-
-    def run(self) -> None:
-        """进入主菜单循环（替代原有 main_menu）。"""
-        main_menu()
-
-
-class ManageError(Exception):
-    pass
-
-
-def out(message: str = "") -> None:
-    print(message, flush=True)
-
-
-def random_password(length: int = 12) -> str:
-    """生成同时包含数字、小写和大写字母的初始密码。"""
-    return f"{secrets.token_urlsafe(length)}Aa1"
-
-
-def reveal_credentials(credentials: list[tuple[str, str]], yes_mode: bool = False) -> None:
-    """批量显示凭据，按回车后从终端清除。
-
-    credentials: [(label, value), ...]
-    yes_mode=True 时不显示到终端（非交互模式），只写入受保护文件。
-    """
-    if not credentials:
-        return
-
-    # 写入受保护文件（追加模式，安装过程可能多次调用）
-    cred_file = HOME / ".install-credentials"
-    ensure_home()
-    with open(cred_file, "a", encoding="utf-8") as f:
-        for label, value in credentials:
-            f.write(f"{label}: {value}\n")
-    cred_file.chmod(0o600)
-
-    if yes_mode:
-        return
-
-    # 终端显示
-    for label, value in credentials:
-        print(f"  {label}: {value}")
-
-    print(f"  {'='*60}")
-    print("  ⚠️  请妥善保存以上凭据，按回车后此信息将从屏幕消失")
-    try:
-        input()
-    except (EOFError, KeyboardInterrupt):
-        pass
-
-    # 清除显示：上移 n 行后清到屏幕底部
-    lines = 2 + len(credentials)  # 分隔线 + 提示 + 每行凭据
-    sys.stdout.write(f"\033[{lines}F\033[J")
-    sys.stdout.flush()
-    print("  [凭据已隐藏，如需查看请检查 ~/.pylai/.install-credentials]")
-
-
-def ask(
-    prompt: str,
-    default: str | None = None,
-    secret: bool = False,
-    allow_blank: bool = False,
-) -> str:
-    """读取一行输入。
-
-    default 非空：空输入返回默认值；default 为空且 allow_blank=True：空输入返回空字符串；
-    否则提示“该项不能为空。”并重新询问。
-    """
-    suffix = f" [{default}]" if default else ""
-    prompt_line = f"{prompt}{suffix}: "
-    while True:
-        try:
-            value = input(prompt_line)
-        except (EOFError, KeyboardInterrupt):
-            out("\n已退出。")
-            raise SystemExit(0)
-        if secret and sys.stdout.isatty():
-            # 输入时明文显示；回车后回退一行清除整行并重印提示（密码从屏幕消失）
-            sys.stdout.write("\033[1A\033[2K")
-            sys.stdout.write(prompt_line + "\n")
-            sys.stdout.flush()
-        value = value.strip()
-        if value:
-            return value
-        if default:
-            return default
-        if allow_blank:
-            return ""
-        out("该项不能为空。")
-
-
-def ask_yes_no(prompt: str, default: bool = True) -> bool:
-    suffix = " [Y/n]" if default else " [y/N]"
-    while True:
-        value = ask(prompt + suffix, "", allow_blank=True).strip().lower()
-        if not value:
-            return default
-        if value in ("y", "yes", "1"):
-            return True
-        if value in ("n", "no", "0"):
-            return False
-        out("请输入 y 或 n。")
-
-
-def ask_int(prompt: str, default: int, minimum: int = 1, maximum: int = 65535) -> int:
-    while True:
-        raw = ask(prompt, str(default))
-        try:
-            value = int(raw)
-        except ValueError:
-            out("请输入数字。")
-            continue
-        if minimum <= value <= maximum:
-            return value
-        out(f"请输入 {minimum}-{maximum} 之间的数字。")
-
-
-def choose(options: list[tuple[str, str]], prompt: str = "请选择") -> str | None:
-    if not options:
-        out("没有可选项。")
-        return None
-    while True:
-        for index, (label, _) in enumerate(options, 1):
-            out(f"  [{index}] {label}")
-        raw = ask(prompt, "1")
-        try:
-            return options[int(raw) - 1][1]
-        except (ValueError, IndexError):
-            out("选择无效。\n")
-
-
-def confirm_danger(text: str, required_word: str = "DELETE") -> bool:
-    out(f"危险操作：{text}")
-    value = ask(f"请输入 {required_word} 确认", "").strip()
-    return value == required_word
-
-
-def run(
-    cmd: list[str],
-    check: bool = True,
-    timeout: int | None = None,
-    input_text: str | None = None,
-) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, input=input_text)
-    if check and result.returncode != 0:
-        raise ManageError(result.stderr.strip() or result.stdout.strip() or f"命令失败: {' '.join(cmd)}")
-    return result
-
-
-def docker(*args: str, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
-    return run(["docker", *args], check=check, timeout=timeout)
-
-
-def ensure_docker() -> None:
-    if shutil.which("docker") is None:
-        raise ManageError("未找到 docker，请先安装 Docker。")
-    result = docker("info", check=False)
-    if result.returncode != 0:
-        raise ManageError("Docker daemon 不可用，请启动 Docker 服务。")
-
-
-def ensure_home() -> None:
-    for path in (CONFIG_DIR, CERT_DIR, DATA_DIR, PG_DATA_DIR, BACKUP_DIR):
-        path.mkdir(parents=True, exist_ok=True)
-    PG_DATA_DIR.chmod(0o700)
-
-
-def load_state() -> dict:
-    if not STATE_FILE.is_file():
-        return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def save_state(state: dict) -> None:
-    ensure_home()
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    STATE_FILE.chmod(0o600)
-
-
-def container_exists() -> bool:
-    result = docker("inspect", CONTAINER, check=False)
-    return result.returncode == 0
-
-
-def container_status() -> str | None:
-    result = docker("inspect", "-f", "{{.State.Status}}", CONTAINER, check=False)
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def container_restart_count() -> int | None:
-    result = docker("inspect", "-f", "{{.RestartCount}}", CONTAINER, check=False)
-    if result.returncode != 0:
-        return None
-    try:
-        return int(result.stdout.strip())
-    except ValueError:
-        return None
-
-
-def container_running() -> bool:
-    return container_status() == "running"
-
-
-def print_container_logs(tail: int = 60) -> None:
-    result = docker("logs", "--timestamps", "--tail", str(tail), CONTAINER, check=False)
-    output = (result.stdout + result.stderr).strip()
-    if output:
-        out(output)
-    else:
-        out("（容器暂无日志输出）")
-
-
-def view_container_logs(tail: int | str = 200, follow: bool = False) -> None:
-    """用 less 查看容器日志；follow=True 时使用 less +F 持续跟踪。"""
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-
-    cmd = ["docker", "logs", "--timestamps", "--tail", str(tail)]
-    if follow:
-        cmd.append("-f")
-    cmd.append(CONTAINER)
-
-    less = shutil.which("less")
-    if less is None:
-        subprocess.run(cmd, check=False)
-        return
-
-    if follow:
-        out("已进入持续跟踪：Ctrl+C 停止跟踪，按 q 退出；退出后返回日志菜单。\n")
-    try:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as docker_proc:
-            less_cmd = [less, "-R"]
-            if follow:
-                less_cmd.append("+F")
-            subprocess.run(less_cmd, stdin=docker_proc.stdout, check=False)
-            if docker_proc.stdout is not None:
-                docker_proc.stdout.close()
-            try:
-                docker_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                docker_proc.terminate()
-                try:
-                    docker_proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    docker_proc.kill()
-    except (OSError, subprocess.SubprocessError) as exc:
-        out(f"日志查看失败: {exc}")
-
-
-def wait_healthy(api_port: int, timeout: int = 180) -> bool:
-    url = f"http://127.0.0.1:{api_port}/health/ready"
-    restart_count = container_restart_count()
-    if restart_count is None:
-        return False
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        # 容器退出/进入重启循环时无需继续等待，尽快把日志交给用户排查
-        if container_status() != "running":
-            return False
-        current_restart_count = container_restart_count()
-        if current_restart_count is None or current_restart_count > restart_count:
-            return False
-        try:
-            with urllib.request.urlopen(url, timeout=3) as resp:
-                if resp.status == 200:
-                    return True
-        except (OSError, urllib.error.URLError):
-            pass
-        time.sleep(3)
-    return False
-
-
-def host_arch() -> str:
-    machine = host_platform.machine().lower()
-    return SUPPORTED_ARCH.get(machine, "AMD64")
-
-
-def discover_tars() -> list[Path]:
-    tars: list[Path] = []
-    for path in sorted(Path.cwd().glob("Pylai-*.tar")):
-        if TAR_PATTERN.match(path.name):
-            tars.append(path)
-    return tars
-
-
-def parse_tar(path: Path) -> tuple[str, str] | None:
-    match = TAR_PATTERN.match(path.name)
-    if not match:
-        return None
-    return match.group(1), match.group(2)
-
-
-def load_image_tar(tar_path: Path) -> str:
-    out(f"==> 加载镜像 {tar_path.name} ...")
-    result = docker("load", "-i", str(tar_path), timeout=1200)
-    version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
-    expected = f"pylaios:{version}-{arch}"
-    lines = result.stdout.splitlines() + result.stderr.splitlines()
-    for line in lines:
-        if "Loaded image" in line:
-            name = line.split(":", 1)[1].strip() if ":" in line else ""
-            if name:
-                return name
-    inspect = docker("image", "inspect", expected, check=False)
-    if inspect.returncode == 0:
-        return expected
-    raise ManageError(f"无法确定镜像名称，请手动确认: {result.stdout}\n{result.stderr}")
-
-
-def read_template(image: str) -> str:
-    result = docker("run", "--rm", "--entrypoint", "cat", image, "/opt/pylai/pylai.example.toml",
-                    check=False, timeout=120)
-    if result.returncode != 0:
-        raise ManageError("无法从镜像读取配置模板: " + (result.stderr.strip() or "未知错误"))
-    return result.stdout
-
-
-def replace_one(text: str, old: str, new: str, count: int = 1) -> str:
-    if old not in text:
-        raise ManageError(f"配置模板缺少预期内容: {old[:60]}...")
-    return text.replace(old, new, count)
-
-
-def toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
-def toml_string_list(values: list[str]) -> str:
-    return "[" + ", ".join(toml_string(value) for value in values) + "]"
-
-
-def generate_config(image: str, answers: dict) -> None:
-    text = read_template(image)
-
-    text = replace_one(text, 'Url = "http://localhost:5000"', 'Url = "http://0.0.0.0:5000"')
-    text = replace_one(text, 'Url = "http://localhost:5173"', f'Url = {toml_string(answers["public_url"])}')
-    cs = f'Host=127.0.0.1;Port=5432;Database={answers["db_name"]};Username={answers["db_user"]};Password={answers["db_password"]}'
-    text = replace_one(
-        text,
-        'ConnectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password="',
-        f'ConnectionString = {toml_string(cs)}',
-    )
-    text = replace_one(text, 'Password = ""', f'Password = {toml_string(answers["redis_password"])}', 1)
-    text = replace_one(text, 'ServerPepper = ""', f'ServerPepper = {toml_string(answers["invite_pepper"])}')
-    text = replace_one(text, 'Directory = "backups"', 'Directory = "/var/lib/pylai/backups"')
-    text = replace_one(text, 'ForwardedHeadersEnabled = true', "ForwardedHeadersEnabled = true")
-    text = replace_one(text, 'TrustedProxies = ["127.0.0.1", "::1"]', f'TrustedProxies = {toml_string_list(answers["trusted_proxies"])}')
-    text = replace_one(text, 'TrustedNetworks = []', f'TrustedNetworks = {toml_string_list(answers["trusted_networks"])}')
-    text = replace_one(text, 'KeyFile = ""', 'KeyFile = "/etc/pylai/certs/signing-kek"')
-    text = replace_one(text, 'AllowedOrigins = ["http://localhost:5173"]',
-                       f'AllowedOrigins = {toml_string_list(answers["cors_origins"])}')
-    text = replace_one(text, 'Issuer = "http://localhost:5000"', f'Issuer = {toml_string(answers["origin"])}')
-    external_host = urlparse(answers["public_url"]).hostname or "localhost"
-    allowed_hosts = [external_host]
-    if external_host not in ("localhost", "127.0.0.1", "::1"):
-        allowed_hosts.extend(("localhost", "127.0.0.1"))
-    text = replace_one(text, 'AllowedHosts = ["localhost", "127.0.0.1"]',
-                       f'AllowedHosts = {toml_string_list(allowed_hosts)}')
-    text = replace_one(text, 'RelyingPartyId = "localhost"', f'RelyingPartyId = {toml_string(external_host)}')
-    text = replace_one(text, 'Origins = ["http://localhost:5173"]', f'Origins = {toml_string_list(answers["cors_origins"])}')
-
-    if answers["public_url"].startswith("https://"):
-        text = replace_one(text, "RequireHttps = false", "RequireHttps = true") if "RequireHttps = false" in text else text
-        text = replace_one(text, "RequireHttps = true", "RequireHttps = true")
-        text = replace_one(text, 'SecurePolicy = "Always"', 'SecurePolicy = "Always"')
-    else:
-        text = replace_one(text, "RequireHttps = true", "RequireHttps = false")
-        text = replace_one(text, 'SecurePolicy = "Always"', 'SecurePolicy = "SameAsRequest"')
-
-    if answers["signing_pfx"]:
-        # 段内键值替换（容忍段首行与键之间存在的注释行）
-        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Signing]", "Path", toml_string(answers["signing_pfx"]))
-        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Signing]", "Password", toml_string(answers["signing_pfx_password"]))
-    if answers["encryption_pfx"]:
-        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Encryption]", "Path", toml_string(answers["encryption_pfx"]))
-        text = _replace_toml_block_value(text, "[OpenIddict.Certificates.Encryption]", "Password", toml_string(answers["encryption_pfx_password"]))
-
-    seed_blocks = [
-        ("Seeds.DefaultAdmin", "admin_email", "admin_password", "Administrator"),
-        ("Seeds.DefaultUser", "user_email", "user_password", "Test User"),
-        ("Seeds.DefaultMax", "max_email", "max_password", "Max User"),
-    ]
-    for section, email_key, password_key, display_name in seed_blocks:
-        prefix = f"[{section}]"
-        if prefix not in text:
-            continue
-        start = text.index(prefix)
-        end = text.find("\n\n", start)
-        end = len(text) if end < 0 else end
-        block = text[start:end]
-        block = block.replace('Email = "admin@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
-        block = block.replace('Email = "user@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
-        block = block.replace('Email = "max@pylaios.local"', f'Email = {toml_string(answers[email_key])}')
-        block = block.replace('Password = ""', f'Password = {toml_string(answers[password_key])}', 1)
-        block = block.replace('DisplayName = "Administrator"', f'DisplayName = "{display_name}"')
-        block = block.replace('DisplayName = "Test User"', f'DisplayName = "{display_name}"')
-        block = block.replace('DisplayName = "Max User"', f'DisplayName = "{display_name}"')
-        text = text[:start] + block + text[end:]
-
-    if answers["smtp_enabled"]:
-        text = replace_one(text, '[Email]\nFromName = "Pylaios"\nFromAddress = ""',
-                           f'[Email]\nFromName = "Pylaios"\nFromAddress = {toml_string(answers["smtp_from"])}')
-        smtp_marker = "[Email.Smtp]"
-        smtp_start = text.index(smtp_marker)
-        smtp_end = text.find("\n\n", smtp_start)
-        smtp_end = len(text) if smtp_end < 0 else smtp_end
-        smtp_block = text[smtp_start:smtp_end]
-        smtp_block = replace_one(smtp_block, 'Host = ""', f'Host = {toml_string(answers["smtp_host"])}')
-        smtp_block = replace_one(smtp_block, "Port = 587", f"Port = {answers['smtp_port']}")
-        smtp_block = replace_one(smtp_block, 'Security = "StartTls"', f'Security = {toml_string(answers["smtp_security"])}')
-        smtp_block = replace_one(smtp_block, 'Username = ""', f'Username = {toml_string(answers["smtp_user"])}')
-        smtp_block = smtp_block.replace('Password = ""', f'Password = {toml_string(answers["smtp_password"])}', 1)
-        text = text[:smtp_start] + smtp_block + text[smtp_end:]
-
-    text = _replace_toml_block_value(text, "[Mfa]", "RequireForAdmin", "true" if answers.get("mfa_for_admin", False) else "false")
-    text = _replace_toml_block_value(text, "[Mfa]", "RequireWebAuthnForMax", "true" if answers.get("mfa_webauthn_for_max", False) else "false")
-
-    ensure_home()
-    # Fail Closed：写出前用 tomllib 校验整体为合法 TOML，避免结构错误带病落地
-    try:
-        tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ManageError(f"生成的 pylai.toml 不是合法 TOML（模板或生成逻辑问题）: {exc}") from exc
-    CONFIG_FILE.write_text(text, encoding="utf-8")
-    CONFIG_FILE.chmod(0o600)
-
-
-SMTP_SECURITY_DESCRIPTIONS = {
-    "SslOnConnect": "SMTPS / 隐式 TLS（服务端从连接开始即 TLS，常见端口 465）",
-    "StartTls": "STARTTLS（先明文连接再升级 TLS，常见端口 587）",
-    "None": "无加密（仅限可信内网，不推荐）",
-}
-
-
-def ask_smtp_security(default: str = "StartTls") -> str:
-    options = [
-        ("SslOnConnect — 隐式 TLS，465 端口通常选这个", "SslOnConnect"),
-        ("StartTls — STARTTLS，587 端口通常选这个（推荐）", "StartTls"),
-        ("None — 不加密，仅限可信内网", "None"),
-    ]
-    while True:
-        out("SMTP 加密方式：")
-        for index, (label, value) in enumerate(options, 1):
-            marker = " <=" if value == default else ""
-            out(f"  [{index}] {label}{marker}")
-        raw = ask("请选择", str(next(i for i, (_, value) in enumerate(options, 1) if value == default)))
-        try:
-            return options[int(raw) - 1][1]
-        except (ValueError, IndexError):
-            out("选择无效。\n")
-
-
-def configure_smtp_interactive() -> dict | None:
-    """SMTP 配置向导；返回 None 表示用户选择不配置。"""
-    if not ask_yes_no("配置 SMTP 邮件发送？", False):
-        return None
-
-    smtp_host = ask("SMTP 服务器")
-    while True:
-        out("\nSMTP 端口（请按邮件服务商文档选择）：")
-        out("  [1] 465 — SMTPS / 隐式 TLS（阿里云企业邮箱等）")
-        out("  [2] 587 — STARTTLS（通用推荐）")
-        out("  [3] 25  — 无加密（不推荐）")
-        out("  [4] 自定义端口")
-        raw = ask("请选择", "2")
-        if raw == "1":
-            smtp_port, smtp_security = 465, "SslOnConnect"
-        elif raw == "2":
-            smtp_port, smtp_security = 587, "StartTls"
-        elif raw == "3":
-            smtp_port, smtp_security = 25, "None"
-        elif raw == "4":
-            smtp_port = ask_int("SMTP 端口", 587)
-            smtp_security = ask_smtp_security()
-        else:
-            out("选择无效。\n")
-            continue
-
-        out(f"\n已选择 SMTP：{smtp_host}:{smtp_port}")
-        out(f"加密方式：{smtp_security} — {SMTP_SECURITY_DESCRIPTIONS[smtp_security]}")
-        if ask_yes_no("确认以上端口与加密方式？", True):
-            break
-        out()
-
-    smtp_user = ask("SMTP 用户名（无认证可留空）", "", allow_blank=True)
-    smtp_password = ask("SMTP 密码（无认证可留空）", "", secret=True, allow_blank=True)
-    smtp_from = ask("发件人邮箱")
-
-    return {
-        "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
-        "smtp_security": smtp_security,
-        "smtp_user": smtp_user,
-        "smtp_password": smtp_password,
-        "smtp_from": smtp_from,
-    }
-
-
-def mask_config_text(text: str) -> str:
-    """对配置中的密码/密钥/连接串等敏感值做掩码显示。"""
-    masked_lines: list[str] = []
-    for line in text.splitlines():
-        match = re.match(r'^(\s*[^=]*\b(?:Password|Secret|ConnectionString)\s*=\s*).*$', line, re.IGNORECASE)
-        if match:
-            masked_lines.append(f'{match.group(1)}"***"')
-        else:
-            masked_lines.append(line)
-    return "\n".join(masked_lines) + ("\n" if text.endswith("\n") else "")
-
-
-def read_password_policy() -> dict:
-    """从本地 pylai.toml 读取密码策略，失败则返回默认值。"""
-    defaults = {
-        "RequiredLength": 12,
-        "AdminRequiredLength": 14,
-        "RequireDigit": True,
-        "RequireLowercase": False,
-        "RequireUppercase": False,
-        "RequireNonAlphanumeric": False,
-        "CheckBreachedPasswords": True,
-    }
-    if not CONFIG_FILE.is_file():
-        return defaults
-    try:
-        with open(CONFIG_FILE, "rb") as f:
-            data = tomllib.load(f)
-        pwd = data.get("Identity", {}).get("Password", {}) if isinstance(data.get("Identity"), dict) else {}
-        # 兼容部分配置直接扁平的情况，但主要走嵌套
-        for key in list(defaults.keys()):
-            if key in pwd:
-                defaults[key] = pwd[key]
-            # TOML 中键可能为驼峰，保持一致
-        return defaults
-    except (OSError, tomllib.TOMLDecodeError, ValueError, AttributeError):
-        return defaults
-
-
-def validate_password_local(password: str, policy: dict, is_privileged: bool) -> list[str]:
-    """本地密码策略预校验，返回错误描述列表（空列表表示通过）。"""
-    errs: list[str] = []
-    if not password:
-        errs.append("密码不能为空。")
-        return errs
-    required = policy.get("AdminRequiredLength", 14) if is_privileged else policy.get("RequiredLength", 12)
-    try:
-        required = int(required)
-    except (TypeError, ValueError):
-        required = 14 if is_privileged else 12
-    if len(password) < required:
-        errs.append(f"密码长度至少为 {required} 个字符。")
-    if policy.get("RequireDigit") and not any(c.isdigit() for c in password):
-        errs.append("密码必须包含数字。")
-    if policy.get("RequireLowercase") and not any(c.islower() for c in password):
-        errs.append("密码必须包含小写字母。")
-    if policy.get("RequireUppercase") and not any(c.isupper() for c in password):
-        errs.append("密码必须包含大写字母。")
-    if policy.get("RequireNonAlphanumeric") and all(c.isalnum() for c in password):
-        errs.append("密码必须包含非字母数字字符。")
-    return errs
-
-
-def _replace_toml_block_value(text: str, marker: str, key: str, value: str) -> str:
-    """替换 TOML 段内指定键值；键不存在时插到段首行之后。"""
-    start = text.index(marker)
-    end = text.find("\n\n", start)
-    end = len(text) if end < 0 else end
-    block = text[start:end]
-    pattern = re.compile(rf'^(\s*{re.escape(key)}\s*=\s*).*$', re.MULTILINE)
-    replacement = f'{value}'
-    if pattern.search(block):
-        block = pattern.sub(lambda m: f"{m.group(1)}{replacement}", block, count=1)
-    else:
-        first_line_end = block.find("\n")
-        first_line_end = len(block) if first_line_end < 0 else first_line_end + 1
-        block = block[:first_line_end] + f"{key} = {replacement}\n" + block[first_line_end:]
-    return text[:start] + block + text[end:]
-
-
-def write_smtp_config(smtp: dict) -> None:
-    """把 SMTP 配置写回 pylai.toml 的 [Email] / [Email.Smtp] 段。"""
-    if not CONFIG_FILE.is_file():
-        raise ManageError("配置文件不存在")
-    text = CONFIG_FILE.read_text(encoding="utf-8")
-    text = _replace_toml_block_value(text, "[Email]", "FromAddress", toml_string(smtp["smtp_from"]))
-    text = _replace_toml_block_value(text, "[Email.Smtp]", "Host", toml_string(smtp["smtp_host"]))
-    text = _replace_toml_block_value(text, "[Email.Smtp]", "Port", str(smtp["smtp_port"]))
-    text = _replace_toml_block_value(text, "[Email.Smtp]", "Security", toml_string(smtp["smtp_security"]))
-    text = _replace_toml_block_value(text, "[Email.Smtp]", "Username", toml_string(smtp["smtp_user"]))
-    text = _replace_toml_block_value(text, "[Email.Smtp]", "Password", toml_string(smtp["smtp_password"]))
-    text = re.sub(r'(?m)^[ \t]*UseSsl[ \t]*=.*\n', "", text)
-
-    CONFIG_FILE.write_text(text, encoding="utf-8")
-    CONFIG_FILE.chmod(0o600)
-
-
-def collect_install_answers() -> dict:
-    ensure_home()
-    public_url = ask("对外访问地址（浏览器访问 Pylai 的 URL）", "http://localhost:8080")
-    public_port = ask_int("容器 80 映射到主机端口", 8080)
-    api_port = ask_int("后端 5000 映射到本机端口（仅绑定 127.0.0.1）", 5000)
-
-    out("\n-- 数据库 / Redis --")
-    db_user = ask("PostgreSQL 用户名", "pylai")
-    db_name = ask("PostgreSQL 数据库名", "pylai")
-    db_password = secrets.token_hex(16)
-    redis_password = secrets.token_hex(16)
-    ensure_home()
-    signing_kek = secrets.token_hex(32)
-    signing_kek_path = CERT_DIR / "signing-kek"
-    signing_kek_path.write_text(signing_kek, encoding="ascii")
-    signing_kek_path.chmod(0o600)
-
-    out("\n-- 初始账号 --")
-    max_email = ask("Max 账号邮箱/登录名", "max@pylai.local")
-    max_password = ask("Max 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
-    max_password_input = bool(max_password)
-    if ask_yes_no("创建初始 Admin 账号？", True):
-        admin_email = ask("Admin 账号邮箱/登录名", "admin@pylai.local")
-        admin_password = ask("Admin 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
-        admin_password_input = bool(admin_password)
-    else:
-        admin_email, admin_password = "", ""
-        admin_password_input = False
-    if ask_yes_no("创建初始 Normal 测试账号？", False):
-        user_email = ask("Normal 账号邮箱/登录名", "user@pylai.local")
-        user_password = ask("Normal 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
-        user_password_input = bool(user_password)
-    else:
-        user_email, user_password = "", ""
-        user_password_input = False
-
-    out("\n-- 邮件 --")
-    smtp = configure_smtp_interactive()
-    if smtp:
-        smtp_host = smtp["smtp_host"]
-        smtp_port = smtp["smtp_port"]
-        smtp_security = smtp["smtp_security"]
-        smtp_user = smtp["smtp_user"]
-        smtp_password = smtp["smtp_password"]
-        smtp_from = smtp["smtp_from"]
-        smtp_enabled = True
-    else:
-        smtp_host, smtp_port, smtp_security, smtp_user, smtp_password, smtp_from = "", 587, "StartTls", "", "", ""
-        smtp_enabled = False
-
-    out("\n-- 安全 --")
-    if ask_yes_no("使用数据库托管签名密钥（推荐，后续用菜单手动轮换）？", True):
-        signing_pfx = ""
-        signing_pfx_password = ""
-    else:
-        signing_pfx = ask("签名 PFX 文件路径（留空则继续使用数据库托管）", "", allow_blank=True).strip()
-        signing_pfx_password = ""
-        if signing_pfx and Path(signing_pfx).is_file():
-            ensure_home()
-            signing_pfx_password = ask("签名 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
-            destination = CERT_DIR / "signing.pfx"
-            shutil.copy2(signing_pfx, destination)
-            destination.chmod(0o600)
-            signing_pfx = f"{CONTAINER_CERT_DIR}/signing.pfx"
-    encryption_pfx = ""
-    encryption_pfx_password = ""
-    if ask_yes_no("自动生成加密证书（推荐，生产环境必需）？", True) and shutil.which("openssl"):
-        ensure_home()
-        host_pfx = CERT_DIR / "encryption.pfx"
-        key_file = CERT_DIR / "encryption-key.pem"
-        cert_file = CERT_DIR / "encryption-cert.pem"
-        encryption_pfx_password = secrets.token_urlsafe(12)
-        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-             "-keyout", str(key_file), "-out", str(cert_file), "-days", "3650",
-             "-subj", "/CN=Pylai Encryption"], timeout=300)
-        run(["openssl", "pkcs12", "-export", "-out", str(host_pfx),
-             "-inkey", str(key_file), "-in", str(cert_file),
-             "-passout", f"pass:{encryption_pfx_password}"], timeout=300)
-        Path(host_pfx).chmod(0o600)
-        key_file.unlink(missing_ok=True)
-        cert_file.unlink(missing_ok=True)
-        encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
-
-    if not encryption_pfx:
-        if shutil.which("openssl") is None:
-            out("未找到 openssl，无法自动生成加密证书。")
-        encryption_pfx = ask("请提供加密 PFX 文件路径（生产环境必需）", "", allow_blank=True).strip()
-        if not encryption_pfx or not Path(encryption_pfx).is_file():
-            raise ManageError("生产环境必须配置持久化 OpenIddict 加密证书。")
-        encryption_pfx_password = ask("加密 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
-        destination = CERT_DIR / "encryption.pfx"
-        shutil.copy2(encryption_pfx, destination)
-        destination.chmod(0o600)
-        encryption_pfx = f"{CONTAINER_CERT_DIR}/encryption.pfx"
-    trusted_proxies = ask("可信代理 IP（逗号分隔，主机 Nginx 与本机）", "127.0.0.1,::1")
-    trusted_networks = ask("可信代理 CIDR（逗号分隔）", "172.16.0.0/12")
-
-    origin = public_url.rstrip("/")
-    cors_origins = [origin]
-    extra_cors = ask("额外 CORS Origin（逗号分隔，没有留空）", "", allow_blank=True).strip()
-    if extra_cors:
-        cors_origins.extend(x.strip() for x in extra_cors.split(",") if x.strip())
-
-    out("\n-- 高权限账户 MFA --")
-    out("MFA 可保护 Admin/Max 账户安全。HTTP/局域网部署时 WebAuthn 不可用，建议关闭或仅使用 TOTP。")
-    mfa_for_admin = ask_yes_no("Admin 及以上角色登录时强制要求 MFA？", False)
-    if mfa_for_admin:
-        mfa_webauthn_for_max = ask_yes_no("Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？", False)
-    else:
-        mfa_webauthn_for_max = False
-
-    return {
-        "public_url": public_url,
-        "origin": public_url.rstrip("/"),
-        "public_port": public_port,
-        "api_port": api_port,
-        "db_user": db_user,
-        "db_name": db_name,
-        "db_password": db_password,
-        "redis_password": redis_password,
-        "invite_pepper": secrets.token_hex(32),
-        "max_email": max_email,
-        "max_password": max_password,
-        "max_password_input": max_password_input,
-        "admin_email": admin_email,
-        "admin_password": admin_password,
-        "admin_password_input": admin_password_input,
-        "user_email": user_email,
-        "user_password": user_password,
-        "user_password_input": user_password_input,
-        "smtp_enabled": smtp_enabled,
-        "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
-        "smtp_security": smtp_security,
-        "smtp_user": smtp_user,
-        "smtp_password": smtp_password,
-        "smtp_from": smtp_from,
-        "signing_pfx": signing_pfx,
-        "signing_pfx_password": signing_pfx_password,
-        "encryption_pfx": encryption_pfx,
-        "encryption_pfx_password": encryption_pfx_password,
-        "trusted_proxies": [x.strip() for x in trusted_proxies.split(",") if x.strip()],
-        "trusted_networks": [x.strip() for x in trusted_networks.split(",") if x.strip()],
-        "cors_origins": cors_origins,
-        "mfa_for_admin": mfa_for_admin,
-        "mfa_webauthn_for_max": mfa_webauthn_for_max,
-    }
-
-
-def start_container(image: str, answers: dict, read_only: bool = True) -> None:
-    if container_exists():
-        docker("rm", "-f", CONTAINER)
-    ensure_home()
-    cmd = [
-        "docker", "run", "-d", "--name", CONTAINER,
-        "--restart", "unless-stopped",
-    ]
-    if read_only:
-        cmd.append("--read-only")
-    cmd += [
-        "--cap-drop", "ALL",
-        "--cap-add", "CHOWN",
-        # 单容器回退形态：容器 root 需要读取宿主 ~/.pylai/config（0600/0700）的
-        # 配置与证书 bind 挂载（无 DAC_OVERRIDE 时容器 root 按 other 位无法读取），
-        # 且 postgres 需对命名 volume 执行 chown。DAC_OVERRIDE/FOWNER 是单容器
-        # 部署的代价（生产升级为 compose 拆分后可移除）。
-        "--cap-add", "DAC_OVERRIDE",
-        "--cap-add", "FOWNER",
-        "--cap-add", "SETGID",
-        "--cap-add", "SETUID",
-        "--cap-add", "NET_BIND_SERVICE",
-        "--cap-add", "KILL",
-        "--tmpfs", "/tmp:rw,nosuid,size=64m",
-        "--tmpfs", "/run:rw,nosuid,size=16m",
-        "--security-opt", "no-new-privileges:true",
-        "--pids-limit", "512",
-        "-p", f"{answers['public_port']}:80",
-        "-p", f"127.0.0.1:{answers['api_port']}:5000",
-        "-v", f"{CONFIG_DIR}:/etc/pylai",
-        # 写目录改用命名 volume（宿主目录为 0700 时容器内 root 无 DAC_OVERRIDE 无法写入；
-        # 命名 volume 由 Docker 管理，owner 随镜像内目录，可正常 chown/写入）
-        "-v", "pylai_data:/var/lib/pylai",
-        "-v", "pylai_pgdata:/var/lib/postgresql",
-        "-e", "PYLAI_ROLE=server",
-        "-e", f"PYLAI_UI_URL={answers['public_url']}",
-        "-e", f"PYLAI_DB_USER={answers['db_user']}",
-        "-e", f"PYLAI_DB_PASSWORD={answers['db_password']}",
-        "-e", f"PYLAI_DB_NAME={answers['db_name']}",
-        "-e", f"PYLAI_REDIS_PASSWORD={answers['redis_password']}",
-        image,
-    ]
-    run(cmd, timeout=120)
-    out("==> 等待服务健康检查 ...")
-    if not wait_healthy(int(answers["api_port"])):
-        print_container_logs()
-        raise ManageError("服务启动超时，请根据上方日志排查。")
-    out("==> 服务已就绪。")
-
-
-def print_install_summary(answers: dict, yes_mode: bool = False) -> None:
-    out("\n" + "=" * 64)
-    out("  Pylai 安装完成")
-    out(f"  前端:     {answers['public_url']}/")
-    out(f"  管理台:   {answers['public_url']}/admin/")
-    out(f"  健康检查: http://127.0.0.1:{answers['api_port']}/health/ready")
-    out()
-
-    # 收集需要显示的凭据
-    creds: list[tuple[str, str]] = []
-    creds.append(("PostgreSQL 密码", answers["db_password"]))
-    creds.append(("Redis 密码", answers["redis_password"]))
-
-    if answers.get("max_email") and answers.get("max_password"):
-        creds.append((f"Max 账号 ({answers['max_email']})", answers["max_password"]))
-    if answers.get("admin_email") and answers.get("admin_password"):
-        creds.append((f"Admin 账号 ({answers['admin_email']})", answers["admin_password"]))
-    if answers.get("user_email") and answers.get("user_password"):
-        creds.append((f"Normal 账号 ({answers['user_email']})", answers["user_password"]))
-    if answers.get("encryption_pfx_password"):
-        creds.append(("加密证书密码", answers["encryption_pfx_password"]))
-
-    reveal_credentials(creds, yes_mode=yes_mode)
-
-    # 提示未在 answers 中保留的自动生成密码（旧兼容路径）
-    auto_generated: list[str] = []
-    if answers.get("max_email") and not answers.get("max_password"):
-        auto_generated.append("Max")
-    if answers.get("admin_email") and not answers.get("admin_password"):
-        auto_generated.append("Admin")
-    if answers.get("user_email") and not answers.get("user_password"):
-        auto_generated.append("Normal")
-    if auto_generated:
-        out(f"  提示: {', '.join(auto_generated)} 密码已自动生成，请在容器日志中查看（[DbSeeder] 标记）。")
-
-    out("=" * 64)
-
-
-def run_submenu(title: str, parent_title: str, entries: list[tuple[str, object]]) -> None:
-    """二级/三级菜单循环：[0] 返回上级，操作完成后仍停留当前菜单。"""
-    while True:
-        out(f"\n### {title} ###")
-        for index, (label, _) in enumerate(entries, 1):
-            out(f"[{index}] {label}")
-        out(f"[0] 返回 {parent_title}")
-        try:
-            raw = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            out()
-            return
-        if raw in ("0", "back", "return"):
-            return
-        try:
-            action = entries[int(raw) - 1][1]
-        except (ValueError, IndexError):
-            out("选择无效。")
-            continue
-        try:
-            action()  # type: ignore[operator]
-        except ManageError as exc:
-            out(f"错误: {exc}")
-
-
-def menu_install() -> None:
-    ensure_docker()
-    state = load_state()
-    if state:
-        out("检测到已有安装。如需重新安装，请先卸载或使用更新。")
-        return
-
+# ============================================================================
+# AppContext
+# ============================================================================
+@dataclass(slots=True)
+class AppContext:
+    manager: ManagerConfig
+    state: State
+    docker: DockerCompose
+    config: PylaiConfig
+
+    @classmethod
+    def create(cls, manager_config: Path | None = None) -> Self:
+        manager = ManagerConfig(manager_config or HOME / "ManagerConfig.toml")
+        state = State()
+        docker = DockerCompose(project=manager.project_name)
+        config = PylaiConfig()
+        return cls(manager=manager, state=state, docker=docker, config=config)
+
+    def require_installed(self) -> None:
+        if not self.state.installed:
+            raise ManageError("尚未安装，请先执行安装。")
+
+    def require_running(self, service: ServiceName = "backend") -> None:
+        if not self.docker.service_running(service):
+            raise ManageError("服务未运行。")
+
+
+# ============================================================================
+# 通用服务函数
+# ============================================================================
+def select_tar(*, yes: bool, prompt: str = "请选择安装包") -> Path:
     tars = discover_tars()
     if not tars:
-        out("当前目录未找到 Pylai-<version>-Linux-<arch>.tar。")
-        return
-    options = [(f"{p.name}（{'与当前主机兼容' if parse_tar(p)[1] == host_arch() else '其他架构'}）", p.name) for p in tars]
-    name = choose(options, "请选择安装包")
-    if not name:
-        return
-    tar_path = Path.cwd() / name
-    version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
-    image = load_image_tar(tar_path)
+        raise ManageError("当前目录未找到 Pylai-<version>-Linux-<arch>.tar。")
 
-    out("\n==> 开始安装配置（涉及密码的项直接回车可自动生成）")
-    answers = collect_install_answers()
+    if yes:
+        compatible = [
+            p
+            for p in tars
+            if (meta := parse_tar(p)) and meta[1] == host_arch()
+        ]
+        return (compatible or tars)[0]
 
-    # P4: 部署模式选择
-    mode = "compose" if ask_yes_no("\n使用多服务 Docker Compose 模式（推荐生产环境）？", False) else "monolith"
+    options: list[tuple[str, Path]] = []
+    for path in tars:
+        meta = parse_tar(path)
+        compatible = meta is not None and meta[1] == host_arch()
+        label = f"{path.name}（{'兼容' if compatible else '其他架构'}）"
+        options.append((label, path))
 
-    generate_config(image, answers)
-    config = PylaiConfig()
-    config.reload()
+    selected = choose(options, prompt)
+    if selected is None:
+        raise ManageError("未选择安装包。")
 
-    # Compose 模式：调整 pylai.toml 连接串（127.0.0.1 → 服务名）
-    if mode == "compose":
-        cs = config.get_value("Database", "ConnectionString", "")
-        if "Host=127.0.0.1" in cs:
-            new_cs = cs.replace("Host=127.0.0.1", "Host=postgres")
-            config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
-        redis_host = config.get_value("Redis", "Host", "")
-        if redis_host == "127.0.0.1":
-            config.set_block_value("[Redis]", "Host", toml_string("redis"))
-            config.set_block_value("[Redis]", "Port", "6379")
+    return selected
 
-        manager_cfg = ManagerConfig()
-        ComposeConfig.generate(answers, manager_cfg, image)
-        ComposeConfig.ensure_volumes()
 
-    docker = DockerCompose(mode=mode)
-    docker.start(image, answers)
-    if not docker.wait_healthy(int(answers["api_port"])):
-        print_container_logs()
-        raise ManageError("服务启动超时，请根据上方日志排查。")
+def generate_host_nginx_template(state: State) -> Path:
+    host_part = state.public_url.split("//", 1)[-1].split("/", 1)[0]
 
-    new_state = {
-        "version": version,
-        "architecture": arch,
-        "image": image,
-        "public_url": answers["public_url"],
-        "public_port": answers["public_port"],
-        "api_port": answers["api_port"],
-        "max_email": answers["max_email"],
-        "admin_email": answers["admin_email"],
-        "installed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "mode": mode,
-    }
-    save_state(new_state)
-    print_install_summary(answers)
-    out("提示：建议使用主机 Nginx 反代，主菜单 [6] 可生成配置模板。")
-
-
-def action_status() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    result = docker("ps", "-a", "--filter", f"name={CONTAINER}", "--format", "{{.Names}} {{.Status}}", check=False)
-    out(result.stdout.strip() or "未找到容器")
-
-
-def action_start() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    docker("start", CONTAINER, timeout=60)
-    state = load_state()
-    if not wait_healthy(int(state.get("api_port", 5000))):
-        out("容器已启动，但健康检查尚未通过。")
-    else:
-        out("启动完成。")
-
-
-def action_stop() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    docker("stop", "-t", "30", CONTAINER, timeout=120)
-    out("已停止。")
-
-
-def action_restart() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    docker("restart", CONTAINER, timeout=120)
-    out("已重启。")
-
-
-def submenu_logs() -> None:
-    entries = [
-        ("最近 100 行", lambda: view_container_logs(100, follow=False)),
-        ("最近 500 行", lambda: view_container_logs(500, follow=False)),
-        ("最近 2000 行", lambda: view_container_logs(2000, follow=False)),
-        ("全部日志", lambda: view_container_logs("all", follow=False)),
-        ("持续跟踪（less +F）", lambda: view_container_logs(200, follow=True)),
-    ]
-    run_submenu("运行控制 / 日志", "运行控制", entries)
-
-
-def submenu_run() -> None:
-    if not container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    running = container_running()
-    entries = [
-        ("状态", action_status),
-        ("启动", action_start),
-        ("停止", action_stop),
-        ("重启", action_restart),
-        ("日志", submenu_logs),
-    ]
-    out(f"当前状态: {'运行中' if running else '已停止'}")
-    run_submenu("运行控制", "主菜单", entries)
-
-
-def action_view_config() -> None:
-    if not CONFIG_FILE.is_file():
-        out("配置文件不存在")
-        return
-    out(mask_config_text(CONFIG_FILE.read_text(encoding="utf-8")))
-
-
-def action_change_url() -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装。")
-        return
-    new_url = ask("新公开地址", state.get("public_url"))
-    if not CONFIG_FILE.is_file():
-        raise ManageError("配置文件不存在")
-    origin = new_url.rstrip("/")
-    external_host = urlparse(new_url).hostname or "localhost"
-    allowed_hosts = [external_host]
-    if external_host not in ("localhost", "127.0.0.1", "::1"):
-        allowed_hosts.extend(("localhost", "127.0.0.1"))
-    text = CONFIG_FILE.read_text(encoding="utf-8")
-    text = _replace_toml_block_value(text, "[Frontend]", "Url", toml_string(new_url))
-    text = _replace_toml_block_value(text, "[OpenIddict]", "Issuer", toml_string(origin))
-    text = _replace_toml_block_value(text, "[OpenIddict]", "RequireHttps", "true" if origin.startswith("https://") else "false")
-    text = _replace_toml_block_value(text, "[Server]", "AllowedHosts", toml_string_list(allowed_hosts))
-    text = _replace_toml_block_value(text, "[Mfa]", "RelyingPartyId", toml_string(external_host))
-    text = _replace_toml_block_value(text, "[Mfa]", "Origins", toml_string_list([origin]))
-    text = _replace_toml_block_value(text, "[Cookie]", "SecurePolicy", toml_string("Always" if origin.startswith("https://") else "SameAsRequest"))
-    CONFIG_FILE.write_text(text, encoding="utf-8")
-    CONFIG_FILE.chmod(0o600)
-    state["public_url"] = new_url
-    save_state(state)
-    out("配置已修改，注意：需要手动重启实例才能生效")
-
-
-def action_change_ports() -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装。")
-        return
-    new_public = ask_int("新公开端口", int(state.get("public_port", 8080)))
-    new_api = ask_int("新本机 API 端口", int(state.get("api_port", 5000)))
-    state["public_port"] = new_public
-    state["api_port"] = new_api
-    if container_exists() and ask_yes_no("端口映射需要重建容器才能生效，是否立即应用？", True):
-        env = read_container_env()
-        image = state.get("image") or "pylaios:unknown"
-        answers = {
-            "public_url": state.get("public_url", "http://localhost"),
-            "public_port": new_public,
-            "api_port": new_api,
-            "db_user": env.get("PYLAI_DB_USER", "pylai"),
-            "db_name": env.get("PYLAI_DB_NAME", "pylai"),
-            "db_password": env.get("PYLAI_DB_PASSWORD", ""),
-            "redis_password": env.get("PYLAI_REDIS_PASSWORD", ""),
-        }
-        if not answers["db_password"] or not answers["redis_password"]:
-            save_state(state)
-            out("无法读取现有容器环境变量，端口已记录，将在下次重建容器时生效。")
-            return
-        start_container(image, answers)
-        if not wait_healthy(new_api):
-            print_container_logs()
-            raise ManageError("重建后健康检查未通过，请根据上方日志排查。")
-        out("端口已更新并重建容器。")
-    else:
-        out("端口已记录，将在下次重建容器时生效。")
-    save_state(state)
-
-
-def action_change_smtp() -> None:
-    if not CONFIG_FILE.is_file():
-        out("配置文件不存在")
-        return
-    smtp = configure_smtp_interactive()
-    if not smtp:
-        out("已取消。")
-        return
-    write_smtp_config(smtp)
-    out(f"SMTP 配置已更新：{smtp['smtp_host']}:{smtp['smtp_port']} / {smtp['smtp_security']}")
-    out("注意：需要手动重启实例才能生效")
-
-
-def action_reset_password(kind: str, target_email: str | None = None) -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装。")
-        return
-    if not container_running():
-        out("容器未运行，无法重置密码。")
-        return
-    default_email = target_email or (state.get("max_email") if kind == "max" else state.get("admin_email"))
-    email = ask("账号邮箱/登录名", default_email or (f"{kind}@pylai.local"))
-    policy = read_password_policy()
-    is_privileged = kind in ("max", "admin")
-    while True:
-        password = ask("新密码", "", secret=True)
-        errs = validate_password_local(password, policy, is_privileged)
-        if not errs:
-            break
-        out(f"密码不符合策略: {', '.join(errs)}")
-        if not ask_yes_no("重新输入？"):
-            return
-    run(["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", "reset-password", email,
-         "--password-stdin", "--config", "/etc/pylai/pylai.toml"],
-        input_text=password + "\n", timeout=120)
-    out("密码已重置，该用户全部会话与 token 已吊销。")
-
-
-def action_change_mfa() -> None:
-    if not CONFIG_FILE.is_file():
-        out("配置文件不存在")
-        return
-    text = CONFIG_FILE.read_text(encoding="utf-8")
-    mfa_for_admin = False
-    mfa_webauthn_for_max = False
-    try:
-        parsed = tomllib.loads(text)
-        mfa = parsed.get("Mfa", {})
-        mfa_for_admin = bool(mfa.get("RequireForAdmin", False))
-        mfa_webauthn_for_max = bool(mfa.get("RequireWebAuthnForMax", False))
-    except tomllib.TOMLDecodeError as exc:
-        out(f"配置解析失败: {exc}")
-        return
-    out("当前 MFA 配置：")
-    out(f"  RequireForAdmin = {'true' if mfa_for_admin else 'false'}")
-    out(f"  RequireWebAuthnForMax = {'true' if mfa_webauthn_for_max else 'false'}")
-    new_mfa_for_admin = ask_yes_no("Admin 及以上角色登录时强制要求 MFA？", mfa_for_admin)
-    if new_mfa_for_admin:
-        new_mfa_webauthn_for_max = ask_yes_no("Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？", mfa_webauthn_for_max)
-    else:
-        new_mfa_webauthn_for_max = False
-    text = _replace_toml_block_value(text, "[Mfa]", "RequireForAdmin", "true" if new_mfa_for_admin else "false")
-    text = _replace_toml_block_value(text, "[Mfa]", "RequireWebAuthnForMax", "true" if new_mfa_webauthn_for_max else "false")
-    CONFIG_FILE.write_text(text, encoding="utf-8")
-    CONFIG_FILE.chmod(0o600)
-    out("MFA 配置已更新，注意：需要手动重启实例才能生效")
-
-
-def _cli_user_cmd(*args: str, input_text: str | None = None) -> dict:
-    """执行 Pylaios user CLI 并解析 JSON 输出。"""
-    cmd = ["docker", "exec", "-i", CONTAINER, PYLAIOS_BIN, "user", *args,
-           "--config", "/etc/pylai/pylai.toml"]
-    result = run(cmd, check=False, timeout=120, input_text=input_text)
-    try:
-        return json.loads(result.stdout.strip())
-    except (json.JSONDecodeError, ValueError):
-        out(result.stdout.strip() or result.stderr.strip())
-        return {"success": False}
-
-
-def action_user_list() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    data = _cli_user_cmd("list")
-    if not data.get("success"):
-        out("获取用户列表失败。")
-        return
-    users = data.get("users", [])
-    total = data.get("total", 0)
-    out(f"共 {total} 位用户：")
-    out(f"{'UID':<36} {'用户名':<20} {'显示名':<20} {'邮箱':<30} {'组':<8} {'状态':<8}")
-    out("-" * 120)
-    for u in users:
-        out(f"{u.get('uid',''):<36} {u.get('name',''):<20} {u.get('displayName','') or '-':<20} "
-            f"{u.get('email',''):<30} {u.get('group',''):<8} {u.get('status',''):<8}")
-
-
-def action_user_show() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    target = ask("用户标识（uid/用户名/邮箱）")
-    data = _cli_user_cmd("show", target)
-    if not data.get("success"):
-        out("用户不存在或查询失败。")
-        return
-    u = data.get("user", {})
-    out(f"UID:         {u.get('uid')}")
-    out(f"用户名:      {u.get('name')}")
-    out(f"显示名:      {u.get('displayName')}")
-    out(f"邮箱:        {u.get('email')}")
-    out(f"组:          {u.get('group')}")
-    out(f"状态:        {u.get('status')}")
-    out(f"注册时间:    {u.get('registerTime')}")
-    out(f"最后登录:    {u.get('lastLoginAt') or '从未登录'}")
-    out(f"活跃会话数:  {u.get('activeSessions', 0)}")
-    if u.get("externalLogins"):
-        out("外部登录绑定:")
-        for login in u["externalLogins"]:
-            out(f"  - {login['provider']} ({login['boundAt']})")
-
-
-def action_user_create() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    email = ask("邮箱")
-    name = ask("登录名（留空使用邮箱前缀）", "", allow_blank=True)
-    display_name = ask("显示名（留空使用登录名）", "", allow_blank=True)
-    group = choose([
-        ("normal — 普通用户", "normal"),
-        ("admin — 管理员", "admin"),
-        ("max — 超级管理员", "max"),
-    ], "请选择用户组") or "normal"
-    policy = read_password_policy()
-    is_privileged = group in ("admin", "max")
-    if ask_yes_no("手动指定密码？（留空则自动生成）", False):
-        while True:
-            password = ask("密码", "", secret=True)
-            errs = validate_password_local(password, policy, is_privileged)
-            if not errs:
-                break
-            out(f"密码不符合策略: {', '.join(errs)}")
-            if not ask_yes_no("重新输入？"):
-                return
-        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
-                             "--group", group, "--password-stdin", input_text=password + "\n")
-    else:
-        data = _cli_user_cmd("create", email, "--name", name or "", "--display-name", display_name or "",
-                             "--group", group)
-    if data.get("success"):
-        out(f"创建成功: {data.get('message')}")
-        if "generatedPassword" in data:
-            out(f"自动生成的密码: {data['generatedPassword']}")
-            out("请立即保存，该密码不会再次显示。")
-    else:
-        out(f"创建失败: {data.get('message', '未知错误')}")
-
-
-def action_user_delete() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    target = ask("要删除的用户标识（uid/用户名/邮箱）")
-    if not confirm_danger(f"将软删除用户 {target}，其全部会话将被吊销。", required_word="DELETE"):
-        out("已取消。")
-        return
-    data = _cli_user_cmd("delete", target)
-    if data.get("success"):
-        out(data.get("message"))
-    else:
-        out(f"删除失败: {data.get('message', '未知错误')}")
-
-
-def action_user_set_group() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    target = ask("用户标识（uid/用户名/邮箱）")
-    group = choose([
-        ("normal — 普通用户", "normal"),
-        ("admin — 管理员", "admin"),
-        ("max — 超级管理员", "max"),
-    ], "请选择新用户组") or "normal"
-    data = _cli_user_cmd("set-group", target, group)
-    if data.get("success"):
-        out(data.get("message"))
-    else:
-        out(f"设置失败: {data.get('message', '未知错误')}")
-
-
-def action_user_set_status() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    target = ask("用户标识（uid/用户名/邮箱）")
-    status = choose([
-        ("active — 正常", "active"),
-        ("banned — 封禁", "banned"),
-    ], "请选择新状态") or "active"
-    data = _cli_user_cmd("set-status", target, status)
-    if data.get("success"):
-        out(data.get("message"))
-    else:
-        out(f"设置失败: {data.get('message', '未知错误')}")
-
-
-def action_user_revoke_sessions() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    target = ask("用户标识（uid/用户名/邮箱）")
-    data = _cli_user_cmd("revoke-sessions", target)
-    if data.get("success"):
-        out(data.get("message"))
-    else:
-        out(f"吊销失败: {data.get('message', '未知错误')}")
-
-
-def submenu_users() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    entries = [
-        ("用户列表", action_user_list),
-        ("查看用户详情", action_user_show),
-        ("创建用户", action_user_create),
-        ("删除用户", action_user_delete),
-        ("修改用户密码", lambda: action_reset_password("any", None)),
-        ("设置用户组", action_user_set_group),
-        ("设置用户状态", action_user_set_status),
-        ("吊销用户全部会话", action_user_revoke_sessions),
-    ]
-    run_submenu("用户管理", "主菜单", entries)
-
-
-def submenu_config() -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装。")
-        return
-    out(f"当前公开地址: {state.get('public_url')}")
-    out(f"当前端口: {state.get('public_port')} -> 80, 127.0.0.1:{state.get('api_port')} -> 5000")
-    entries = [
-        ("查看当前配置（脱敏）", action_view_config),
-        ("修改公开地址", action_change_url),
-        ("修改端口", action_change_ports),
-        ("修改 SMTP 邮件配置", action_change_smtp),
-        ("修改 MFA 配置", action_change_mfa),
-        ("修改 Max 账号密码", lambda: action_reset_password("max")),
-        ("修改 Admin 账号密码", lambda: action_reset_password("admin")),
-    ]
-    run_submenu("配置管理", "主菜单", entries)
-
-def export_database() -> None:
-    if not container_running():
-        out("容器未运行，无法在线导出。")
-        return
-    ensure_home()
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    name = f"manage-export-{stamp}"
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "backup", "create", name,
-         "--config", "/etc/pylai/pylai.toml"], timeout=1200)
-    docker("cp", f"{CONTAINER}:/var/lib/pylai/backups/{name}.dump", str(BACKUP_DIR / f"{name}.dump"), timeout=1200)
-    out(f"已导出: {BACKUP_DIR / (name + '.dump')}")
-
-
-def import_database() -> None:
-    if not container_exists():
-        out("尚未安装。")
-        return
-    backups = sorted(BACKUP_DIR.glob("*.dump"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not backups:
-        out("没有可用备份。请先执行导出，或将 .dump 放入备份目录。")
-        return
-    name = choose([(p.name, p.name) for p in backups], "请选择要导入的备份")
-    if not name:
-        return
-    if not confirm_danger(f"将用 {name} 全量覆盖当前数据库，且不可撤销。"):
-        out("已取消。")
-        return
-    if not container_running():
-        docker("start", CONTAINER, timeout=120)
-        wait_healthy(int(load_state().get("api_port", 5000)))
-    docker("cp", str(BACKUP_DIR / name), f"{CONTAINER}:/var/lib/pylai/backups/{name}", timeout=1200)
-    run(["docker", "exec", CONTAINER, "supervisorctl", "stop", "backend"], timeout=120)
-    try:
-        run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "backup", "restore", name,
-             "--config", "/etc/pylai/pylai.toml"], timeout=1800)
-    finally:
-        run(["docker", "exec", CONTAINER, "supervisorctl", "start", "backend"], check=False, timeout=120)
-    if wait_healthy(int(load_state().get("api_port", 5000))):
-        out("导入完成，服务已恢复。")
-    else:
-        out("导入命令已完成，但健康检查未通过，请查看日志。")
-
-
-def action_list_backups() -> None:
-    backups = sorted(BACKUP_DIR.glob("*.dump"))
-    if not backups:
-        out("备份目录为空。")
-        return
-    for path in backups:
-        out(f"{path.name}  {path.stat().st_size} bytes")
-
-
-def submenu_data() -> None:
-    entries = [
-        ("导出全部数据（数据库全量快照）", export_database),
-        ("导入全部数据（停止后端并全量覆盖）", import_database),
-        ("查看主机备份目录", action_list_backups),
-    ]
-    run_submenu("数据备份与恢复", "主菜单", entries)
-
-
-def action_key_status() -> None:
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "key", "status", "--config", "/etc/pylai/pylai.toml"], timeout=120)
-
-
-def action_key_rotate() -> None:
-    state = load_state()
-    mfa_user = ask("用于 MFA 验证的 Admin/Max 账户", state.get("max_email") or "max@pylai.local")
-    mfa_code = ask("该账户 TOTP 验证码", "", secret=True)
-    if not mfa_code:
-        raise ManageError("签名密钥轮换需要 MFA 验证码。")
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "key", "rotate",
-         "--mfa-user", mfa_user, "--mfa-code", mfa_code,
-         "--config", "/etc/pylai/pylai.toml"], timeout=120)
-
-
-def action_db_status() -> None:
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "db", "status", "--config", "/etc/pylai/pylai.toml"], timeout=120)
-
-
-def action_bootstrap() -> None:
-    run(["docker", "exec", CONTAINER, PYLAIOS_BIN, "db", "bootstrap", "--config", "/etc/pylai/pylai.toml"], timeout=120)
-
-
-def submenu_security() -> None:
-    if not container_running():
-        out("容器未运行。")
-        return
-    entries = [
-        ("签名密钥状态", action_key_status),
-        ("人工轮换签名密钥", action_key_rotate),
-        ("数据库迁移状态", action_db_status),
-        ("执行 db bootstrap（幂等）", action_bootstrap),
-    ]
-    run_submenu("安全维护", "主菜单", entries)
-
-def generate_host_nginx() -> None:
-    state = load_state()
-    port = state.get("public_port", 8080)
-    public_url = state.get("public_url", "https://sso.example.com")
     template = f"""# Pylai 主机 Nginx 配置模板
 # 安装前请替换证书路径和 server_name。
+
 server {{
     listen 80;
-    server_name {public_url.replace('https://', '').replace('http://', '').split('/')[0]};
+    server_name {host_part};
     return 301 https://$host$request_uri;
 }}
 
 server {{
     listen 443 ssl http2;
-    server_name {public_url.replace('https://', '').replace('http://', '').split('/')[0]};
+    server_name {host_part};
 
     ssl_certificate     /etc/nginx/ssl/fullchain.pem;
     ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
-    client_max_body_size 2m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
 
+    client_max_body_size 2m;
+
     location / {{
-        proxy_pass http://127.0.0.1:{port};
+        proxy_pass http://127.0.0.1:{state.public_port};
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -2875,856 +2241,1423 @@ server {{
     }}
 }}
 """
-    ensure_home()
-    HOST_NGINX_FILE.write_text(template, encoding="utf-8")
-    HOST_NGINX_FILE.chmod(0o600)
-    out(f"模板已生成: {HOST_NGINX_FILE}")
-    out("请自行替换证书路径和 server_name，然后安装到 /etc/nginx/conf.d/ 并 reload。")
+
+    atomic_write(HOST_NGINX_FILE, template)
+    return HOST_NGINX_FILE
 
 
-def action_health() -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装。")
-        return
-    port = int(state.get("api_port", 5000))
-    if wait_healthy(port, timeout=5):
-        out("健康检查通过。")
-    else:
-        out("健康检查未通过。")
+def uninstall(ctx: AppContext, *, yes: bool, purge: bool) -> None:
+    ctx.require_installed()
 
-
-def submenu_network_health() -> None:
-    entries = [
-        ("健康检查", action_health),
-        ("生成主机 Nginx 配置", generate_host_nginx),
-    ]
-    run_submenu("网络与健康", "主菜单", entries)
-
-
-def read_container_env() -> dict[str, str]:
-    result = docker("inspect", CONTAINER, "--format", "{{range .Config.Env}}{{println .}}{{end}}")
-    env: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            env[key] = value
-    return env
-
-
-def read_config_credentials() -> dict[str, str]:
-    """从 pylai.toml 解析数据库/Redis 凭据（容器不存在时的回退路径）。"""
-    if not CONFIG_FILE.is_file():
-        return {}
-    text = CONFIG_FILE.read_text(encoding="utf-8")
-    creds: dict[str, str] = {}
-    match = re.search(r'ConnectionString\s*=\s*"([^"]+)"', text)
-    if match:
-        for key, pattern in (
-            ("db_user", r"(?:Username|User ID)=([^;]+)"),
-            ("db_password", r"Password=([^;]+)"),
-            ("db_name", r"Database=([^;]+)"),
-        ):
-            inner = re.search(pattern, match.group(1))
-            if inner:
-                creds[key] = inner.group(1)
-    section = re.search(r"\[Redis\]\s*\n(.*?)(?=\n\[|\Z)", text, re.S)
-    if section:
-        inner = re.search(r'^Password\s*=\s*"([^"]*)"', section.group(1), re.M)
-        if inner:
-            creds["redis_password"] = inner.group(1)
-    return creds
-
-
-def preflight_config(image: str) -> None:
-    """用新镜像对现有 pylai.toml 做四阶段配置校验，提前暴露 E002 等不兼容项。"""
-    if not CONFIG_FILE.is_file():
-        raise ManageError(f"配置文件不存在: {CONFIG_FILE}")
-    out("==> 校验现有配置与新版本兼容性（config validate）...")
-    result = docker(
-        "run", "--rm", "--entrypoint", PYLAIOS_BIN,
-        "-v", f"{CONFIG_DIR}:/etc/pylai",
-        image, "config", "validate", "--config", "/etc/pylai/pylai.toml",
-        check=False, timeout=120,
-    )
-    output = (result.stdout + result.stderr).strip()
-    if result.returncode == 0:
-        out("配置校验通过。")
-        return
-    if output:
-        out(output)
-    raise ManageError(
-        "现有配置不兼容新版本（见上方诊断）。请先修正 ~/.pylai/config/pylai.toml 后重试："
-        "移除过时配置项（E002），补齐新版本必填项（E004），或调整越界值（E005）。"
-        "也可对照镜像模板 `docker run --rm --entrypoint cat {image} /opt/pylai/pylai.example.toml` 逐项核对。"
-    )
-
-
-def update() -> None:
-    state = load_state()
-    if not state:
-        out("尚未安装，请先执行安装。")
-        return
-    mode = state.get("mode", "monolith")
-    if mode == "compose":
-        _update_compose_interactive(state)
-        return
-    tars = discover_tars()
-    if not tars:
-        out("当前目录未找到新的 Pylai-*.tar。")
-        return
-    name = choose([(p.name, p.name) for p in tars], "请选择新版本安装包")
-    if not name:
-        return
-    tar_path = Path.cwd() / name
-    version, arch = parse_tar(tar_path) or (state.get("version", "0.0.1"), state.get("architecture", "AMD64"))
-    old_image = state.get("image", "pylaios:unknown")
-    creds = read_config_credentials()
-    env = read_container_env() if container_exists() else {}
-    if not container_exists():
-        out("未找到容器，将从 pylai.toml 读取凭据执行更新。")
-    answers = {
-        "public_url": state.get("public_url", "http://localhost"),
-        "public_port": int(state.get("public_port", 8080)),
-        "api_port": int(state.get("api_port", 5000)),
-        "db_user": env.get("PYLAI_DB_USER") or creds.get("db_user") or "pylai",
-        "db_name": env.get("PYLAI_DB_NAME") or creds.get("db_name") or "pylai",
-        "db_password": env.get("PYLAI_DB_PASSWORD") or creds.get("db_password") or "",
-        "redis_password": env.get("PYLAI_REDIS_PASSWORD") or creds.get("redis_password") or "",
-    }
-    if not answers["db_password"] or not answers["redis_password"]:
-        raise ManageError("无法读取数据库/Redis 凭据（容器环境变量与 pylai.toml 均缺失）。")
-
-    out("更新前建议先导出数据库。")
-    if ask_yes_no("是否现在导出数据库备份？", True) and container_running():
-        export_database()
-
-    image = load_image_tar(tar_path)
-    preflight_config(image)
-
-    if container_exists():
-        docker("stop", "-t", "30", CONTAINER, timeout=120)
-    else:
-        out("容器不存在，跳过停止步骤。")
-    try:
-        start_container(image, answers)
-        state["version"] = version
-        state["architecture"] = arch
-        state["image"] = image
-        save_state(state)
-        out("更新完成。")
-    except Exception:
-        out("更新失败，尝试回滚旧镜像。")
-        try:
-            start_container(old_image, answers)
-        except Exception:
-            out("旧镜像以只读容器启动失败，尝试去掉 --read-only 重试...")
-            try:
-                start_container(old_image, answers, read_only=False)
-                out("回滚完成（旧镜像以非只读容器运行，容器安全性已降低）。")
-            except Exception:
-                out("回滚失败，请检查 docker logs pylai。")
-        save_state(state)
-        raise
-
-
-def _update_compose_interactive(state: dict) -> None:
-    """交互式 Compose 模式更新。"""
-    tars = discover_tars()
-    if not tars:
-        out("当前目录未找到新的 Pylai-*.tar。")
-        return
-    name = choose([(p.name, p.name) for p in tars], "请选择新版本安装包")
-    if not name:
-        return
-    tar_path = Path.cwd() / name
-    version, arch = parse_tar(tar_path) or (state.get("version", "0.0.1"), state.get("architecture", "AMD64"))
-    image = load_image_tar(tar_path)
-
-    manager_cfg = ManagerConfig()
-    if manager_cfg.auto_backup:
-        out("==> 自动备份数据库...")
-        docker = DockerCompose(mode="compose")
-        if docker.container_running():
-            export_database()
-
-    preflight_config(image)
-
-    # 更新 compose 文件中的 backend 镜像
-    compose_text = ComposeConfig.COMPOSE_FILE.read_text(encoding="utf-8")
-    compose_text = re.sub(
-        r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
-        rf'\1{image}',
-        compose_text,
-        flags=re.MULTILINE,
-    )
-    ComposeConfig.COMPOSE_FILE.write_text(compose_text, encoding="utf-8")
-
-    docker = DockerCompose(mode="compose")
-    docker._compose("up", "-d", "--remove-orphans", timeout=300)
-
-    if not docker.wait_healthy(int(state.get("api_port", 5000))):
-        out("更新后健康检查未通过，请查看日志。")
-        docker._compose("logs", "backend")
-        return
-
-    state["version"] = version
-    state["architecture"] = arch
-    state["image"] = image
-    save_state(state)
-    out("更新完成。")
-
-
-def uninstall() -> None:
-    state = load_state()
-    if not state and not container_exists():
-        out("没有已安装实例。")
-        return
-    mode = state.get("mode", "monolith") if state else "monolith"
-    if mode == "compose":
-        if not confirm_danger("卸载会停止并删除 Compose 服务，可能删除全部数据。"):
-            out("已取消。")
-            return
-        docker = DockerCompose(mode="compose")
-        docker.rm()
-        for vol in ("pylai_data", "pylai_pgdata", "pylai_redisdata"):
-            docker._docker("volume", "rm", "-f", vol, check=False)
-        image = state.get("image") if state else None
-        if image:
-            docker._docker("rmi", image, check=False)
-        if confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？"):
-            shutil.rmtree(HOME, ignore_errors=True)
-            out("已删除全部数据目录。")
-        STATE_FILE.unlink(missing_ok=True) if not HOME.exists() else None
-        out("卸载完成。")
-        return
-    if not confirm_danger("卸载会停止并删除容器，可能删除全部数据。"):
+    if not yes and not confirm_danger("卸载会停止并删除 Compose 服务，可能删除全部数据。"):
         out("已取消。")
         return
-    if container_exists():
-        docker("stop", "-t", "30", CONTAINER, check=False, timeout=120)
-        docker("rm", "-f", CONTAINER, check=False)
 
-    # 强制清理命名卷，防止旧数据库残留导致新安装 KEK 不匹配
-    for vol in ("pylai_data", "pylai_pgdata"):
-        docker("volume", "rm", "-f", vol, check=False)
+    ctx.docker.down()
 
-    image = state.get("image")
-    if image:
-        docker("rmi", image, check=False)
-    if confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？"):
+    for vol in ("pylai_data", "pylai_pgdata", "pylai_redisdata"):
+        ctx.docker.docker("volume", "rm", "-f", vol, check=False)
+
+    if image := ctx.state.image:
+        ctx.docker.docker("rmi", image, check=False)
+
+    if purge or (
+        not yes
+        and confirm_danger("同时删除 ~/.pylai 全部数据目录（建议保留备份）？")
+    ):
         shutil.rmtree(HOME, ignore_errors=True)
         out("已删除全部数据目录。")
-    STATE_FILE.unlink(missing_ok=True) if not HOME.exists() else None
+
+    STATE_FILE.unlink(missing_ok=True)
+    ctx.state.clear()
+    ctx.state.save()
     out("卸载完成。")
 
 
+type ServiceAction = Literal["start", "stop", "restart", "status"]
+
+
+def service_action(ctx: AppContext, action: ServiceAction) -> None:
+    """统一处理 start/stop/restart/status，取代原先的四个孪生函数。"""
+    if action == "status":
+        result = ctx.docker.docker(
+            "ps", "-a", "--filter", f"name={ctx.docker.project}",
+            "--format", "{{.Names}} {{.Status}}", check=False,
+        )
+        out(result.stdout.strip() or "未找到服务")
+        return
+
+    ctx.require_installed()
+
+    match action:
+        case "start":
+            ctx.docker.compose("up", "-d", timeout=120)
+            healthy = ctx.docker.wait_healthy(ctx.state.api_port)
+            out("启动完成。" if healthy else "服务已启动，但健康检查尚未通过。")
+        case "stop":
+            ctx.docker.stop()
+            out("已停止。")
+        case "restart":
+            ctx.docker.restart()
+            out("已重启。")
+
+
 # ============================================================================
-# CLI 命令处理（非交互模式）
+# 安装 / 更新 / 备份 / 用户 / 安全 / 配置服务
 # ============================================================================
+class InstallService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
 
-def _cmd_install(args: argparse.Namespace, docker: DockerCompose, state: State,
-                 config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
-    if state.installed:
-        raise ManageError("检测到已有安装。如需重新安装，请先卸载或使用更新。")
+    def install_cli(self, args: argparse.Namespace) -> None:
+        tar_path = select_tar(yes=args.yes)
+        image = self.ctx.docker.load_image_tar(tar_path)
+        answers = self.resolve_answers(args)
+        interactive = not (args.yes or args.pylai_config or args.env_file)
 
-    tars = discover_tars()
-    if not tars:
-        raise ManageError("当前目录未找到 Pylai-<version>-Linux-<arch>.tar。")
+        self.core_install(
+            tar_path,
+            image,
+            answers,
+            from_existing=bool(args.pylai_config),
+            interactive=interactive,
+        )
 
-    # 选择安装包
-    if args.yes:
-        compatible = [p for p in tars if parse_tar(p) and parse_tar(p)[1] == host_arch()]
-        if not compatible:
-            compatible = tars
-        tar_path = compatible[0]
-    else:
-        options = [(f"{p.name}（{'与当前主机兼容' if parse_tar(p)[1] == host_arch() else '其他架构'}）", p.name) for p in tars]
-        name = choose(options, "请选择安装包")
-        if not name:
-            return
-        tar_path = Path.cwd() / name
+    def install_interactive(self) -> None:
+        tar_path = select_tar(yes=False)
+        image = self.ctx.docker.load_image_tar(tar_path)
+        answers = InstallAnswers.collect_interactive()
 
-    version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
-    image = docker.load_image_tar(tar_path)
+        self.core_install(
+            tar_path,
+            image,
+            answers,
+            from_existing=False,
+            interactive=True,
+        )
 
-    # ===== 方式1: 从现有 pylai.toml =====
-    if args.pylai_config:
-        source = Path(args.pylai_config)
-        config = PylaiConfig.from_existing(source)
-        answers = config.extract_container_params()
-        answers["public_port"] = int(os.environ.get("PYLAI_PUBLIC_PORT", answers.get("public_port", 8080)))
-        answers["api_port"] = int(os.environ.get("PYLAI_API_PORT", answers.get("api_port", 5000)))
-        if not answers.get("db_password") or not answers.get("redis_password"):
-            raise ManageError("从现有配置无法提取数据库/Redis 密码，请检查 pylai.toml。")
+    def resolve_answers(self, args: argparse.Namespace) -> InstallAnswers:
+        if args.pylai_config:
+            source = Path(args.pylai_config).expanduser()
+            self.ctx.config = PylaiConfig.from_existing(source)
+            answers = self.ctx.config.extract_answers()
 
-    # ===== 方式2: 从 .env 文件 =====
-    elif args.env_file:
-        env = parse_env_file(Path(args.env_file))
-        answers = build_answers_from_env(env)
+            answers.public_port = as_int(
+                os.environ.get("PYLAI_PUBLIC_PORT"),
+                answers.public_port,
+            )
+            answers.api_port = as_int(
+                os.environ.get("PYLAI_API_PORT"),
+                answers.api_port,
+            )
 
-    # ===== 方式3: 从环境变量（--yes 且无其他参数时）=====
-    elif args.yes:
-        env = {k: v for k, v in os.environ.items() if k.startswith("PYLAI_")}
-        answers = build_answers_from_env(env)
+            if not answers.db_password or not answers.redis_password:
+                raise ManageError(
+                    "从现有配置无法提取数据库/Redis 密码，请检查 pylai.toml。"
+                )
 
-    # ===== 方式4: 交互式 =====
-    else:
-        out("\n==> 开始安装配置（涉及密码的项直接回车可自动生成）")
-        answers = collect_install_answers()
+            return answers
 
-    # 确定部署模式
-    if args.yes:
-        mode = os.environ.get("PYLAI_MODE", "monolith")
-    else:
-        mode = "compose" if ask_yes_no("\n使用多服务 Docker Compose 模式（推荐生产环境）？", False) else "monolith"
+        if args.env_file:
+            return InstallAnswers.from_env(parse_env_file(Path(args.env_file).expanduser()))
 
-    # 生成配置（方式1 已复制，无需重新生成）
-    if not args.pylai_config:
-        PylaiConfig.generate_from_template(image, answers)
+        if args.yes:
+            env = {k: v for k, v in os.environ.items() if k.startswith("PYLAI_")}
+            return InstallAnswers.from_env(env)
 
-    config.reload()
+        return InstallAnswers.collect_interactive()
 
-    # Compose 模式：调整连接串与生成 compose 文件
-    if mode == "compose":
-        cs = config.get_value("Database", "ConnectionString", "")
-        if "Host=127.0.0.1" in cs:
-            new_cs = cs.replace("Host=127.0.0.1", "Host=postgres")
-            config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
-        redis_host = config.get_value("Redis", "Host", "")
-        if redis_host == "127.0.0.1":
-            config.set_block_value("[Redis]", "Host", toml_string("redis"))
-            config.set_block_value("[Redis]", "Port", "6379")
+    def core_install(
+        self,
+        tar_path: Path,
+        image: str,
+        answers: InstallAnswers,
+        *,
+        from_existing: bool,
+        interactive: bool,
+    ) -> None:
+        ctx = self.ctx
 
-        ComposeConfig.generate(answers, manager_cfg, image)
+        if not from_existing:
+            PylaiConfig.generate_from_template(image, answers)
+            ctx.config.reload()
+
+        self.fix_container_hosts()
+
+        ComposeConfig.generate(answers, ctx.manager, image)
         ComposeConfig.ensure_volumes()
 
-    # 确保 signing KEK
-    signing_kek_path = CERT_DIR / "signing-kek"
-    if not signing_kek_path.is_file():
-        ensure_home()
-        signing_kek = secrets.token_hex(32)
-        signing_kek_path.write_text(signing_kek, encoding="ascii")
-        signing_kek_path.chmod(0o600)
+        ensure_signing_kek()
+        self.ensure_signing_certificate(answers)
+        self.ensure_encryption_certificate(answers, interactive=interactive)
 
-    # 自动生成加密证书
-    if not answers.get("encryption_pfx") and shutil.which("openssl"):
-        ensure_home()
-        host_pfx = CERT_DIR / "encryption.pfx"
-        key_file = CERT_DIR / "encryption-key.pem"
-        cert_file = CERT_DIR / "encryption-cert.pem"
-        enc_pwd = secrets.token_urlsafe(12)
-        run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-             "-keyout", str(key_file), "-out", str(cert_file), "-days", "3650",
-             "-subj", "/CN=Pylai Encryption"], timeout=300)
-        run(["openssl", "pkcs12", "-export", "-out", str(host_pfx),
-             "-inkey", str(key_file), "-in", str(cert_file),
-             "-passout", f"pass:{enc_pwd}"], timeout=300)
-        host_pfx.chmod(0o600)
-        key_file.unlink(missing_ok=True)
-        cert_file.unlink(missing_ok=True)
-        config.reload()
-        config.set_block_value("[OpenIddict.Certificates.Encryption]", "Path", toml_string(f"{CONTAINER_CERT_DIR}/encryption.pfx"))
-        config.set_block_value("[OpenIddict.Certificates.Encryption]", "Password", toml_string(enc_pwd))
-        answers["encryption_pfx"] = f"{CONTAINER_CERT_DIR}/encryption.pfx"
-        answers["encryption_pfx_password"] = enc_pwd
+        ctx.docker.start(image, answers)
 
-    # 启动
-    docker.mode = mode
-    docker.start(image, answers)
-    if not docker.wait_healthy(answers["api_port"]):
-        print_container_logs()
-        raise ManageError("服务启动超时，请根据上方日志排查。")
+        if not ctx.docker.wait_healthy(answers.api_port):
+            ctx.docker.view_logs(60)
+            raise ManageError("服务启动超时，请根据上方日志排查。")
 
-    # 保存状态
-    state.set("version", version)
-    state.set("architecture", arch)
-    state.set("image", image)
-    state.set("public_url", answers["public_url"])
-    state.set("public_port", answers["public_port"])
-    state.set("api_port", answers["api_port"])
-    state.set("max_email", answers.get("max_email", ""))
-    state.set("admin_email", answers.get("admin_email", ""))
-    state.set("installed_at", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
-    state.set("mode", mode)
-    state.save()
+        self.save_state(tar_path, image, answers)
+        self.print_summary(answers)
 
-    print_install_summary(answers, yes_mode=args.yes)
-    out("提示：建议使用主机 Nginx 反代，执行 `config generate-nginx` 可生成配置模板。")
+        out("提示：建议使用主机 Nginx 反代，主菜单 [8] 可生成配置模板。")
+
+    def fix_container_hosts(self) -> None:
+        config = self.ctx.config
+
+        connection_string = str(config.get_value("Database", "ConnectionString", ""))
+        if "Host=127.0.0.1" in connection_string:
+            new_connection_string = connection_string.replace(
+                "Host=127.0.0.1",
+                "Host=postgres",
+            )
+            config.set_block_value(
+                "[Database]",
+                "ConnectionString",
+                toml_str(new_connection_string),
+            )
+
+        redis_host = str(config.get_value("Redis", "Host", ""))
+        if redis_host == "127.0.0.1":
+            config.set_block_value("[Redis]", "Host", toml_str("redis"))
+            config.set_block_value("[Redis]", "Port", "6379")
+
+    def ensure_signing_certificate(self, answers: InstallAnswers) -> None:
+        if answers.signing_pfx and not answers.signing_pfx.startswith(CONTAINER_CERT_DIR):
+            answers.signing_pfx = import_pfx(
+                Path(answers.signing_pfx).expanduser(),
+                "signing.pfx",
+            )
+
+    def ensure_encryption_certificate(
+        self,
+        answers: InstallAnswers,
+        *,
+        interactive: bool,
+    ) -> None:
+        if answers.encryption_pfx and not answers.encryption_pfx.startswith(CONTAINER_CERT_DIR):
+            answers.encryption_pfx = import_pfx(
+                Path(answers.encryption_pfx).expanduser(),
+                "encryption.pfx",
+            )
+        elif not answers.encryption_pfx:
+            if shutil.which("openssl"):
+                answers.encryption_pfx, answers.encryption_pfx_password = generate_encryption_pfx()
+            elif interactive:
+                raise ManageError("生产环境必须配置持久化 OpenIddict 加密证书。")
+            else:
+                out("警告：未找到 openssl，且未提供加密证书。")
+                return
+
+        if answers.encryption_pfx:
+            self.ctx.config.reload()
+            self.ctx.config.set_block_value(
+                "[OpenIddict.Certificates.Encryption]",
+                "Path",
+                toml_str(answers.encryption_pfx),
+            )
+            self.ctx.config.set_block_value(
+                "[OpenIddict.Certificates.Encryption]",
+                "Password",
+                toml_str(answers.encryption_pfx_password),
+            )
+
+    def save_state(self, tar_path: Path, image: str, answers: InstallAnswers) -> None:
+        version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
+        state = self.ctx.state
+
+        state.set("version", version)
+        state.set("architecture", arch)
+        state.set("image", image)
+        state.set("public_url", answers.public_url)
+        state.set("public_port", answers.public_port)
+        state.set("api_port", answers.api_port)
+        state.set("max_email", answers.max_account.email)
+        state.set("admin_email", answers.admin_account.email if answers.admin_account else "")
+        state.set("installed_at", utc_now_iso())
+        state.set("mode", "compose")
+        state.save()
+
+    def print_summary(self, answers: InstallAnswers) -> None:
+        out("\n" + "=" * 64)
+        out("  Pylai 安装完成")
+        out(f"  前端:     {answers.public_url}/")
+        out(f"  管理台:   {answers.public_url}/admin/")
+        out(f"  健康检查: http://127.0.0.1:{answers.api_port}/health/ready")
+        out()
+
+        reveal_credentials(answers.credentials)
+
+        if auto := answers.auto_generated_accounts:
+            out(
+                f"  提示: {', '.join(auto)} 密码已自动生成，"
+                "请在容器日志中查看（[DbSeeder] 标记）。"
+            )
+
+        out("=" * 64)
 
 
-def _cmd_update(args: argparse.Namespace, docker: DockerCompose, state: State,
-                config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
-    if args.check_only:
-        client = ReleaseClient(manager_cfg)
-        updater = SelfUpdater(client, manager_cfg, state)
-        result = updater.check()
-        if result:
-            ver, info = result
-            out(f"最新 ManagePylai.py 版本: {ver}")
+class UpdateService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def update_cli(self, args: argparse.Namespace) -> None:
+        if args.check_only:
+            self.check_manager_update()
+            return
+
+        self.ensure_manager_up_to_date(args.yes)
+        self.update_app(yes=args.yes)
+
+    def update_interactive(self) -> None:
+        self.update_app(yes=False)
+
+    def check_manager_update(self) -> None:
+        client = ReleaseClient(self.ctx.manager)
+        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
+
+        if result := updater.check():
+            version, info = result
+            out(f"最新 ManagePylai.py 版本: {version}")
             if "dbSchemaVersion" in info:
                 out(f"  dbSchemaVersion: {info['dbSchemaVersion']}")
         else:
             out("当前已是最新，或无法获取版本信息。")
-        return
 
-    # 更新前 Self-Update 检查（Phase 2 核心）
-    client = ReleaseClient(manager_cfg)
-    updater = SelfUpdater(client, manager_cfg, state)
-    updater.ensure_up_to_date(yes=args.yes)
+    def ensure_manager_up_to_date(self, yes: bool) -> None:
+        client = ReleaseClient(self.ctx.manager)
+        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
+        updater.ensure_up_to_date(yes=yes)
 
-    # 根据模式路由
-    if state.mode == "compose":
-        _update_compose(args, docker, state, config, manager_cfg)
-    else:
-        update()  # 现有 monolith 更新逻辑
+    def update_app(self, *, yes: bool) -> None:
+        ctx = self.ctx
+        ctx.require_installed()
+
+        tar_path = select_tar(yes=yes, prompt="请选择新版本安装包")
+        version, arch = parse_tar(tar_path) or (
+            ctx.state.version,
+            ctx.state.architecture,
+        )
+
+        image = ctx.docker.load_image_tar(tar_path)
+
+        if ctx.manager.auto_backup and ctx.docker.service_running():
+            out("==> 自动备份数据库...")
+            BackupService(ctx).export()
+
+        self.preflight_config(image)
+
+        ctx.docker.set_backend_image(image)
+        ctx.docker.compose("up", "-d", "--remove-orphans", timeout=300)
+
+        if not ctx.docker.wait_healthy(ctx.state.api_port):
+            ctx.docker.view_logs(60)
+            raise ManageError("更新后健康检查未通过，请查看日志。")
+
+        ctx.state.set("version", version)
+        ctx.state.set("architecture", arch)
+        ctx.state.set("image", image)
+        ctx.state.save()
+
+        out("更新完成。")
+
+    def preflight_config(self, image: str) -> None:
+        if not CONFIG_FILE.is_file():
+            raise ManageError(f"配置文件不存在: {CONFIG_FILE}")
+
+        out("==> 校验现有配置与新版本兼容性...")
+
+        result = run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--entrypoint",
+                PYLAIOS_BIN,
+                "-v",
+                f"{CONFIG_DIR}:/etc/pylai",
+                image,
+                "config",
+                "validate",
+                "--config",
+                PYLAI_CONFIG_ARG,
+            ],
+            check=False,
+            timeout=120,
+        )
+
+        output = (result.stdout + result.stderr).strip()
+
+        if result.returncode == 0:
+            out("配置校验通过。")
+            return
+
+        if output:
+            out(output)
+
+        raise ManageError(
+            "现有配置不兼容新版本（见上方诊断）。请先修正 ~/.pylai/config/pylai.toml 后重试："
+            "移除过时配置项（E002），补齐新版本必填项（E004），或调整越界值（E005）。"
+            f"也可对照镜像模板 `docker run --rm --entrypoint cat {image} /opt/pylai/pylai.example.toml` 逐项核对。"
+        )
 
 
-def _update_compose(args: argparse.Namespace, docker: DockerCompose, state: State,
-                    config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
-    """非交互 / CLI 的 Compose 模式更新。"""
-    tars = discover_tars()
-    if not tars:
-        raise ManageError("当前目录未找到新的 Pylai-*.tar。")
+class BackupService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
 
-    if args.yes:
-        compatible = [p for p in tars if parse_tar(p) and parse_tar(p)[1] == host_arch()]
-        if not compatible:
-            compatible = tars
-        tar_path = compatible[0]
-    else:
-        options = [(p.name, p.name) for p in tars]
-        name = choose(options, "请选择新版本安装包")
+    def export(self) -> None:
+        ctx = self.ctx
+        ctx.require_running()
+        ensure_home()
+
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        name = f"manage-export-{stamp}"
+
+        ctx.docker.exec_pylaios(
+            "backup",
+            "create",
+            name,
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=1200,
+        )
+
+        ctx.docker.compose(
+            "cp",
+            f"backend:/var/lib/pylai/backups/{name}.dump",
+            BACKUP_DIR / f"{name}.dump",
+            timeout=1200,
+        )
+
+        out(f"已导出: {BACKUP_DIR / (name + '.dump')}")
+
+    def list_backups(self) -> None:
+        backups = sorted(BACKUP_DIR.glob("*.dump"))
+        if not backups:
+            out("备份目录为空。")
+            return
+
+        for path in backups:
+            out(f"{path.name}  {path.stat().st_size} bytes")
+
+    def restore_interactive(self) -> None:
+        backups = sorted(
+            BACKUP_DIR.glob("*.dump"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        if not backups:
+            out("没有可用备份。请先执行导出，或将 .dump 放入备份目录。")
+            return
+
+        name = choose([(p.name, p.name) for p in backups], "请选择要导入的备份")
         if not name:
             return
-        tar_path = Path.cwd() / name
 
-    version, arch = parse_tar(tar_path) or (state.version, state.architecture)
-    image = docker.load_image_tar(tar_path)
+        if not confirm_danger(f"将用 {name} 全量覆盖当前数据库，且不可撤销。"):
+            out("已取消。")
+            return
 
-    if manager_cfg.auto_backup and docker.container_running():
-        out("==> 自动备份数据库...")
-        export_database()
+        self.restore_file(BACKUP_DIR / name)
 
-    preflight_config(image)
+    def restore_file(self, path: Path) -> None:
+        ctx = self.ctx
+        ctx.require_installed()
 
-    # 更新 compose 文件中的 backend 镜像
-    compose_text = ComposeConfig.COMPOSE_FILE.read_text(encoding="utf-8")
-    compose_text = re.sub(
-        r'^(  backend:\s*\n(?:    .*\n)*?    image: ).*$',
-        rf'\1{image}',
-        compose_text,
-        flags=re.MULTILINE,
-    )
-    ComposeConfig.COMPOSE_FILE.write_text(compose_text, encoding="utf-8")
+        if not path.is_file():
+            raise ManageError(f"备份文件不存在: {path}")
 
-    docker.mode = "compose"
-    docker._compose("up", "-d", "--remove-orphans", timeout=300)
+        if not ctx.docker.service_running():
+            ctx.docker.compose("up", "-d", timeout=120)
+            ctx.docker.wait_healthy(ctx.state.api_port)
 
-    if not docker.wait_healthy(state.api_port):
-        out("更新后健康检查未通过，请查看日志。")
-        docker._compose("logs", "backend")
-        raise ManageError("更新失败。")
+        name = path.name
 
-    state.set("version", version)
-    state.set("architecture", arch)
-    state.set("image", image)
-    state.save()
-    out("更新完成。")
+        ctx.docker.compose(
+            "cp",
+            path,
+            f"backend:/var/lib/pylai/backups/{name}",
+            timeout=1200,
+        )
 
+        ctx.docker.compose("stop", "backend", timeout=120)
 
-def migrate_monolith_to_compose(docker: DockerCompose, state: State,
-                                config: PylaiConfig, manager_cfg: ManagerConfig) -> None:
-    """将单容器部署迁移到多服务 Compose 部署。
+        try:
+            ctx.docker.exec_pylaios(
+                "backup",
+                "restore",
+                name,
+                "--config",
+                PYLAI_CONFIG_ARG,
+                timeout=1800,
+            )
+        finally:
+            ctx.docker.compose("start", "backend", timeout=120)
 
-    流程：
-      1. 导出数据库备份
-      2. 停止并删除单容器
-      3. 生成 docker-compose.yml / .env / nginx.conf
-      4. 更新 pylai.toml（127.0.0.1 → 服务名）
-      5. 启动 Compose 服务
-      6. 更新状态为 compose 模式
-    """
-    if not state.installed:
-        raise ManageError("尚未安装，无法迁移。")
-    if state.mode == "compose":
-        raise ManageError("已经是 Compose 模式，无需迁移。")
-
-    out("==> 开始从单容器迁移到 Compose 模式")
-
-    # 读取现有参数
-    env = docker.read_env()
-    creds = config.extract_container_params()
-    answers = {
-        "public_url": state.public_url,
-        "public_port": state.public_port,
-        "api_port": state.api_port,
-        "db_user": env.get("PYLAI_DB_USER") or creds.get("db_user", "pylai"),
-        "db_name": env.get("PYLAI_DB_NAME") or creds.get("db_name", "pylai"),
-        "db_password": env.get("PYLAI_DB_PASSWORD") or creds.get("db_password", ""),
-        "redis_password": env.get("PYLAI_REDIS_PASSWORD") or creds.get("redis_password", ""),
-    }
-
-    # 导出备份
-    out("==> 导出数据库备份...")
-    if docker.container_running():
-        export_database()
-
-    # 停止并删除单容器
-    out("==> 停止单容器...")
-    if docker.container_exists():
-        docker.stop()
-        docker.rm()
-
-    # 生成 Compose 配置
-    out("==> 生成 Compose 配置...")
-    image = state.image
-    ComposeConfig.generate(answers, manager_cfg, image)
-    ComposeConfig.ensure_volumes()
-
-    # 更新 pylai.toml 服务发现
-    out("==> 更新 pylai.toml 数据库/Redis 连接...")
-    config.reload()
-    old_cs = config.get_value("Database", "ConnectionString", "")
-    if "Host=127.0.0.1" in old_cs:
-        new_cs = old_cs.replace("Host=127.0.0.1", "Host=postgres")
-        config.set_block_value("[Database]", "ConnectionString", toml_string(new_cs))
-    old_redis_host = config.get_value("Redis", "Host", "")
-    if old_redis_host == "127.0.0.1":
-        config.set_block_value("[Redis]", "Host", toml_string("redis"))
-
-    # 启动 Compose
-    out("==> 启动 Compose 服务...")
-    docker.mode = "compose"
-    docker.start(image, answers)
-
-    # 等待健康
-    out("==> 等待服务就绪...")
-    if not docker.wait_healthy(answers["api_port"], timeout=300):
-        out("服务启动超时，请检查日志：")
-        run(["docker", "compose", "-p", docker.project, "-f", str(ComposeConfig.COMPOSE_FILE),
-             "logs", "backend"], check=False)
-        raise ManageError("迁移后服务启动失败。")
-
-    # 更新状态
-    state.set("mode", "compose")
-    state.save()
-    out("==> 迁移完成。现在使用 Compose 模式运行。")
-    out(f"  管理命令: docker compose -p {docker.project} -f {ComposeConfig.COMPOSE_FILE} <cmd>")
+        if ctx.docker.wait_healthy(ctx.state.api_port):
+            out("导入完成，服务已恢复。")
+        else:
+            out("导入命令已完成，但健康检查未通过，请查看日志。")
 
 
-def _cmd_self_update(args: argparse.Namespace, manager_cfg: ManagerConfig,
-                     state: State) -> None:
-    client = ReleaseClient(manager_cfg)
-    updater = SelfUpdater(client, manager_cfg, state)
+class UserService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def execute(self, *args: str, input_text: str | None = None) -> Json:
+        result = self.ctx.docker.exec_pylaios(
+            "user",
+            *args,
+            "--config",
+            PYLAI_CONFIG_ARG,
+            input_text=input_text,
+            timeout=120,
+            check=False,
+        )
+
+        with suppress(json.JSONDecodeError):
+            return json.loads(result.stdout.strip())
+
+        out(result.stdout.strip() or result.stderr.strip())
+        return {"success": False}
+
+    def list_users(self) -> None:
+        data = self.execute("list")
+        if not data.get("success"):
+            out("获取用户列表失败。")
+            return
+
+        users = data.get("users", [])
+        total = data.get("total", 0)
+
+        out(f"共 {total} 位用户：")
+        out(f"{'UID':<36} {'用户名':<20} {'显示名':<20} {'邮箱':<30} {'组':<8} {'状态':<8}")
+        out("-" * 120)
+
+        for user in users:
+            out(
+                f"{user.get('uid', ''):<36} "
+                f"{user.get('name', ''):<20} "
+                f"{user.get('displayName', '') or '-':<20} "
+                f"{user.get('email', ''):<30} "
+                f"{user.get('group', ''):<8} "
+                f"{user.get('status', ''):<8}"
+            )
+
+    def show_user(self, target: str | None = None) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+        data = self.execute("show", target)
+
+        if not data.get("success"):
+            out("用户不存在或查询失败。")
+            return
+
+        user = data.get("user", {})
+
+        out(f"UID:         {user.get('uid')}")
+        out(f"用户名:      {user.get('name')}")
+        out(f"显示名:      {user.get('displayName')}")
+        out(f"邮箱:        {user.get('email')}")
+        out(f"组:          {user.get('group')}")
+        out(f"状态:        {user.get('status')}")
+        out(f"注册时间:    {user.get('registerTime')}")
+        out(f"最后登录:    {user.get('lastLoginAt') or '从未登录'}")
+        out(f"活跃会话数:  {user.get('activeSessions', 0)}")
+
+        if user.get("externalLogins"):
+            out("外部登录绑定:")
+            for login in user["externalLogins"]:
+                out(f"  - {login['provider']} ({login['boundAt']})")
+
+    def create_user(
+        self,
+        *,
+        email: str | None = None,
+        name: str = "",
+        display_name: str = "",
+        group: UserGroup = "normal",
+        interactive: bool = False,
+    ) -> None:
+        email = email or ask("邮箱")
+
+        if interactive:
+            name = ask("登录名（留空使用邮箱前缀）", "", allow_blank=True)
+            display_name = ask("显示名（留空使用登录名）", "", allow_blank=True)
+            group = choose(GROUP_OPTIONS, "请选择用户组") or "normal"
+
+        base_args = [
+            "create",
+            email,
+            "--name",
+            name or "",
+            "--display-name",
+            display_name or "",
+            "--group",
+            group,
+        ]
+
+        policy = read_password_policy()
+        privileged = group in {"admin", "max"}
+
+        if interactive and ask_bool("手动指定密码？（留空则自动生成）", False):
+            while True:
+                password = ask("密码", "", secret=True)
+                errors = validate_password_local(password, policy, privileged=privileged)
+
+                if not errors:
+                    break
+
+                out(f"密码不符合策略: {', '.join(errors)}")
+                if not ask_bool("重新输入？"):
+                    return
+
+            data = self.execute(*base_args, "--password-stdin", input_text=password + "\n")
+        else:
+            data = self.execute(*base_args)
+
+        if data.get("success"):
+            out(f"创建成功: {data.get('message')}")
+
+            if "generatedPassword" in data:
+                out(f"自动生成的密码: {data['generatedPassword']}")
+                out("请立即保存，该密码不会再次显示。")
+        else:
+            out(f"创建失败: {data.get('message', '未知错误')}")
+
+    def delete_user(self, target: str | None = None, *, assume_yes: bool = False) -> None:
+        target = target or ask("要删除的用户标识（uid/用户名/邮箱）")
+
+        if not assume_yes and not confirm_danger(
+            f"将软删除用户 {target}，其全部会话将被吊销。"
+        ):
+            out("已取消。")
+            return
+
+        data = self.execute("delete", target)
+        out(data.get("message", "未知错误"))
+
+    def set_group(
+        self,
+        target: str | None = None,
+        group: str | None = None,
+        *,
+        interactive: bool = False,
+    ) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+
+        if interactive:
+            group = choose(GROUP_OPTIONS, "请选择新用户组") or "normal"
+        else:
+            group = group or ask("新用户组")
+
+        data = self.execute("set-group", target, group)
+        out(data.get("message", "未知错误"))
+
+    def set_status(
+        self,
+        target: str | None = None,
+        status: str | None = None,
+        *,
+        interactive: bool = False,
+    ) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+
+        if interactive:
+            status = choose(STATUS_OPTIONS, "请选择新状态") or "active"
+        else:
+            status = status or ask("新状态")
+
+        data = self.execute("set-status", target, status)
+        out(data.get("message", "未知错误"))
+
+    def revoke_sessions(self, target: str | None = None) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+        data = self.execute("revoke-sessions", target)
+        out(data.get("message", "未知错误"))
+
+    def reset_password(
+        self,
+        target: str | None = None,
+        password: str | None = None,
+        *,
+        privileged: bool = False,
+    ) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+        policy = read_password_policy()
+
+        if password is None:
+            while True:
+                password = ask("新密码", "", secret=True)
+                errors = validate_password_local(password, policy, privileged=privileged)
+
+                if not errors:
+                    break
+
+                out(f"密码不符合策略: {', '.join(errors)}")
+                if not ask_bool("重新输入？"):
+                    return
+        else:
+            if errors := validate_password_local(password, policy, privileged=privileged):
+                raise ManageError(f"密码不符合策略: {', '.join(errors)}")
+
+        data = self.execute(
+            "reset-password",
+            target,
+            "--password-stdin",
+            input_text=password + "\n",
+        )
+
+        if data.get("success"):
+            out(data.get("message", "密码已重置，该用户全部会话与 token 已吊销。"))
+        else:
+            out("密码重置失败。")
+
+
+class SecurityService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def key_status(self) -> None:
+        self.ctx.require_running()
+        self.ctx.docker.exec_pylaios(
+            "key",
+            "status",
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=120,
+        )
+
+    def key_rotate(self) -> None:
+        self.ctx.require_running()
+
+        mfa_user = ask(
+            "用于 MFA 验证的 Admin/Max 账户",
+            self.ctx.state.get("max_email") or "max@pylai.local",
+        )
+        mfa_code = ask("该账户 TOTP 验证码", "", secret=True)
+
+        if not mfa_code:
+            raise ManageError("签名密钥轮换需要 MFA 验证码。")
+
+        self.ctx.docker.exec_pylaios(
+            "key",
+            "rotate",
+            "--mfa-user",
+            mfa_user,
+            "--mfa-code",
+            mfa_code,
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=120,
+        )
+
+    def db_status(self) -> None:
+        self.ctx.require_running()
+        self.ctx.docker.exec_pylaios(
+            "db",
+            "status",
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=120,
+        )
+
+    def db_bootstrap(self) -> None:
+        self.ctx.require_running()
+        self.ctx.docker.exec_pylaios(
+            "db",
+            "bootstrap",
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=120,
+        )
+
+
+class ConfigService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def view(self) -> None:
+        if not CONFIG_FILE.is_file():
+            out("配置文件不存在")
+            return
+
+        out(self.ctx.config.mask())
+
+    def edit(self) -> None:
+        editor = os.environ.get("EDITOR", "nano")
+        subprocess.run([editor, str(CONFIG_FILE)])
+
+    def validate(self) -> None:
+        self.ctx.config.validate()
+        out("配置校验通过。")
+
+    def generate_nginx(self) -> None:
+        self.ctx.require_installed()
+        path = generate_host_nginx_template(self.ctx.state)
+        out(f"模板已生成: {path}")
+        out("请自行替换证书路径和 server_name，然后安装到 /etc/nginx/conf.d/ 并 reload。")
+
+    def change_url(self) -> None:
+        self.ctx.require_installed()
+
+        if not CONFIG_FILE.is_file():
+            raise ManageError("配置文件不存在")
+
+        new_url = ask("新公开地址", self.ctx.state.public_url)
+        origin = new_url.rstrip("/")
+        external_host = urlparse(new_url).hostname or "localhost"
+
+        allowed_hosts = [external_host]
+        if external_host not in {"localhost", "127.0.0.1", "::1"}:
+            allowed_hosts.extend(("localhost", "127.0.0.1"))
+
+        t = TomlText(CONFIG_FILE.read_text(encoding="utf-8"))
+        t.set("[Frontend]", "Url", toml_str(new_url))
+        t.set("[OpenIddict]", "Issuer", toml_str(origin))
+        t.set("[OpenIddict]", "RequireHttps", "true" if origin.startswith("https://") else "false")
+        t.set("[Server]", "AllowedHosts", toml_list(allowed_hosts))
+        t.set("[Mfa]", "RelyingPartyId", toml_str(external_host))
+        t.set("[Mfa]", "Origins", toml_list([origin]))
+        t.set(
+            "[Cookie]",
+            "SecurePolicy",
+            toml_str("Always" if origin.startswith("https://") else "SameAsRequest"),
+        )
+
+        atomic_write(CONFIG_FILE, str(t))
+
+        self.ctx.state.set("public_url", new_url)
+        self.ctx.state.save()
+
+        out("配置已修改，注意：需要手动重启实例才能生效")
+
+    def change_ports(self) -> None:
+        self.ctx.require_installed()
+
+        new_public = ask_int("新公开端口", self.ctx.state.public_port)
+        new_api = ask_int("新本机 API 端口", self.ctx.state.api_port)
+
+        self.ctx.state.set("public_port", new_public)
+        self.ctx.state.set("api_port", new_api)
+
+        env = self.ctx.docker.read_env()
+        db_password = env.get("PYLAI_DB_PASSWORD", "")
+        redis_password = env.get("PYLAI_REDIS_PASSWORD", "")
+
+        if not db_password or not redis_password:
+            self.ctx.state.save()
+            out("无法读取现有环境变量，端口已记录，将在下次重建时生效。")
+            return
+
+        if ask_bool("端口映射需要重建服务才能生效，是否立即应用？", True):
+            answers = InstallAnswers(
+                public_url=self.ctx.state.public_url,
+                public_port=new_public,
+                api_port=new_api,
+                db_user=env.get("PYLAI_DB_USER", "pylai"),
+                db_name=env.get("PYLAI_DB_NAME", "pylai"),
+                db_password=db_password,
+                redis_password=redis_password,
+            )
+
+            self.ctx.docker.start(self.ctx.state.image, answers)
+
+            if not self.ctx.docker.wait_healthy(new_api):
+                self.ctx.docker.view_logs(60)
+                raise ManageError("重建后健康检查未通过，请根据上方日志排查。")
+
+            out("端口已更新并重建服务。")
+        else:
+            out("端口已记录，将在下次重建时生效。")
+
+        self.ctx.state.save()
+
+    def change_smtp(self) -> None:
+        self.ctx.require_installed()
+
+        if not CONFIG_FILE.is_file():
+            out("配置文件不存在")
+            return
+
+        smtp = configure_smtp_interactive()
+        if not smtp:
+            out("已取消。")
+            return
+
+        t = TomlText(CONFIG_FILE.read_text(encoding="utf-8"))
+        t.set("[Email]", "FromAddress", toml_str(smtp.sender))
+        t.set_many("[Email.Smtp]", {
+            "Host": toml_str(smtp.host),
+            "Port": str(smtp.port),
+            "Security": toml_str(smtp.security),
+            "Username": toml_str(smtp.user),
+            "Password": toml_str(smtp.password),
+        })
+        t.strip_line(r"(?m)^[ \t]*UseSsl[ \t]*=.*\n")
+        atomic_write(CONFIG_FILE, str(t))
+
+        out(f"SMTP 配置已更新：{smtp.host}:{smtp.port} / {smtp.security}")
+        out("注意：需要手动重启实例才能生效")
+
+    def change_mfa(self) -> None:
+        self.ctx.require_installed()
+
+        if not CONFIG_FILE.is_file():
+            out("配置文件不存在")
+            return
+
+        text = CONFIG_FILE.read_text(encoding="utf-8")
+
+        try:
+            parsed = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            out(f"配置解析失败: {exc}")
+            return
+
+        mfa = parsed.get("Mfa", {})
+        current_admin = bool(mfa.get("RequireForAdmin", False))
+        current_max_webauthn = bool(mfa.get("RequireWebAuthnForMax", False))
+
+        out("当前 MFA 配置：")
+        out(f"  RequireForAdmin = {'true' if current_admin else 'false'}")
+        out(f"  RequireWebAuthnForMax = {'true' if current_max_webauthn else 'false'}")
+
+        new_admin = ask_bool("Admin 及以上角色登录时强制要求 MFA？", current_admin)
+        new_max_webauthn = (
+            ask_bool(
+                "Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？",
+                current_max_webauthn,
+            )
+            if new_admin
+            else False
+        )
+
+        t = TomlText(text)
+        t.set_many("[Mfa]", {
+            "RequireForAdmin": "true" if new_admin else "false",
+            "RequireWebAuthnForMax": "true" if new_max_webauthn else "false",
+        })
+        atomic_write(CONFIG_FILE, str(t))
+        out("MFA 配置已更新，注意：需要手动重启实例才能生效")
+
+    def reset_password(self, kind: Literal["max", "admin"]) -> None:
+        self.ctx.require_running()
+
+        default_email = (
+            self.ctx.state.get("max_email")
+            if kind == "max"
+            else self.ctx.state.get("admin_email")
+        )
+
+        email = ask("账号邮箱/登录名", default_email or f"{kind}@pylai.local")
+        policy = read_password_policy()
+
+        while True:
+            password = ask("新密码", "", secret=True)
+            errors = validate_password_local(password, policy, privileged=True)
+
+            if not errors:
+                break
+
+            out(f"密码不符合策略: {', '.join(errors)}")
+            if not ask_bool("重新输入？"):
+                return
+
+        UserService(self.ctx).reset_password(email, password, privileged=True)
+
+
+# ============================================================================
+# 交互菜单
+# ============================================================================
+class InteractiveMenu:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def print_header(self) -> None:
+        ctx = self.ctx
+
+        out(f"\n{'=' * 50}")
+        out(f"  ManagePylai  v{__version__}")
+        out(f"  项目: {ctx.manager.project_name}")
+
+        if ctx.state.installed:
+            status = "运行中" if ctx.docker.service_running() else "已停止"
+            out(f"  状态: {status}  |  版本: {ctx.state.version}")
+            out(f"  地址: {ctx.state.public_url}")
+        else:
+            out("  状态: 未安装")
+
+        out(f"{'=' * 50}")
+
+    def print_menu(self) -> None:
+        out("\n[安装与更新]")
+        out("  [1] 安装 Pylai")
+        out("  [2] 更新 Pylai")
+        out("  [3] 卸载 Pylai")
+
+        out("\n[运行控制]")
+        out("  [4] 状态 / 启动 / 停止 / 重启")
+        out("  [5] 查看日志")
+
+        out("\n[配置管理]")
+        out("  [6] 查看配置（脱敏）")
+        out("  [7] 修改配置")
+        out("  [8] 生成主机 Nginx 配置")
+
+        out("\n[用户管理]")
+        out("  [9] 用户管理")
+
+        out("\n[数据与安全]")
+        out("  [10] 备份与恢复")
+        out("  [11] 安全维护")
+
+        out("\n[工具]")
+        out("  [12] 检查 ManagePylai.py 更新")
+
+        out("\n[0] 退出")
+
+    def run(self) -> None:
+        while True:
+            self.print_header()
+            self.print_menu()
+
+            try:
+                choice = input("\n> ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                out("\n再见。")
+                return
+
+            try:
+                match choice:
+                    case "0" | "q" | "quit" | "exit":
+                        out("再见。")
+                        return
+                    case "1":
+                        self.install()
+                    case "2":
+                        self.update()
+                    case "3":
+                        self.uninstall()
+                    case "4":
+                        self.run_control()
+                    case "5":
+                        self.logs()
+                    case "6":
+                        self.view_config()
+                    case "7":
+                        self.edit_config()
+                    case "8":
+                        self.generate_nginx()
+                    case "9":
+                        self.users()
+                    case "10":
+                        self.backup()
+                    case "11":
+                        self.security()
+                    case "12":
+                        self.self_update()
+                    case _:
+                        out("选择无效。")
+            except ManageError as exc:
+                out(f"错误: {exc}")
+            except SystemExit:
+                raise
+            except Exception as exc:
+                out(f"未预期错误: {exc}")
+
+    def install(self) -> None:
+        if self.ctx.state.installed:
+            out("检测到已有安装。如需重新安装，请先卸载。")
+            return
+
+        InstallService(self.ctx).install_interactive()
+
+    def update(self) -> None:
+        UpdateService(self.ctx).update_interactive()
+
+    def uninstall(self) -> None:
+        uninstall(self.ctx, yes=False, purge=False)
+
+    def run_control(self) -> None:
+        self.ctx.require_installed()
+        status = self.ctx.docker.service_status()
+        out(f"\n当前状态: {status}")
+
+        run_submenu(
+            "运行控制",
+            "主菜单",
+            [
+                ("启动", lambda: service_action(self.ctx, "start")),
+                ("停止", lambda: service_action(self.ctx, "stop")),
+                ("重启", lambda: service_action(self.ctx, "restart")),
+                ("查看简要状态", lambda: service_action(self.ctx, "status")),
+            ],
+        )
+
+    def logs(self) -> None:
+        self.ctx.require_installed()
+
+        run_submenu(
+            "日志查看",
+            "主菜单",
+            [
+                ("最近 100 行", lambda: self.ctx.docker.view_logs(100)),
+                ("最近 500 行", lambda: self.ctx.docker.view_logs(500)),
+                ("最近 2000 行", lambda: self.ctx.docker.view_logs(2000)),
+                ("全部日志", lambda: self.ctx.docker.view_logs("all")),
+            ],
+        )
+
+    def view_config(self) -> None:
+        ConfigService(self.ctx).view()
+
+    def edit_config(self) -> None:
+        self.ctx.require_installed()
+
+        config_service = ConfigService(self.ctx)
+
+        run_submenu(
+            "修改配置",
+            "主菜单",
+            [
+                ("修改公开地址", config_service.change_url),
+                ("修改端口", config_service.change_ports),
+                ("修改 SMTP 邮件配置", config_service.change_smtp),
+                ("修改 MFA 配置", config_service.change_mfa),
+                ("修改 Max 账号密码", lambda: config_service.reset_password("max")),
+                ("修改 Admin 账号密码", lambda: config_service.reset_password("admin")),
+            ],
+        )
+
+    def generate_nginx(self) -> None:
+        ConfigService(self.ctx).generate_nginx()
+
+    def users(self) -> None:
+        self.ctx.require_running()
+
+        users = UserService(self.ctx)
+
+        run_submenu(
+            "用户管理",
+            "主菜单",
+            [
+                ("用户列表", users.list_users),
+                ("查看用户详情", users.show_user),
+                ("创建用户", lambda: users.create_user(interactive=True)),
+                ("删除用户", users.delete_user),
+                ("修改用户密码", users.reset_password),
+                ("设置用户组", lambda: users.set_group(interactive=True)),
+                ("设置用户状态", lambda: users.set_status(interactive=True)),
+                ("吊销用户全部会话", users.revoke_sessions),
+            ],
+        )
+
+    def backup(self) -> None:
+        self.ctx.require_installed()
+
+        backup = BackupService(self.ctx)
+
+        run_submenu(
+            "备份与恢复",
+            "主菜单",
+            [
+                ("导出全部数据（数据库全量快照）", backup.export),
+                ("导入全部数据（停止后端并全量覆盖）", backup.restore_interactive),
+                ("查看主机备份目录", backup.list_backups),
+            ],
+        )
+
+    def security(self) -> None:
+        self.ctx.require_running()
+
+        security = SecurityService(self.ctx)
+
+        run_submenu(
+            "安全维护",
+            "主菜单",
+            [
+                ("签名密钥状态", security.key_status),
+                ("人工轮换签名密钥", security.key_rotate),
+                ("数据库迁移状态", security.db_status),
+                ("执行 db bootstrap（幂等）", security.db_bootstrap),
+            ],
+        )
+
+    def self_update(self) -> None:
+        client = ReleaseClient(self.ctx.manager)
+        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
+
+        if result := updater.check():
+            version, _ = result
+            out(f"发现新版本: {version}")
+
+            if ask_bool("是否更新管理工具？", True):
+                updater.update()
+        else:
+            out("当前已是最新版本，或无法获取版本信息。")
+
+
+# ============================================================================
+# CLI 命令
+# ============================================================================
+def cmd_install(ctx: AppContext, args: argparse.Namespace) -> None:
+    if ctx.state.installed:
+        raise ManageError("检测到已有安装。如需重新安装，请先卸载。")
+
+    InstallService(ctx).install_cli(args)
+
+
+def cmd_update(ctx: AppContext, args: argparse.Namespace) -> None:
+    UpdateService(ctx).update_cli(args)
+
+
+def cmd_self_update(ctx: AppContext, args: argparse.Namespace) -> None:
+    client = ReleaseClient(ctx.manager)
+    updater = SelfUpdater(client, ctx.manager, ctx.state)
+
     if args.check_only:
-        result = updater.check()
-        if result:
-            ver, info = result
-            out(f"最新版本: {ver}")
+        if result := updater.check():
+            version, _ = result
+            out(f"最新版本: {version}")
         else:
             out("当前已是最新，或无法获取版本信息。")
     else:
         updater.update(force=args.force, dry_run=args.dry_run, skip_prompt=args.yes)
 
 
-def _cmd_start(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if not docker.container_exists():
-        raise ManageError("尚未安装。")
-    if state.mode == "compose":
-        docker.mode = "compose"
-        docker._compose("up", "-d", timeout=120)
-    else:
-        docker._docker("start", docker.container, timeout=60)
-    if docker.wait_healthy(state.api_port):
-        out("启动完成。")
-    else:
-        out("服务已启动，但健康检查尚未通过。")
+def cmd_logs(ctx: AppContext, args: argparse.Namespace) -> None:
+    ctx.require_installed()
 
-
-def _cmd_stop(args: argparse.Namespace, docker: DockerCompose) -> None:
-    if not docker.container_exists():
-        raise ManageError("尚未安装。")
-    docker.stop()
-    out("已停止。")
-
-
-def _cmd_restart(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if not docker.container_exists():
-        raise ManageError("尚未安装。")
-    docker.restart()
-    out("已重启。")
-
-
-def _cmd_status(args: argparse.Namespace, docker: DockerCompose) -> None:
-    if not docker.container_exists():
-        out("尚未安装或容器不存在。")
-        return
-    result = docker._docker(
-        "ps", "-a", "--filter", f"name={docker.container}",
-        "--format", "{{.Names}} {{.Status}}", check=False,
-    )
-    out(result.stdout.strip() or "未找到容器")
-
-
-def _cmd_logs(args: argparse.Namespace, docker: DockerCompose) -> None:
-    if not docker.container_exists():
-        raise ManageError("尚未安装。")
     if args.follow:
-        docker.view_logs(tail=200, follow=True, service=args.service)
+        ctx.docker.view_logs(tail=200, follow=True, service=args.service)
     else:
-        text = docker.logs_text(tail=200, service=args.service)
+        text = ctx.docker.logs_text(tail=200, service=args.service)
         out(text.strip() or "（暂无日志输出）")
 
 
-def _cmd_config(args: argparse.Namespace, config: PylaiConfig) -> None:
-    if args.config_cmd == "view":
-        if not config.FILE.is_file():
-            raise ManageError("配置文件不存在")
-        out(config.mask())
-    elif args.config_cmd == "edit":
-        editor = os.environ.get("EDITOR", "nano")
-        subprocess.run([editor, str(config.FILE)])
-    elif args.config_cmd == "validate":
-        config.validate()
-        out("配置校验通过。")
-    elif args.config_cmd == "generate-nginx":
-        generate_host_nginx()
-    else:
-        raise ManageError("请指定 config 子命令: view / edit / validate / generate-nginx")
+def cmd_config(ctx: AppContext, args: argparse.Namespace) -> None:
+    service = ConfigService(ctx)
+
+    match args.config_cmd:
+        case "view":
+            service.view()
+        case "edit":
+            service.edit()
+        case "validate":
+            service.validate()
+        case "generate-nginx":
+            service.generate_nginx()
+        case _:
+            raise ManageError("请指定 config 子命令: view / edit / validate / generate-nginx")
 
 
-def _cmd_backup(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if args.backup_cmd == "create":
-        export_database()
-    elif args.backup_cmd == "list":
-        action_list_backups()
-    elif args.backup_cmd == "restore":
-        import_database()  # 现有 import_database 会交互式选择文件
-    else:
-        raise ManageError("请指定 backup 子命令: create / list / restore <file>")
+def cmd_backup(ctx: AppContext, args: argparse.Namespace) -> None:
+    service = BackupService(ctx)
+
+    match args.backup_cmd:
+        case "create":
+            service.export()
+        case "list":
+            service.list_backups()
+        case "restore":
+            if not args.file:
+                raise ManageError("请指定备份文件路径")
+
+            file_path = Path(args.file).expanduser()
+
+            if not args.yes and not confirm_danger(
+                f"将用 {file_path.name} 全量覆盖当前数据库，且不可撤销。"
+            ):
+                out("已取消。")
+                return
+
+            service.restore_file(file_path)
+        case _:
+            raise ManageError("请指定 backup 子命令: create / list / restore <file>")
 
 
-def _cmd_uninstall(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if not state.installed:
-        raise ManageError("没有已安装实例。")
-
-    if not args.yes:
-        if not confirm_danger("卸载会停止并删除所有服务/容器，可能删除全部数据。"):
-            out("已取消。")
-            return
-
-    if state.mode == "compose":
-        docker.mode = "compose"
-        docker.rm()
-    else:
-        if docker.container_exists():
-            docker.stop()
-            docker.rm()
-
-    for vol in ("pylai_data", "pylai_pgdata", "pylai_redisdata"):
-        docker._docker("volume", "rm", "-f", vol, check=False)
-
-    image = state.image
-    if image:
-        docker._docker("rmi", image, check=False)
-
-    if args.purge:
-        shutil.rmtree(HOME, ignore_errors=True)
-        out("已删除全部数据目录。")
-        STATE_FILE.unlink(missing_ok=True)
-
-    state.clear()
-    state.save()
-    out("卸载完成。")
+def cmd_uninstall(ctx: AppContext, args: argparse.Namespace) -> None:
+    uninstall(ctx, yes=args.yes, purge=args.purge)
 
 
-def _cmd_rotate_keys(args: argparse.Namespace, docker: DockerCompose, state: State) -> None:
-    if not docker.container_running():
-        raise ManageError("容器未运行。")
-    action_key_rotate()
+def cmd_rotate_keys(ctx: AppContext, args: argparse.Namespace) -> None:
+    SecurityService(ctx).key_rotate()
 
 
-def submenu_install_update() -> None:
-    entries = [
-        ("安装", menu_install),
-        ("更新", update),
-        ("卸载", uninstall),
-    ]
-    run_submenu("安装 / 更新 / 卸载", "主菜单", entries)
+def cmd_user(ctx: AppContext, args: argparse.Namespace) -> None:
+    ctx.require_running()
+    service = UserService(ctx)
+
+    match args.user_cmd:
+        case "list":
+            service.list_users()
+        case "show":
+            service.show_user(args.target)
+        case "create":
+            service.create_user(
+                email=args.email,
+                name=args.name or "",
+                group=args.group or "normal",
+                interactive=False,
+            )
+        case "delete":
+            service.delete_user(args.target, assume_yes=args.yes)
+        case "set-group":
+            service.set_group(args.target, args.group, interactive=False)
+        case "set-status":
+            service.set_status(args.target, args.status, interactive=False)
+        case "revoke-sessions":
+            service.revoke_sessions(args.target)
+        case "reset-password":
+            service.reset_password(args.target, args.password, privileged=False)
+        case _:
+            raise ManageError("请指定 user 子命令")
 
 
-def main_menu() -> None:
-    while True:
-        out("\n### ManagePylai ###")
-        out("[0/quit/exit/Ctrl+C] 退出")
-        out("[1] 安装 / 更新 / 卸载")
-        out("[2] 运行控制")
-        out("[3] 配置管理")
-        out("[4] 数据备份与恢复")
-        out("[5] 安全维护（签名密钥 / 迁移 / bootstrap）")
-        out("[6] 网络与健康")
-        out("[7] 用户管理")
-        try:
-            choice = input("> ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            out("\n再见。")
-            return
-        if choice in ("0", "quit", "exit"):
-            return
-        actions = {
-            "1": submenu_install_update,
-            "2": submenu_run,
-            "3": submenu_config,
-            "4": submenu_data,
-            "5": submenu_security,
-            "6": submenu_network_health,
-            "7": submenu_users,
-        }
-        action = actions.get(choice)
-        if action is None:
-            out("选择无效。")
-            continue
-        try:
-            action()
-        except ManageError as exc:
-            out(f"错误: {exc}")
-
-def main() -> None:
+# ============================================================================
+# 主入口
+# ============================================================================
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ManagePylai.py",
-        description="Pylai Docker 部署管理工具",
+        description="Pylai Docker Compose 部署管理工具",
     )
+
     parser.add_argument(
-        "--config", dest="manager_config",
-        default=str(ManagerConfig.DEFAULT_PATH),
+        "--config",
+        dest="manager_config",
+        default=str(HOME / "ManagerConfig.toml"),
         help="ManagerConfig.toml 路径（默认 ~/.pylai/ManagerConfig.toml）",
     )
-    parser.add_argument(
-        "--yes", action="store_true",
-        help="非交互模式，所有确认默认 Yes",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="只打印将要执行的操作",
-    )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="详细输出",
-    )
+    parser.add_argument("--yes", action="store_true", help="非交互模式，所有确认默认 Yes")
+    parser.add_argument("--dry-run", action="store_true", help="只打印将要执行的操作")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细输出")
 
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
-    # install
     install_p = subparsers.add_parser("install", help="安装 Pylai")
-    install_p.add_argument("--config-file", dest="pylai_config",
-                          help="从现有 pylai.toml 非交互安装")
+    install_p.add_argument("--config-file", dest="pylai_config", help="从现有 pylai.toml 非交互安装")
     install_p.add_argument("--env-file", help="从 .env 文件非交互安装")
 
-    # update
     update_p = subparsers.add_parser("update", help="更新 Pylai")
-    update_p.add_argument("--version", help="更新到指定版本")
-    update_p.add_argument("--check-only", action="store_true",
-                         help="只检查更新，不执行")
+    update_p.add_argument("--check-only", action="store_true", help="只检查更新，不执行")
 
-    # self-update
-    self_up_p = subparsers.add_parser("self-update", help="更新管理工具自身")
-    self_up_p.add_argument("--check-only", action="store_true")
-    self_up_p.add_argument("--force", action="store_true")
+    self_update_p = subparsers.add_parser("self-update", help="更新管理工具自身")
+    self_update_p.add_argument("--check-only", action="store_true")
+    self_update_p.add_argument("--force", action="store_true")
 
-    # start / stop / restart / status
-    subparsers.add_parser("start", help="启动服务")
-    subparsers.add_parser("stop", help="停止服务")
-    subparsers.add_parser("restart", help="重启服务")
-    subparsers.add_parser("status", help="查看状态")
+    for name, help_text in (
+        ("start", "启动服务"),
+        ("stop", "停止服务"),
+        ("restart", "重启服务"),
+        ("status", "查看状态"),
+    ):
+        subparsers.add_parser(name, help=help_text)
 
-    # logs
     logs_p = subparsers.add_parser("logs", help="查看日志")
     logs_p.add_argument(
-        "service", nargs="?", default="all",
+        "service",
+        nargs="?",
+        default="all",
         choices=["backend", "nginx", "postgres", "redis", "all"],
-        help="服务名（多服务模式下有效，当前仅 all 生效）",
+        help="服务名",
     )
-    logs_p.add_argument("-f", "--follow", action="store_true",
-                       help="持续跟踪")
+    logs_p.add_argument("-f", "--follow", action="store_true", help="持续跟踪")
 
-    # config
-    cfg_p = subparsers.add_parser("config", help="配置管理")
-    cfg_sub = cfg_p.add_subparsers(dest="config_cmd")
-    cfg_sub.add_parser("view", help="查看当前配置（脱敏）")
-    cfg_sub.add_parser("edit", help="编辑 pylai.toml")
-    cfg_sub.add_parser("validate", help="验证配置合法性")
-    cfg_sub.add_parser("generate-nginx", help="生成主机 Nginx 配置模板")
+    config_p = subparsers.add_parser("config", help="配置管理")
+    config_sub = config_p.add_subparsers(dest="config_cmd")
+    config_sub.add_parser("view", help="查看当前配置（脱敏）")
+    config_sub.add_parser("edit", help="编辑 pylai.toml")
+    config_sub.add_parser("validate", help="验证配置合法性")
+    config_sub.add_parser("generate-nginx", help="生成主机 Nginx 配置模板")
 
-    # backup
-    bak_p = subparsers.add_parser("backup", help="备份管理")
-    bak_sub = bak_p.add_subparsers(dest="backup_cmd")
-    bak_sub.add_parser("create", help="创建备份")
-    bak_sub.add_parser("list", help="列出备份")
-    restore_p = bak_sub.add_parser("restore", help="从备份恢复")
-    restore_p.add_argument("file")
+    backup_p = subparsers.add_parser("backup", help="备份管理")
+    backup_sub = backup_p.add_subparsers(dest="backup_cmd")
+    backup_sub.add_parser("create", help="创建备份")
+    backup_sub.add_parser("list", help="列出备份")
 
-    # uninstall
-    un_p = subparsers.add_parser("uninstall", help="卸载")
-    un_p.add_argument("--purge", action="store_true",
-                     help="完全卸载（删除所有数据）")
+    restore_p = backup_sub.add_parser("restore", help="从备份恢复")
+    restore_p.add_argument("file", nargs="?")
 
-    # rotate-keys
-    rot_p = subparsers.add_parser("rotate-keys", help="轮换签名密钥")
-    rot_p.add_argument("--signing", action="store_true")
-    rot_p.add_argument("--encryption", action="store_true")
+    uninstall_p = subparsers.add_parser("uninstall", help="卸载")
+    uninstall_p.add_argument("--purge", action="store_true", help="完全卸载（删除所有数据）")
 
-    args = parser.parse_args()
+    subparsers.add_parser("rotate-keys", help="轮换签名密钥")
 
-    # 初始化核心对象
-    manager_cfg = ManagerConfig(
-        Path(args.manager_config) if args.manager_config else None
-    )
-    docker = DockerCompose(mode=state.mode)
-    state = State()
-    config = PylaiConfig()
+    user_p = subparsers.add_parser("user", help="用户管理")
+    user_sub = user_p.add_subparsers(dest="user_cmd")
 
-    # 向后兼容：无命令时进入交互菜单
-    if args.command is None:
-        docker.ensure_docker()
-        menu = InteractiveMenu(docker, state, config)
-        menu.run()
-        return
+    user_sub.add_parser("list", help="用户列表")
 
-    # 非交互模式
-    docker.ensure_docker()
+    show_p = user_sub.add_parser("show", help="查看用户")
+    show_p.add_argument("target", nargs="?")
+
+    create_p = user_sub.add_parser("create", help="创建用户")
+    create_p.add_argument("--email", help="邮箱")
+    create_p.add_argument("--name", help="登录名")
+    create_p.add_argument("--group", choices=["normal", "admin", "max"], help="用户组")
+
+    delete_p = user_sub.add_parser("delete", help="删除用户")
+    delete_p.add_argument("target", nargs="?")
+
+    set_group_p = user_sub.add_parser("set-group", help="设置用户组")
+    set_group_p.add_argument("target", nargs="?")
+    set_group_p.add_argument("group", nargs="?")
+
+    set_status_p = user_sub.add_parser("set-status", help="设置用户状态")
+    set_status_p.add_argument("target", nargs="?")
+    set_status_p.add_argument("status", nargs="?")
+
+    revoke_p = user_sub.add_parser("revoke-sessions", help="吊销会话")
+    revoke_p.add_argument("target", nargs="?")
+
+    reset_password_p = user_sub.add_parser("reset-password", help="重置密码")
+    reset_password_p.add_argument("target", nargs="?")
+    reset_password_p.add_argument("--password", help="新密码")
+
+    return parser
+
+
+COMMANDS: dict[str, Callable[[AppContext, argparse.Namespace], None]] = {
+    "install": cmd_install,
+    "update": cmd_update,
+    "self-update": cmd_self_update,
+    "start": lambda ctx, _a: service_action(ctx, "start"),
+    "stop": lambda ctx, _a: service_action(ctx, "stop"),
+    "restart": lambda ctx, _a: service_action(ctx, "restart"),
+    "status": lambda ctx, _a: service_action(ctx, "status"),
+    "logs": cmd_logs,
+    "config": cmd_config,
+    "backup": cmd_backup,
+    "uninstall": cmd_uninstall,
+    "rotate-keys": cmd_rotate_keys,
+    "user": cmd_user,
+}
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    ctx = AppContext.create(Path(args.manager_config) if args.manager_config else None)
 
     try:
-        if args.command == "install":
-            _cmd_install(args, docker, state, config, manager_cfg)
-        elif args.command == "update":
-            _cmd_update(args, docker, state, config, manager_cfg)
-        elif args.command == "self-update":
-            _cmd_self_update(args, manager_cfg, state)
-        elif args.command == "start":
-            _cmd_start(args, docker, state)
-        elif args.command == "stop":
-            _cmd_stop(args, docker)
-        elif args.command == "restart":
-            _cmd_restart(args, docker, state)
-        elif args.command == "status":
-            _cmd_status(args, docker)
-        elif args.command == "logs":
-            _cmd_logs(args, docker)
-        elif args.command == "config":
-            _cmd_config(args, config)
-        elif args.command == "backup":
-            _cmd_backup(args, docker, state)
-        elif args.command == "uninstall":
-            _cmd_uninstall(args, docker, state)
-        elif args.command == "rotate-keys":
-            _cmd_rotate_keys(args, docker, state)
+        ctx.docker.ensure_docker()
+
+        if args.command is None:
+            InteractiveMenu(ctx).run()
+        elif handler := COMMANDS.get(args.command):
+            handler(ctx, args)
         else:
-            parser.print_help()
-            sys.exit(1)
+            out("未知命令。")
+            raise SystemExit(1)
+
     except ManageError as exc:
         out(f"错误: {exc}")
-        sys.exit(1)
+        raise SystemExit(1)
+    except Exception as exc:
+        out(f"未预期错误: {exc}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -3732,3 +3665,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         out("\n再见。")
+
