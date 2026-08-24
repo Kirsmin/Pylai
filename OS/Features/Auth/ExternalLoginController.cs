@@ -259,6 +259,62 @@ public class ExternalLoginController : ControllerBase
         return Redirect($"{_config.Frontend.Url}/");
     }
 
+    // ============ 已登录用户的绑定管理（原 AccountController 职责，路由保持不变）============
+
+    [Authorize(AuthenticationSchemes = "Identity.Application,UserToken")]
+    [HttpGet("account/external-logins")]
+    public async Task<IActionResult> GetExternalLogins()
+    {
+        _logger.LogDebug("列出外部登录绑定");
+
+        var user = await this.GetCurrentUserAsync(_context);
+        if (user is null)
+            return Unauthorized(new { Success = false, Error = "未登录。", ErrorCode = "invalid_session" });
+
+        var logins = await _userManager.GetLoginsAsync(user);
+        var items = logins.Select(l => new
+        {
+            provider = l.LoginProvider,
+            displayName = l.ProviderDisplayName ?? l.LoginProvider,
+            boundAt = _context.UserLogins
+                .Where(x => x.UserUid == user.Uid
+                    && x.LoginProvider == l.LoginProvider
+                    && x.ProviderKey == l.ProviderKey)
+                .Select(x => (DateTimeOffset?)x.CreatedAt)
+                .FirstOrDefault()
+        }).ToList();
+
+        return Ok(new { Success = true, Logins = items });
+    }
+
+    [Authorize(AuthenticationSchemes = "Identity.Application,UserToken")]
+    [HttpDelete("account/external-logins/{provider}")]
+    public async Task<IActionResult> RemoveExternalLogin(string provider)
+    {
+        _logger.LogDebug("解绑外部登录 | Provider:{Provider}", provider);
+
+        var user = await this.GetCurrentUserAsync(_context);
+        if (user is null)
+            return Unauthorized(new { Success = false, Error = "未登录。", ErrorCode = "invalid_session" });
+
+        var logins = await _userManager.GetLoginsAsync(user);
+        var matched = logins.FirstOrDefault(l =>
+            string.Equals(l.LoginProvider, provider, StringComparison.OrdinalIgnoreCase));
+        if (matched is null)
+        {
+            return NotFound(new { Success = false, Error = "未找到该绑定。", ErrorCode = "not_found" });
+        }
+
+        await _userManager.RemoveLoginAsync(user, matched.LoginProvider, matched.ProviderKey);
+
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.ExternalLoginUnbound,
+            user.Uid.ToString(), user.Email, true, $"Provider: {matched.LoginProvider}");
+
+        _logger.LogInformation("外部登录解绑 | uid:{Uid} | Provider:{Provider}", user.Uid, provider);
+
+        return Ok(new { Success = true });
+    }
+
     private IActionResult RedirectToLogin(string? error = null, string? provider = null,
         Dictionary<string, string>? extraParams = null)
     {

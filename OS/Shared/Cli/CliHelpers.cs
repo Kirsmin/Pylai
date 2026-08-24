@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
@@ -36,6 +37,31 @@ public static class CliHelpers
 
     public static string? ReadSecretFromStdin()
         => Console.In.ReadLine();
+
+    /// <summary>
+    /// 解析配置文件路径：--config flag &gt; PYLAI_CONFIG 环境变量 &gt; 程序根目录/当前目录 pylai.toml。
+    /// </summary>
+    public static string ResolveConfigPath(string baseDir, string? flag)
+    {
+        var path = flag ?? Environment.GetEnvironmentVariable("PYLAI_CONFIG");
+        if (path is not null)
+            return Path.GetFullPath(path, Environment.CurrentDirectory);
+
+        var rootCandidate = Path.Combine(baseDir, "pylai.toml");
+        var cwdCandidate = Path.Combine(Environment.CurrentDirectory, "pylai.toml");
+        if (File.Exists(rootCandidate)) return rootCandidate;
+        if (File.Exists(cwdCandidate)) return cwdCandidate;
+        return cwdCandidate;
+    }
+
+    public static string VersionInfo()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        var v = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
+        if (v.Contains('+', StringComparison.Ordinal))
+            v = v[..v.IndexOf('+')];
+        return v;
+    }
 
     public static Task<int> ErrorAsync(string message)
     {

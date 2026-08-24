@@ -70,6 +70,18 @@ public static class ControllerExtensions
         return null;
     }
 
+    /// <summary>
+    /// 要求已认证的活跃用户；未登录时返回统一 401（Account/Session/UserToken 控制器共用）。
+    /// </summary>
+    public static async Task<(User? User, IActionResult? Error)> RequireUserAsync(
+        this ControllerBase controller, ApplicationDbContext context)
+    {
+        var user = await controller.GetCurrentUserAsync(context);
+        return user is null
+            ? (null, controller.Unauthorized(new { Success = false, Error = "未登录。", ErrorCode = "invalid_session" }))
+            : (user, null);
+    }
+
     public static async Task<User?> FindUserAsync(this ControllerBase controller, ApplicationDbContext context, string usernameOrEmail)
     {
         var normalized = UsernameNormalizer.Normalize(usernameOrEmail);
