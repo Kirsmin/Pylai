@@ -1531,7 +1531,11 @@ class PylaiConfig:
     def _generate_via_template(cls, template_text: str, answers: InstallAnswers) -> Self:
         text = Template(template_text).safe_substitute(answers.to_template_context())
 
-        unmatched = re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", text)
+        # 仅扫描非注释行，避免模板头部说明文字（如 "${name}"）被误报为未替换变量
+        unmatched = re.findall(
+            r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?",
+            "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#")),
+        )
         placeholders = {v for v in unmatched if v and (v[0].islower() or v.startswith("seed_"))}
         if placeholders:
             out(f"警告：模板中有未替换的变量: {placeholders}")
@@ -1804,8 +1808,12 @@ class DockerCompose:
         else:
             out("compose ps 无输出")
 
-        # 按服务分别输出日志
-        for svc in ("backend", "postgres", "redis", "nginx"):
+        # 按服务分别输出日志（动态获取实际存在的服务，兼容单容器/拆分拓扑）
+        services: tuple[str, ...] = ("backend", "postgres", "redis", "nginx")
+        listed = self.compose("config", "--services", check=False)
+        if listed.returncode == 0 and listed.stdout.strip():
+            services = tuple(sorted(listed.stdout.split()))
+        for svc in services:
             out(f"\n--- {svc} 日志（最近 {tail} 行）---")
             txt = self.logs_text(tail, service=svc)  # type: ignore[arg-type]
             out(txt.strip() or f"（{svc} 暂无日志）")
@@ -1975,12 +1983,13 @@ class ComposeConfig:
 services:
   postgres:
     image: {postgres_image}
+    restart: unless-stopped
     volumes:
       - pylai_pgdata:/var/lib/postgresql/data
     environment:
-      POSTGRES_USER: ${{PYLAI_DB_USER}}
-      POSTGRES_PASSWORD: ${{PYLAI_DB_PASSWORD}}
-      POSTGRES_DB: ${{PYLAI_DB_NAME}}
+      POSTGRES_USER: ${{PYLAI_DB_USER:?}}
+      POSTGRES_PASSWORD: ${{PYLAI_DB_PASSWORD:?}}
+      POSTGRES_DB: ${{PYLAI_DB_NAME:?}}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${{PYLAI_DB_USER}} -d ${{PYLAI_DB_NAME}}"]
       interval: 5s
@@ -1989,21 +1998,25 @@ services:
 
   redis:
     image: {redis_image}
+    restart: unless-stopped
     volumes:
       - pylai_redisdata:/data
     command: >
       redis-server
-      --requirepass ${{PYLAI_REDIS_PASSWORD}}
+      --requirepass ${{PYLAI_REDIS_PASSWORD:?}}
       --appendonly yes
       --save ""
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD --raw incr ping | grep -qE '^[0-9]+$'"]
       interval: 5s
       timeout: 3s
       retries: 5
+    environment:
+      REDIS_PASSWORD: ${{PYLAI_REDIS_PASSWORD}}
 
   backend:
     image: {backend_image}
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -2012,30 +2025,46 @@ services:
     volumes:
       - {config_dir}:/etc/pylai:ro
       - pylai_data:/var/lib/pylai
+      - pylai_www:/var/lib/pylai/www
     ports:
-      - "127.0.0.1:${{PYLAI_API_PORT}}:5000"
+      - "127.0.0.1:${{PYLAI_API_PORT:?}}:5000"
     environment:
+      PYLAI_ROLE: backend
       PYLAI_CONFIG: /etc/pylai/pylai.toml
-      PYLAI_DP_KEK_FILE: /var/lib/pylai/secrets/dp-kek
+      PYLAI_DB_USER: ${{PYLAI_DB_USER:?}}
+      PYLAI_DB_PASSWORD: ${{PYLAI_DB_PASSWORD:?}}
+      PYLAI_DB_NAME: ${{PYLAI_DB_NAME:?}}
+      PYLAI_REDIS_PASSWORD: ${{PYLAI_REDIS_PASSWORD:?}}
     cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,size=64m
+    # 镜像自带 HEALTHCHECK 探测容器内 nginx(:80)，拆分模式下后端只监听 :5000，需覆盖
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health/live', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   nginx:
     image: {nginx_image}
+    restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
-      - "${{PYLAI_PUBLIC_PORT}}:80"
+      - "${{PYLAI_PUBLIC_PORT:?}}:80"
     volumes:
       - {config_dir}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - pylai_www:/var/lib/pylai/www:ro
 
 volumes:
   pylai_pgdata:
   pylai_redisdata:
   pylai_data:
+  pylai_www:
 """
 
     @classmethod
@@ -2064,25 +2093,67 @@ volumes:
 
     @classmethod
     def write_nginx_conf(cls) -> None:
+        # 拆分拓扑站点配置：静态资源来自 backend 容器同步的共享卷（/var/lib/pylai/www），
+        # API/OIDC 反代到 backend 服务；conf.d 片段处于 http 上下文，types 与主配置合并追加
+        # （不得下放到 server/location 级，否则整体替换 MIME 映射导致静态资源被下载）。
         template = """\
+# 字体 MIME：默认 mime.types 缺少 ttf，浏览器会拒绝加载 @font-face 字体（http 级合并追加）
+types {
+    font/ttf ttf;
+}
+server_tokens off;
+
 server {
     listen 80;
     server_name _;
 
-    location / {
+    root /var/lib/pylai/www/ui;
+    index index.html;
+    client_max_body_size 2m;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
+
+    location = /admin { return 301 /admin/; }
+    location /admin/ {
+        alias /var/lib/pylai/www/adminui/;
+        index index.html;
+        try_files $uri $uri/ /admin/index.html;
+    }
+    location /api/ {
         proxy_pass http://backend:5000;
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
+    location /connect/ {
+        proxy_pass http://backend:5000;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location /health {
+        proxy_pass http://backend:5000;
+        proxy_set_header Host $http_host;
+    }
+    location /.well-known/ {
+        proxy_pass http://backend:5000;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location / { try_files $uri $uri/ /index.html; }
 }
 """
         atomic_write(CONFIG_DIR / "nginx.conf", template, mode=0o644)
 
     @classmethod
     def ensure_volumes(cls) -> None:
-        for vol in ("pylai_pgdata", "pylai_redisdata", "pylai_data"):
+        for vol in ("pylai_pgdata", "pylai_redisdata", "pylai_data", "pylai_www"):
             run(["docker", "volume", "create", vol], check=False)
 
     @classmethod

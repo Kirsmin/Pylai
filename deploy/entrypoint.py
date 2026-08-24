@@ -4,6 +4,7 @@ Pylai 单容器部署入口脚本。
 替代原有的 Bash entrypoint，提供结构化日志、显式错误码和可测试性。
 """
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -255,10 +256,61 @@ def bootstrap() -> None:
         log("INFO", f"执行: {label}...")
         run_pylaios_cli(args)
 
+# ============ 拆分部署（PYLAI_ROLE=backend）：纯后端模式 ============
+def sync_ui() -> None:
+    """将镜像内置 SPA 静态资源同步到数据卷，供独立 nginx 容器经共享卷提供服务。"""
+    www = Path("/var/lib/pylai/www")
+    for name in ("ui", "adminui"):
+        src = Path("/opt/pylai") / name
+        dst = www / name
+        if not src.is_dir():
+            continue
+        # 先清理再同步，避免升级后残留旧版本 hashed 资源
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+        for p in dst.rglob("*"):
+            p.chmod(0o644 if p.is_file() else 0o755)
+    www.chmod(0o755)
+    pylai = pwd.getpwnam("pylai")
+    os.chown(www, pylai.pw_uid, pylai.pw_gid)
+
+def run_as_backend() -> None:
+    """降权到 pylai 用户并 exec serve（PID1 直达信号，无需 supervisor/su 包装）。"""
+    pw = pwd.getpwnam("pylai")
+    os.initgroups("pylai", pw.pw_gid)
+    os.setgid(pw.pw_gid)
+    os.setuid(pw.pw_uid)
+    os.environ["PYLAI_DP_KEK_FILE"] = str(DP_KEK_FILE)
+    os.chdir(PYLAIOS_BIN.parent)
+    os.execv(PYLAIOS_BIN, [str(PYLAIOS_BIN), "serve", "--config", str(RUNTIME_CONFIG)])
+
+def run_split_backend() -> None:
+    """拆分拓扑：外部 postgres/redis/nginx 容器各自独立，本容器仅运行 ASP.NET Core 后端。"""
+    check_env()
+
+    Path("/var/lib/pylai/log").mkdir(parents=True, exist_ok=True)
+    SECRET_DIR.mkdir(parents=True, exist_ok=True)
+
+    remap_config()
+    setup_dp_kek()
+    run(["chown", "-R", "pylai:pylai", "/var/lib/pylai"])
+
+    sync_ui()
+    bootstrap()
+
+    log("INFO", "数据库与密钥检查完成，启动后端服务...")
+    run_as_backend()
+
 # ============ 主流程 ============
 def main() -> None:
-    if os.environ.get("PYLAI_ROLE", "server") == "dev":
+    role = os.environ.get("PYLAI_ROLE", "server")
+
+    if role == "dev":
         os.execv("/usr/local/bin/pylai-dev-entrypoint", sys.argv)
+
+    if role == "backend":
+        run_split_backend()
+        return
 
     check_env()
 
