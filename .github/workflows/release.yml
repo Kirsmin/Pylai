@@ -79,16 +79,19 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          ARCH="${{ matrix.target == 'linux-amd64' && 'AMD64' || 'ARM64' }}"
-          # AMD64 已 load 为 docker 镜像，ARM64 仅 tar 产物需额外校验模板存在性（不加载 qemu）
+          TAR="dist/Pylai-${VERSION}-Linux-${{ matrix.target == 'linux-amd64' && 'AMD64' || 'ARM64' }}.tar"
+          # 统一以 tar 字节搜索校验（不依赖镜像是否已 load，ARM64 亦适用）
+          if ! python3 -c "import pathlib; data=pathlib.Path('$TAR').read_bytes(); assert b'pylai.template.toml' in data and b'server_url' in data, 'missing template'; assert b'pylai.example.toml' in data, 'missing example'; print('tar 模板校验通过')"; then
+            echo "tar 模板校验失败"; exit 1
+          fi
+          # AMD64 额外在已 load 镜像内二次校验
           if [[ "${{ matrix.target }}" == "linux-amd64" ]]; then
+            docker load < "$TAR" >/dev/null
             docker run --rm --entrypoint cat "pylaios:${VERSION}-AMD64" /opt/pylai/pylai.template.toml | grep -q "server_url" || { echo "缺失 template"; exit 1; }
             docker run --rm --entrypoint cat "pylaios:${VERSION}-AMD64" /opt/pylai/pylai.example.toml | grep -q "\[Server\]" || { echo "缺失 example"; exit 1; }
-            echo "==> AMD64 模板校验通过"
+            echo "==> AMD64 镜像内校验通过"
           else
-            # ARM64 无法在 amd64 runner 直接运行，改为 tar 内检查层文件
-            tar tf "dist/Pylai-${VERSION}-Linux-ARM64.tar" | grep -q "pylai.template.toml" || { echo "ARM64 tar 内缺失 template 层"; exit 1; }
-            echo "==> ARM64 tar 结构校验通过（完整校验待 finalize）"
+            echo "==> ARM64 tar 结构校验通过（完整镜像内校验待 finalize）"
           fi
 
       - name: Smoke test AMD64 image（read-only + cap-drop）
