@@ -1603,6 +1603,14 @@ class DockerCompose:
         if run(["docker", "info"], check=False).returncode != 0:
             raise ManageError("Docker daemon 不可用，请启动 Docker 服务。")
 
+        if run(["docker", "compose", "version"], check=False).returncode != 0:
+            raise ManageError(
+                "未找到 docker compose 插件，请先安装："
+                "Arch: pacman -S docker-compose；"
+                "Debian/Ubuntu: apt install docker-compose-plugin；"
+                "RHEL/Fedora: dnf install docker-compose-plugin。"
+            )
+
     def compose(
         self,
         *args: str | Path,
