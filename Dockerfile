@@ -28,7 +28,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        postgresql redis-server nginx supervisor openssl python3 \
+        ca-certificates curl gnupg lsb-release \
+    && echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-17 redis-server nginx supervisor openssl python3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ui /ui/dist /opt/pylai/ui

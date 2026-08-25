@@ -1856,8 +1856,8 @@ class DockerCompose:
         return self.compose(
             "exec",
             "-T",
-            service,
             "-i",
+            service,
             PYLAIOS_BIN,
             *args,
             check=check,
