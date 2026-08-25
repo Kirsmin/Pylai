@@ -5,128 +5,159 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pylai 配置编辑器</title>
 <style>
+/* ---------- 主题变量：默认浅色，跟随系统自动切换深色 ---------- */
 :root {
-  --bg: #f5f6f8;
+  color-scheme: light;
+  --bg: #f4f5f7;
   --panel: #ffffff;
-  --border: #e4e7ec;
-  --text: #1d2433;
-  --muted: #667085;
-  --accent: #3b6ef6;
-  --accent-soft: #eef3fe;
-  --danger: #d92d20;
-  --danger-soft: #fef3f2;
-  --radius: 12px;
-  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --panel-soft: #f8f9fb;
+  --border: #e2e5ea;
+  --border-strong: #cfd4db;
+  --text: #1d2330;
+  --muted: #6b7280;
+  --accent: #2f6bff;
+  --accent-hover: #1f59e8;
+  --accent-soft: rgba(47, 107, 255, .1);
+  --danger: #d64541;
+  --danger-soft: rgba(214, 69, 65, .1);
+  --warning: #e8930c;
+  --ok: #189a58;
+  --toast-bg: #1d2330;
+  --toast-text: #ffffff;
+  --radius: 10px;
+  --mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0e1013;
+    --panel: #15181d;
+    --panel-soft: #1b1f26;
+    --border: #272c35;
+    --border-strong: #39414d;
+    --text: #e4e7ec;
+    --muted: #8b94a1;
+    --accent: #5f8dff;
+    --accent-hover: #7ba1ff;
+    --accent-soft: rgba(95, 141, 255, .14);
+    --danger: #e06560;
+    --danger-soft: rgba(224, 101, 96, .14);
+    --warning: #e5a13c;
+    --ok: #3fbf7f;
+    --toast-bg: #e8ebf0;
+    --toast-text: #1d2330;
+  }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
 body {
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
   background: var(--bg);
   color: var(--text);
-  height: 100vh;
   overflow: hidden;
 }
 button { font: inherit; cursor: pointer; }
+::placeholder { color: var(--muted); opacity: .7; }
 
 /* ---------- 临时密码验证 ---------- */
 #gate {
-  position: fixed; inset: 0;
+  position: fixed; inset: 0; z-index: 50;
   display: flex; align-items: center; justify-content: center;
   background: var(--bg);
-  z-index: 50;
 }
 .gate-card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   padding: 40px 44px;
   text-align: center;
-  box-shadow: 0 12px 40px rgba(16, 24, 40, .08);
 }
-.gate-card h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+.gate-card h1 { font-size: 19px; font-weight: 600; margin-bottom: 6px; }
 .gate-card p { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
 .code-row { display: flex; gap: 8px; align-items: center; justify-content: center; }
 .code-row input {
-  width: 44px; height: 54px;
-  font-size: 22px; font-family: var(--mono);
+  width: 42px; height: 52px;
+  font-size: 21px; font-family: var(--mono);
   text-align: center; text-transform: uppercase;
-  border: 1.5px solid var(--border); border-radius: 10px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
   outline: none; transition: border-color .15s, box-shadow .15s;
-  background: #fbfcfd;
+  background: var(--panel-soft); color: var(--text);
 }
 .code-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.code-dash { color: var(--muted); font-size: 20px; }
+.code-dash { color: var(--muted); font-size: 18px; }
 #gate-btn {
-  width: 44px; height: 44px; border-radius: 50%;
+  width: 42px; height: 42px; border-radius: 50%;
   border: none; background: var(--accent); color: #fff;
-  font-size: 18px; margin-left: 10px;
+  font-size: 17px; margin-left: 8px;
   display: none; align-items: center; justify-content: center;
-  transition: transform .15s, background .15s;
+  transition: background .15s;
 }
-#gate-btn:hover { transform: scale(1.06); background: #2f5de0; }
+#gate-btn:hover { background: var(--accent-hover); }
 #gate-err { color: var(--danger); font-size: 13px; margin-top: 16px; min-height: 18px; }
 .shake { animation: shake .3s; }
 @keyframes shake {
   25% { transform: translateX(-6px); } 50% { transform: translateX(6px); } 75% { transform: translateX(-4px); }
 }
 
-/* ---------- 主界面 ---------- */
+/* ---------- 主界面框架 ---------- */
 #app { display: none; flex-direction: column; height: 100vh; }
 .topbar {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 6px;
   background: var(--panel); border-bottom: 1px solid var(--border);
-  padding: 0 20px; height: 52px; flex: none;
+  padding: 0 16px; height: 54px; flex: none;
 }
-.brand { font-weight: 600; font-size: 15px; margin-right: 16px; }
+.brand { font-weight: 600; font-size: 15px; margin-right: 18px; }
 .brand span { color: var(--accent); }
 .tab {
   border: none; background: none; color: var(--muted);
   padding: 6px 14px; border-radius: 8px; font-size: 14px;
   transition: background .15s, color .15s;
 }
-.tab:hover { background: var(--bg); color: var(--text); }
+.tab:hover { color: var(--text); }
 .tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 .topbar .spacer { flex: 1; }
-#dirty-dot { color: #f79009; font-size: 12px; display: none; }
+#dirty-dot { color: var(--warning); font-size: 12px; display: none; }
 #err-count { color: var(--danger); font-size: 12px; display: none; margin-right: 8px; }
 #submit-btn {
   border: none; background: var(--accent); color: #fff;
-  padding: 7px 20px; border-radius: 8px; font-size: 14px;
+  padding: 7px 22px; border-radius: 8px; font-size: 14px;
   transition: background .15s, opacity .15s;
 }
+#submit-btn:hover:not(:disabled) { background: var(--accent-hover); }
 #submit-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 .main { display: flex; flex: 1; min-height: 0; }
 
-/* 目录 */
+/* ---------- 目录 ---------- */
 #sidebar {
-  width: 220px; flex: none; background: var(--panel);
+  width: 224px; flex: none; background: var(--panel);
   border-right: 1px solid var(--border);
-  overflow-y: auto; padding: 12px 8px;
+  overflow-y: auto; padding: 12px 10px;
 }
-#sidebar h2 { font-size: 12px; color: var(--muted); padding: 6px 12px; font-weight: 500; }
+#sidebar h2 { font-size: 12px; color: var(--muted); padding: 4px 10px 8px; font-weight: 500; }
 .sec-item {
   display: block; width: 100%; text-align: left;
   border: none; background: none; border-radius: 8px;
-  padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
+  padding: 7px 10px; font-size: 13px; font-family: var(--mono);
   color: var(--text); transition: background .12s;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.sec-item:hover { background: var(--bg); }
+.sec-item:hover { background: var(--panel-soft); }
 .sec-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
-.sec-item .badge { float: right; font-size: 11px; color: #f79009; }
+.sec-item .badge { float: right; font-size: 11px; color: var(--warning); }
 .sec-item .badge.err { color: var(--danger); font-weight: 700; }
 
-/* 编辑区 */
-#editor { flex: 1; overflow-y: auto; padding: 24px 32px; min-width: 0; }
-#editor h2 { font-size: 17px; margin-bottom: 4px; font-family: var(--mono); }
-#editor .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 20px; }
+/* ---------- 编辑区 ---------- */
+#editor { flex: 1; overflow-y: auto; padding: 24px 32px 40px; min-width: 0; }
+#editor h2 { font-size: 16px; margin-bottom: 4px; font-family: var(--mono); }
+#editor .hint { font-size: 12.5px; color: var(--muted); margin-bottom: 18px; }
 .field {
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px;
+  border-radius: var(--radius); padding: 14px 16px; margin-bottom: 10px;
   transition: border-color .15s;
 }
-.field.changed { border-color: #f79009; }
+.field.changed { border-color: var(--warning); }
 .field.invalid { border-color: var(--danger); }
 .field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 .field label .type { font-size: 11px; color: var(--muted); font-weight: 400; font-family: var(--mono); }
@@ -136,63 +167,81 @@ button { font: inherit; cursor: pointer; }
 .field.invalid .err { display: block; }
 .field input[type=text], .field input[type=number], .field input[type=password], .field textarea, .field select {
   width: 100%; border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
-  outline: none; background: #fbfcfd; transition: border-color .15s, box-shadow .15s;
+  padding: 8px 12px; font-size: 13px; font-family: var(--mono);
+  outline: none; background: var(--panel-soft); color: var(--text);
+  transition: border-color .15s, box-shadow .15s, background .15s;
 }
-.field textarea { min-height: 120px; resize: vertical; line-height: 1.6; }
+.field textarea { min-height: 140px; resize: vertical; line-height: 1.6; }
 .field input:focus, .field textarea:focus, .field select:focus {
-  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: #fff;
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--panel);
 }
 .field.invalid input, .field.invalid textarea, .field.invalid select { border-color: var(--danger); }
 .empty { color: var(--muted); font-size: 14px; padding: 40px; text-align: center; }
 
-/* 预览 */
+/* 占位符插入按钮 */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.chip {
+  border: 1px solid var(--border); background: var(--panel-soft);
+  color: var(--muted); border-radius: 999px; padding: 3px 11px;
+  font-size: 12px; font-family: var(--mono);
+  transition: color .12s, border-color .12s, background .12s;
+}
+.chip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---------- 预览（固定浅色，不跟随主题） ---------- */
 #preview {
-  width: 400px; flex: none; background: #101828;
-  border-left: 1px solid var(--border);
+  width: 420px; flex: none;
+  background: #f7f8fa; color: #333a45; color-scheme: light;
+  border-left: 1px solid #e2e5ea;
   display: flex; flex-direction: column; min-height: 0;
 }
 #preview h2 {
-  font-size: 12px; color: #98a2b3; font-weight: 500;
-  padding: 12px 16px; border-bottom: 1px solid #1d2939; flex: none;
+  font-size: 12px; color: #7a828e; font-weight: 500;
+  padding: 12px 16px; border-bottom: 1px solid #e8ebef; flex: none;
 }
 #preview pre {
   flex: 1; overflow: auto; padding: 14px 16px;
-  color: #d1d5db; font-size: 12px; font-family: var(--mono); line-height: 1.7;
+  color: #3d4652; font-size: 12px; font-family: var(--mono); line-height: 1.7;
   white-space: pre-wrap; word-break: break-all;
 }
 
-/* 弹窗 */
+/* ---------- 弹窗 ---------- */
 .modal-mask {
-  position: fixed; inset: 0; background: rgba(16,24,40,.45);
+  position: fixed; inset: 0; background: rgba(16, 24, 40, .45);
   display: none; align-items: center; justify-content: center; z-index: 40;
 }
 .modal {
-  background: var(--panel); border-radius: 16px; width: 560px; max-width: 92vw;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; width: 560px; max-width: 92vw;
   max-height: 80vh; display: flex; flex-direction: column;
-  box-shadow: 0 20px 60px rgba(16,24,40,.25);
 }
-.modal h3 { padding: 20px 24px 0; font-size: 16px; }
-.modal .body { padding: 16px 24px; overflow-y: auto; flex: 1; }
+.modal h3 { padding: 18px 22px 0; font-size: 15px; }
+.modal .body { padding: 14px 22px; overflow-y: auto; flex: 1; }
 .diff-item {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 14px; margin-bottom: 10px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 8px; font-size: 13px;
 }
 .diff-item .k { font-family: var(--mono); font-weight: 600; margin-bottom: 6px; }
 .diff-item .old { color: var(--danger); text-decoration: line-through; word-break: break-all; }
-.diff-item .new { color: #027a48; word-break: break-all; }
+.diff-item .new { color: var(--ok); word-break: break-all; }
 .diff-item .old, .diff-item .new { font-family: var(--mono); font-size: 12px; display: block; }
-.modal .foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 20px; }
-.btn { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 18px; font-size: 14px; }
+.modal .foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px 18px; }
+.btn {
+  border: 1px solid var(--border-strong); background: var(--panel); color: var(--text);
+  border-radius: 8px; padding: 8px 18px; font-size: 14px;
+  transition: border-color .15s, background .15s;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { background: #2f5de0; }
+.btn.primary:hover { background: var(--accent-hover); }
 
 #toast {
   position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%);
-  background: #101828; color: #fff; padding: 10px 22px; border-radius: 10px;
-  font-size: 13.5px; display: none; z-index: 60; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+  background: var(--toast-bg); color: var(--toast-text);
+  padding: 10px 22px; border-radius: 10px;
+  font-size: 13.5px; display: none; z-index: 60;
 }
-#status-modal .body p { font-size: 13.5px; margin-bottom: 10px; color: var(--text); }
+#status-modal .body p { font-size: 13.5px; margin-bottom: 10px; color: var(--text); line-height: 1.6; }
 #status-modal .body b { font-family: var(--mono); font-weight: 600; }
 @media (max-width: 1000px) { #preview { display: none; } }
 @media (max-width: 720px) { #sidebar { display: none; } }
@@ -267,6 +316,14 @@ let configData = null;          // 配置数据：{ sections, preview, path }
 let original = new Map();       // "Section.Key" -> 原始值
 let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret,rules,error}
 let activeSection = null;
+
+// 邮件模板可用占位符（与后端 EmailSender 渲染一致）
+const MAIL_PLACEHOLDERS = [
+  ["%%CaptchaCode%%", "验证码"],
+  ["%%Browser%%", "浏览器"],
+  ["%%IPAddress%%", "IP 地址"],
+  ["%%ExpireMinutes%%", "有效分钟数"],
+];
 
 /* ---------- 临时密码 ---------- */
 const boxes = [...document.querySelectorAll("#code-row input")];
@@ -465,6 +522,16 @@ function escapeHtml(s) {
   return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+/* ---------- 占位符插入 ---------- */
+function insertAtCursor(el, text) {
+  // 在光标处插入文本（覆盖选区），插入后触发 input 事件走正常编辑流程
+  el.focus();
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  el.setRangeText(text, start, end, "end");
+  el.dispatchEvent(new Event("input"));
+}
+
 /* ---------- 表单编辑 ---------- */
 function renderEditor() {
   const sec = configData.sections.find(s => s.name === activeSection);
@@ -472,6 +539,7 @@ function renderEditor() {
   if (!sec) { box.innerHTML = '<div class="empty">没有可编辑的配置段落</div>'; return; }
   box.innerHTML = "<h2>[" + escapeHtml(sec.name) + "]</h2>" +
     '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改实时校验，存在错误时不可提交</div>';
+  const isMailTheme = sec.name === "MailTheme" || sec.name.startsWith("MailTheme.");
   for (const entry of sec.entries) {
     const id = sec.name + "." + entry.key;
     const current = edits.has(id) ? edits.get(id).value : entry.value;
@@ -496,10 +564,19 @@ function renderEditor() {
     } else {
       control = '<input type="' + (entry.secret ? "password" : "text") + '" value="' + escapeHtml(String(current)) + '">';
     }
-    field.innerHTML = label + desc + control + errLine;
+    // 邮件模板字段：附加占位符插入按钮
+    let chips = "";
+    if (isMailTheme && entry.type === "string") {
+      chips = '<div class="chips">' + MAIL_PLACEHOLDERS.map(p =>
+        '<button type="button" class="chip" data-text="' + p[0] + '" title="插入' + p[1] + '占位符">' + p[0] + "</button>"
+      ).join("") + "</div>";
+    }
+    field.innerHTML = label + desc + chips + control + errLine;
     const input = field.querySelector("input,select,textarea");
     input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
+    field.querySelectorAll(".chip").forEach(chip =>
+      chip.addEventListener("click", () => insertAtCursor(input, chip.dataset.text)));
     box.appendChild(field);
   }
 }
