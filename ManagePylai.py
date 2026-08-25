@@ -3175,19 +3175,16 @@ class BackupService:
             timeout=1200,
         )
 
-        ctx.docker.compose("stop", "backend", timeout=120)
-
-        try:
-            ctx.docker.exec_pylaios(
-                "backup",
-                "restore",
-                name,
-                "--config",
-                PYLAI_CONFIG_ARG,
-                timeout=1800,
-            )
-        finally:
-            ctx.docker.compose("start", "backend", timeout=120)
+        # 拆分模式下 PostgreSQL 为独立服务，pg_restore --clean 支持活动连接，
+        # 无需停止 backend（停止后 compose exec 无法执行，旧逻辑必然失败）
+        ctx.docker.exec_pylaios(
+            "backup",
+            "restore",
+            name,
+            "--config",
+            PYLAI_CONFIG_ARG,
+            timeout=1800,
+        )
 
         if ctx.docker.wait_healthy(ctx.state.api_port):
             out("导入完成，服务已恢复。")
