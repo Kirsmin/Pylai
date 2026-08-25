@@ -244,6 +244,7 @@ EmailCodeBanDurationHours = 24
 UsernameCheckMaxPerHourPerIp = 100
 MaxRedemptions = 10
 DefaultLifetimeHours = 168
+RequireInviteCode = false
 
 [Seeds.DefaultAdmin]
 Email = "${seed_admin_email}"

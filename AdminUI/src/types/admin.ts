@@ -31,6 +31,7 @@ export interface AdminCapabilityUser {
 export interface AdminCapabilitiesResponse extends ApiEnvelope {
   user: AdminCapabilityUser | null
   capabilities: AdminCapability[]
+  inviteCodeRequired: boolean
 }
 
 export interface AdminUserListItem {

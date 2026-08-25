@@ -486,6 +486,17 @@ public class RegisterController : ControllerBase
 
         if (string.IsNullOrEmpty(request.InviteCode))
         {
+            if (_config.InviteCode.RequireInviteCode)
+            {
+                _logger.LogWarning("用户尝试跳过邀请码，但配置强制要求邀请码 | uid:{Uid}", session.UserUid);
+                return BadRequest(new InviteCodeRedeemResponse
+                {
+                    Success = false,
+                    Error = "当前注册必须使用邀请码，无法跳过。",
+                    ErrorCode = "invalid_or_expired"
+                });
+            }
+
             session.Step = 6;
             await _sessionService.UpdateSessionAsync(request.SessionToken, session);
             _logger.LogDebug("用户跳过邀请码 | uid:{Uid}", session.UserUid);

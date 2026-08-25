@@ -64,6 +64,20 @@ function search() { page.value = 1; load() }
 function resetFilters() { group.value = null; page.value = 1; load() }
 onMounted(load)
 
+async function toggleRequireInviteCode(value: boolean) {
+  try {
+    await authStore.request('/api/admin/settings/require-invite-code', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requireInviteCode: value })
+    })
+    authStore.inviteCodeRequired = value
+    message.success(value ? '已开启：注册必须使用邀请码' : '已关闭：注册可跳过邀请码')
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '设置失败')
+  }
+}
+
 const editorVisible = ref(false)
 const editingId = ref<string | null>(null)
 const saving = ref(false)
@@ -131,10 +145,14 @@ async function revoke(id: string) {
       </template>
     </PageHeader>
 
-    <div class="admin-toolbar">
+    <div class="admin-toolbar" style="align-items:center;">
       <NSelect v-model:value="group" placeholder="用户组" clearable :options="groupOptions" style="width:150px" @update:value="search" />
       <NButton type="success" ghost @click="search">查询</NButton>
       <NButton quaternary @click="resetFilters">重置</NButton>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:13px;color:var(--text-secondary);">注册必须使用邀请码</span>
+        <NSwitch :value="authStore.inviteCodeRequired" @update:value="toggleRequireInviteCode" />
+      </div>
     </div>
 
     <div class="admin-table-wrap">

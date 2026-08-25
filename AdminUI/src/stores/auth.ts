@@ -14,6 +14,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
   const starting = ref(false)
   const user = ref<AdminCapabilityUser | null>(null)
   const capabilities = ref<AdminCapability[]>([])
+  const inviteCodeRequired = ref(false)
   const loginError = ref('')
   const csrfToken = ref('')
 
@@ -63,6 +64,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     if (!data) throw new Error('无法获取管理能力')
     user.value = data.user ?? null
     capabilities.value = data.capabilities ?? []
+    inviteCodeRequired.value = data.inviteCodeRequired ?? false
     return user.value !== null
   }
 
@@ -212,6 +214,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     }
     user.value = null
     capabilities.value = []
+    inviteCodeRequired.value = false
     csrfToken.value = ''
     stepUpTicket.value = null
     stepUpVisible.value = false
@@ -253,6 +256,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     firstCapability,
     displayName,
     group,
+    inviteCodeRequired,
     hasCapability,
     capability,
     startLogin,

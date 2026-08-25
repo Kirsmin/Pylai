@@ -9,7 +9,10 @@ export function loadPublicConfig(): Promise<PublicConfig> {
     const timeoutId = setTimeout(() => controller.abort(), 3000)
     publicConfigPromise = api<PublicConfig>('/api/config/public', { signal: controller.signal })
       .then((config) => {
-        const normalized = { supportEmail: config.supportEmail?.trim() || '' }
+        const normalized = {
+          supportEmail: config.supportEmail?.trim() || '',
+          requireInviteCode: config.requireInviteCode ?? false
+        }
         setRuntimeSupportEmail(normalized.supportEmail)
         return normalized
       })

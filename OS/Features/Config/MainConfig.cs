@@ -265,6 +265,8 @@ public class InviteCodeConfig
     [ConfigRange(1, 8760)]
     [ConfigDescription("新邀请码默认有效期（小时）")]
     public int DefaultLifetimeHours { get; set; } = 168;
+    [ConfigDescription("注册是否必须使用邀请码（开启后注册流程不可跳过邀请码）")]
+    public bool RequireInviteCode { get; set; } = false;
 }
 
 [ConfigFile("pylai.toml")]

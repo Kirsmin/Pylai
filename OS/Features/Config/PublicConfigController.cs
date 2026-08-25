@@ -24,7 +24,8 @@ public sealed class PublicConfigController : ControllerBase
 
         return Ok(new
         {
-            supportEmail = supportEmail?.Trim() ?? string.Empty
+            supportEmail = supportEmail?.Trim() ?? string.Empty,
+            requireInviteCode = _config.InviteCode.RequireInviteCode
         });
     }
 }

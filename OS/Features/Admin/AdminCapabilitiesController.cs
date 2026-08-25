@@ -9,10 +9,12 @@ namespace Pylaios.Features.Admin;
 public class AdminCapabilitiesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly MainConfig _config;
 
-    public AdminCapabilitiesController(ApplicationDbContext context)
+    public AdminCapabilitiesController(ApplicationDbContext context, MainConfig config)
     {
         _context = context;
+        _config = config;
     }
 
     [HttpGet("capabilities")]
@@ -48,7 +50,8 @@ public class AdminCapabilitiesController : ControllerBase
                 Email = user.Email,
                 Group = user.Group
             },
-            Capabilities = capabilities
+            Capabilities = capabilities,
+            InviteCodeRequired = _config.InviteCode.RequireInviteCode
         });
     }
 

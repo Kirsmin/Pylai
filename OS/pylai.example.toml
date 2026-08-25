@@ -278,6 +278,8 @@ UsernameCheckMaxPerHourPerIp = 100
 # 普通邀请码的默认最大核销次数
 MaxRedemptions = 10
 DefaultLifetimeHours = 168
+# 注册是否必须使用邀请码（开启后注册流程不可跳过邀请码）
+RequireInviteCode = false
 
 # 种子数据（db seed 执行；密码为空的种子用户不会被创建，避免空密码账户）
 [Seeds.DefaultAdmin]

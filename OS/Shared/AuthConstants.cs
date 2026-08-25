@@ -93,6 +93,7 @@ public static class AuthConstants
         public const string AdminResetPassword = "AdminResetPassword";
         public const string AdminIpUnbanned = "AdminIpUnbanned";
         public const string UserCreated = "UserCreated";
+        public const string SettingsChanged = "SettingsChanged";
     }
 
     public static class Scopes

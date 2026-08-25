@@ -22,6 +22,8 @@ const emailRef = ref<InstanceType<typeof NInput> | null>(null)
 const sessionToken = ref('')
 const REG_SESSION_KEY = 'pylai_reg_session'
 
+const requireInviteCode = ref(false)
+
 function saveSession() {
   if (sessionToken.value) sessionStorage.setItem(REG_SESSION_KEY, sessionToken.value)
 }
@@ -88,6 +90,14 @@ async function handleInit() {
   title.value = 'Pylai...'
 
   try {
+    // 拉取公共配置，判断是否强制邀请码
+    try {
+      const pub = await api('/api/config/public')
+      requireInviteCode.value = (pub.requireInviteCode as boolean) ?? false
+    } catch {
+      requireInviteCode.value = false
+    }
+
     const data = await api('/api/auth/register/init', { method: 'POST' })
 
     if (!data.success) {
@@ -497,6 +507,10 @@ async function handleInviteSubmit() {
 }
 
 async function handleSkipInvite() {
+  if (requireInviteCode.value) {
+    inviteErrorMsg.value = '当前注册必须使用邀请码，无法跳过。'
+    return
+  }
   loading.value = true
   inviteErrorMsg.value = ''
   try {
@@ -936,7 +950,7 @@ watch(state, (newState) => {
             <NButton v-else-if="loading" type="success" size="large" circle class="submit-btn" loading />
 
             <NButton
-              v-if="!loading && !sessionExpired"
+              v-if="!loading && !sessionExpired && !requireInviteCode"
               quaternary
               type="success"
               size="small"

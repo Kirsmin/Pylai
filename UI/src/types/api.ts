@@ -7,6 +7,7 @@ export function setRuntimeSupportEmail(value: string) {
 
 export interface PublicConfig {
   supportEmail: string
+  requireInviteCode: boolean
 }
 
 export interface ScopeInfo {

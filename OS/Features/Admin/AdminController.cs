@@ -233,6 +233,22 @@ public class AdminController : ControllerBase
     private string? CurrentActorId()
         => User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
 
+    // ============ 设置管理 ============
+
+    [HttpPut("settings/require-invite-code")]
+    public async Task<IActionResult> SetRequireInviteCode([FromBody] SetRequireInviteCodeRequest request)
+    {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
+
+        _config.InviteCode.RequireInviteCode = request.RequireInviteCode;
+
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.SettingsChanged,
+            CurrentActorId(), null, true, $"RequireInviteCode set to {request.RequireInviteCode}");
+
+        return Ok(new ApiResponse { Success = true });
+    }
+
     // ============ 封禁管理 ============
 
     [HttpGet("bans")]
