@@ -43,6 +43,17 @@ public static class WebAppStartup
             Console.Error.WriteLine($"\x1b[93m{DateTimeOffset.Now:yyyy/MM/dd HH:mm:ss}  \u26A0\uFE0F  Pylaios       TestMode \u2014 邮件不会实际发送，验证码将输出到控制台\x1b[0m");
         }
 
+        // 生产安全门禁（配置级）：不依赖数据库，任何启动路径都必须执行
+        try
+        {
+            ProductionSecurityGate.ValidateConfig(config, builder.Environment);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"错误  Pylaios       {ex.Message}");
+            return 3;
+        }
+
         if (!string.IsNullOrEmpty(config.Server.Url))
             builder.WebHost.UseUrls(config.Server.Url);
 
@@ -143,13 +154,26 @@ public static class WebAppStartup
             return 3;
         }
         if (migrationCheck.Pending is null)
+        {
+            if (!app.Environment.IsDevelopment())
+            {
+                // Fail Closed：生产环境下数据库不可达/迁移状态未知时，
+                // 数据库级安全门禁无法执行，必须拒绝启动而非跳过
+                app.Logger.LogError("生产环境数据库不可达，无法确认迁移状态并执行安全门禁，拒绝启动");
+                Console.Out.WriteLine(CliHelpers.SerializeJson(new
+                {
+                    success = false,
+                    error = "生产环境数据库不可达，无法确认迁移状态，拒绝启动。请检查数据库后重试"
+                }));
+                return 3;
+            }
             app.Logger.LogWarning("数据库连接失败，无法确认迁移状态（/health/ready 将反映数据库状态）");
-
-        if (migrationCheck.Pending is not null)
+        }
+        else
         {
             try
             {
-                await ProductionSecurityGate.ValidateAsync(app.Services, config, app.Environment);
+                await ProductionSecurityGate.ValidateDatabaseAsync(app.Services);
             }
             catch (Exception ex)
             {

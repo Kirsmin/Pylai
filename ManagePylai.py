@@ -108,6 +108,10 @@ class ManageError(Exception):
     """统一管理错误。"""
 
 
+class UnsupportedArchitectureError(ManageError):
+    """主机 CPU 架构不受支持（无静默回退）。"""
+
+
 # ============================================================================
 # 基础工具
 # ============================================================================
@@ -128,8 +132,29 @@ def ensure_home() -> None:
 
 
 def atomic_write(path: Path, content: str, mode: int = 0o600) -> None:
+    """真原子写入：同目录临时文件 → fsync 落盘 → os.replace() 原子替换。
+
+    中途断电/崩溃不会留下截断的半份文件；临时文件按目标 mode 创建，避免
+    以更宽权限短暂存在。
+    """
     ensure_home()
-    path.write_text(content, encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            raise
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    # os.replace 后目标文件保留临时文件的权限（mode 已在 open 时设定）；
+    # 若目标已存在且权限不同，显式纠正以符合调用方预期
     path.chmod(mode)
 
 
@@ -173,7 +198,14 @@ def run(
 
 
 def host_arch() -> str:
-    return SUPPORTED_ARCH.get(host_platform.machine().lower(), "AMD64")
+    machine = host_platform.machine().lower()
+    arch = SUPPORTED_ARCH.get(machine)
+    if arch is None:
+        raise UnsupportedArchitectureError(
+            f"不支持的主机架构: {machine}。"
+            f"支持的架构: {', '.join(sorted(set(SUPPORTED_ARCH.values())))}。"
+        )
+    return arch
 
 
 def discover_tars() -> list[Path]:
@@ -2553,23 +2585,28 @@ class SelfUpdater:
             new_script.unlink(missing_ok=True)
             return False
 
+        # Fail Closed：校验和文件缺失/不可读即终止更新（防供应链投毒），绝不静默降级为无校验安装
         sha256_expected: str | None = None
-
         try:
             self.client.download(version, "ManagePylai.py.sha256", sha256_file)
             sha256_content = sha256_file.read_text(encoding="ascii").strip()
             sha256_expected = sha256_content.split()[0]
-        except (ManageError, OSError):
-            out("警告：无法下载或读取 SHA256 校验文件")
+        except (ManageError, OSError) as exc:
+            new_script.unlink(missing_ok=True)
+            sha256_file.unlink(missing_ok=True)
+            raise ManageError(f"无法下载或读取 SHA256 校验文件，拒绝更新（Fail Closed）: {exc}") from exc
 
-        if sha256_expected:
-            actual = hashlib.sha256(new_script.read_bytes()).hexdigest()
-            if actual != sha256_expected:
-                out(f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}")
-                new_script.unlink(missing_ok=True)
-                sha256_file.unlink(missing_ok=True)
-                return False
-            out("SHA256 校验通过。")
+        if not sha256_expected:
+            new_script.unlink(missing_ok=True)
+            sha256_file.unlink(missing_ok=True)
+            raise ManageError("SHA256 校验文件内容为空，拒绝更新（Fail Closed）。")
+
+        actual = hashlib.sha256(new_script.read_bytes()).hexdigest()
+        if actual != sha256_expected:
+            new_script.unlink(missing_ok=True)
+            sha256_file.unlink(missing_ok=True)
+            raise ManageError(f"SHA256 校验失败，拒绝更新: 期望 {sha256_expected}, 实际 {actual}")
+        out("SHA256 校验通过。")
 
         if dry_run:
             out(f"[dry-run] 将替换 {self.script_path} 为版本 {version}")

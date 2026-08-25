@@ -6,7 +6,11 @@ namespace Pylaios.Shared;
 
 public static class ProductionSecurityGate
 {
-    public static async Task ValidateAsync(IServiceProvider services, MainConfig config, IWebHostEnvironment env)
+    /// <summary>
+    /// 配置级安全检查（零数据库依赖）：非 Development 下无条件执行，
+    /// 即使数据库不可达也必须生效（Fail Closed）。
+    /// </summary>
+    public static void ValidateConfig(MainConfig config, IWebHostEnvironment env)
     {
         if (env.IsDevelopment())
             return;
@@ -15,7 +19,14 @@ public static class ProductionSecurityGate
             throw new InvalidOperationException("生产环境未配置邀请码 HMAC pepper。");
 
         RejectKnownDefaultSecrets(config);
+    }
 
+    /// <summary>
+    /// 数据库级安全检查：仅在迁移状态可确认（数据库可达）时执行。
+    /// 生产环境下数据库不可达时由调用方直接拒绝启动，不允许跳过本检查。
+    /// </summary>
+    public static async Task ValidateDatabaseAsync(IServiceProvider services)
+    {
         using var scope = services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         if (await db.InviteCodes.AnyAsync(c => c.Status == InviteCodeStatus.Active

@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # 允许作为 Reusable Workflow 被 release.yml 调用（发布门禁：发布成功 ⇔ CI 全绿）
+  workflow_call:
 
 concurrency:
   group: "ci-${{ github.ref }}"
@@ -275,5 +277,8 @@ jobs:
           echo "==> Admin 登录 OK"
 
           python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
+
+          # 认证核心路径回归（必过门禁）：登录锁定/会话撤销/CSRF/MFA边界/OAuth PKCE/Refresh 轮换
+          python3 scripts/auth-regression.py --base-url http://localhost:8080 --container smoke
 
           docker rm -f smoke >/dev/null 2>&1

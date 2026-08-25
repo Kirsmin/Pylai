@@ -21,8 +21,10 @@ RUN pnpm build
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0.400 AS backend
 WORKDIR /src
+ARG PYLAI_VERSION
 COPY OS/ ./
-RUN dotnet publish Pylaios.csproj -c Release -o /app
+RUN dotnet publish Pylaios.csproj -c Release -o /app \
+    /p:Version=${PYLAI_VERSION} /p:InformationalVersion=${PYLAI_VERSION}
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive

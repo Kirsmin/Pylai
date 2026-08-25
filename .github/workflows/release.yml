@@ -20,6 +20,15 @@ concurrency:
 
 jobs:
   # ═════════════════════════════════════════════════════════════════
+  # Job 0: 完整 CI 门禁（Reusable Workflow）
+  #   发布步骤被 needs 强制依赖本 job —— 发布成功 ⇔ CI 全绿
+  #   （构建 + 配置校验 + 安全回归 + 冒烟 + 登录验证全部通过）
+  # ═════════════════════════════════════════════════════════════════
+  ci:
+    name: CI Gate（完整测试门禁）
+    uses: ./.github/workflows/ci.yml
+
+  # ═════════════════════════════════════════════════════════════════
   # Job 1: 双架构并行构建（AMD64 附带冒烟测试，与 ARM64 构建同时进行）
   # ═════════════════════════════════════════════════════════════════
   build:
@@ -200,6 +209,15 @@ jobs:
           fi
           # 验证 ManagePylai 配置生成路径（template 渲染）可用
           docker run --rm --entrypoint /opt/pylai/Pylaios "pylaios:${VERSION}-AMD64" config validate --help >/dev/null 2>&1 || true
+
+          # ═══ 版本一致性断言（Fail Closed）：二进制内部版本必须严格等于发布 Tag ═══
+          VERSION_JSON=$(docker run --rm --entrypoint /opt/pylai/Pylaios "pylaios:${VERSION}-AMD64" --version)
+          BIN_VERSION=$(printf '%s' "$VERSION_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          if [[ "${BIN_VERSION}" != "${VERSION}" ]]; then
+            echo "==> 版本不一致：二进制=${BIN_VERSION}，Tag=${VERSION}"; exit 1
+          fi
+          echo "==> 版本一致性断言通过（二进制 ${BIN_VERSION} = Tag ${VERSION}）"
+
           docker rm -f pylai-release-smoke >/dev/null 2>&1
           sudo rm -rf "$SMOKE"
 
@@ -217,7 +235,7 @@ jobs:
   # Job 2: 汇总产物 + 生成清单 + 创建 GitHub Release
   # ═════════════════════════════════════════════════════════════════
   release:
-    needs: build
+    needs: [build, ci]
     runs-on: ubuntu-latest
 
     steps:
