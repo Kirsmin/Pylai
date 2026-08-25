@@ -1676,6 +1676,7 @@ class PylaiConfig:
 class DockerCompose:
     project: str = "pylai"
     compose_file: Path = HOME / "docker-compose.yml"
+    env_file: Path = HOME / ".env"
 
     def ensure_docker(self) -> None:
         if shutil.which("docker") is None:
@@ -1700,7 +1701,17 @@ class DockerCompose:
         stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return run(
-            ["docker", "compose", "-p", self.project, "-f", self.compose_file, *args],
+            [
+                "docker",
+                "compose",
+                "-p",
+                self.project,
+                "--env-file",
+                str(self.env_file),
+                "-f",
+                self.compose_file,
+                *args,
+            ],
             check=check,
             timeout=timeout,
             stdin=stdin,
@@ -1719,7 +1730,18 @@ class DockerCompose:
         return bool(self.compose("ps", "-q", service, check=False).stdout.strip())
 
     def service_status(self, service: ServiceName = "backend") -> Literal["running", "exited"]:
-        return "running" if self.service_exists(service) else "exited"
+        result = self.compose("ps", "--format", "json", service, check=False)
+        try:
+            entries = json.loads(result.stdout or "[]")
+        except ValueError:
+            return "exited"
+        if isinstance(entries, dict):
+            entries = [entries]
+        return (
+            "running"
+            if any(e.get("Service") == service and e.get("State") == "running" for e in entries)
+            else "exited"
+        )
 
     def service_running(self, service: ServiceName = "backend") -> bool:
         return self.service_status(service) == "running"
@@ -2933,9 +2955,12 @@ class UpdateService:
 
         image = ctx.docker.load_image_tar(tar_path)
 
-        if ctx.manager.auto_backup and ctx.docker.service_running():
-            out("==> 自动备份数据库...")
-            BackupService(ctx).export()
+        if ctx.manager.auto_backup:
+            if ctx.docker.service_running():
+                out("==> 自动备份数据库...")
+                BackupService(ctx).export()
+            else:
+                out("[警告] 后端未在运行（可能处于重启循环或已退出），已跳过自动备份。")
 
         self.preflight_config(image)
 
