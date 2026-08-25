@@ -506,7 +506,7 @@ class Suite:
         self.check(q.get("state", [None])[0] == state, "state 应原样回传")
 
         # 错误 verifier → invalid_grant
-        st, body, raw = c.raw("POST", "/connect/token", form={
+        st, _, body, raw = c.raw("POST", "/connect/token", form={
             "grant_type": "authorization_code", "code": code,
             "redirect_uri": "https://oauthdebugger.com/debug",
             "client_id": "pylai-console", "client_secret": self.client_secret,
@@ -524,7 +524,7 @@ class Suite:
         if "code=" not in loc:
             return
         code = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["code"][0]
-        st, body, raw = c.raw("POST", "/connect/token", form={
+        st, _, body, raw = c.raw("POST", "/connect/token", form={
             "grant_type": "authorization_code", "code": code,
             "redirect_uri": "https://oauthdebugger.com/debug",
             "client_id": "pylai-console", "client_secret": self.client_secret,
@@ -537,7 +537,7 @@ class Suite:
 
         # Refresh 轮换：R1 → R2，R1 重放拒绝
         r1 = body["refresh_token"]
-        st, body2, raw = c.raw("POST", "/connect/token", form={
+        st, _, body2, raw = c.raw("POST", "/connect/token", form={
             "grant_type": "refresh_token", "refresh_token": r1,
             "client_id": "pylai-console", "client_secret": self.client_secret})
         self.check(st == 200 and isinstance(body2, dict) and body2.get("refresh_token"),
@@ -546,7 +546,7 @@ class Suite:
             return
         r2 = body2["refresh_token"]
         self.check(r2 != r1, "refresh token 应轮换（新旧不同）")
-        st, body3, raw = c.raw("POST", "/connect/token", form={
+        st, _, body3, raw = c.raw("POST", "/connect/token", form={
             "grant_type": "refresh_token", "refresh_token": r1,
             "client_id": "pylai-console", "client_secret": self.client_secret})
         self.check(st in (400, 401) and isinstance(body3, dict)
