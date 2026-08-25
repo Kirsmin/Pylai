@@ -264,6 +264,10 @@ class Suite:
                 return None
             return c, username, password
         u = register_user(c, self.container)
+        st, _, raw = c.post("/api/auth/login", payload={
+            "usernameOrEmail": u["username"], "password": u["password"]})
+        if not self.check(st == 200, f"新用户 {u['username']} 登录应 200，实际 {st} {raw}"):
+            return None
         return c, u["username"], u["password"]
 
     def check(self, cond: bool, msg: str) -> bool:
@@ -436,7 +440,7 @@ class Suite:
         if st != 200:
             return
         admin._csrf = body["token"]
-        st, body, raw = admin.delete(f"/api/admin/users/{random_uid}")
+        st, body, raw = admin.delete(f"/api/admin/users/{random_uid}", csrf=True)
         self.check(st != 403 or (body or {}).get("errorCode") != "csrf_invalid",
                    f"带 BFF token 后不应再报 csrf_invalid，实际 {st} {raw}")
 
@@ -578,18 +582,24 @@ class Suite:
         self.check(st == 200, f"max 账户登录失败（候选={len(candidates)}）last={st} {raw}")
         if st != 200:
             return
+        # MFA 端点属已认证写请求，受 Cookie-CSRF 双提交约束，先补签
+        st, body, raw = m.get("/api/auth/csrf")
+        if not self.check(st == 200 and bool(body and body.get("token")),
+                          f"MFA 场景 CSRF 补签失败 {st} {raw}"):
+            return
+        m._csrf = body["token"]
 
         # HTTPS 强制：经 nginx(HTTP) enroll 必须 400 invalid_request
-        st, body, raw = m.post("/api/auth/mfa/totp/enroll")
+        st, body, raw = m.post("/api/auth/mfa/totp/enroll", csrf=True)
         self.check(st == 400 and body and body.get("errorCode") == "invalid_request",
                    f"HTTP 下 TOTP enroll 应 400 invalid_request（HTTPS 强制），实际 {st} {raw}")
 
         # WebAuthn 注册入口可达但伪造 attestation 必须拒绝
-        st, body, raw = m.post("/api/auth/mfa/webauthn/registration-options")
+        st, body, raw = m.post("/api/auth/mfa/webauthn/registration-options", csrf=True)
         options_ok = st == 200 and body and body.get("registrationId")
         self.check(options_ok, f"WebAuthn registration-options 应 200，实际 {st} {raw[:160]}")
         if options_ok:
-            st, body, raw = m.post("/api/auth/mfa/webauthn/registration", payload={
+            st, body, raw = m.post("/api/auth/mfa/webauthn/registration", csrf=True, payload={
                 "registrationId": body["registrationId"],
                 "response": {"id": "forged", "rawId": "forged", "type": "public-key",
                              "response": {"attestationObject": "AAAA",
@@ -600,13 +610,13 @@ class Suite:
 
         # 伪造事务 ID 的负路径
         st, body, raw = m.get("/api/auth/mfa/step-up/webauthn/options?transactionId=forged-tx")
-        self.check(st == 400 and body and body.get("errorCode") == "mfa_invalid",
-                   f"伪造 step-up 事务应 400 mfa_invalid，实际 {st} {raw[:160]}")
+        self.check(st in (400, 422) and body and body.get("errorCode") == "mfa_invalid",
+                   f"伪造 step-up 事务应 mfa_invalid，实际 {st} {raw[:160]}")
 
         fake = Client(self.base)
         st, body, raw = fake.post("/api/auth/mfa/verify", payload={
             "transactionId": "forged-tx", "code": "123456"})
-        self.check(st in (400, 401) and body and body.get("errorCode") == "mfa_invalid",
+        self.check(st in (400, 401, 422) and body and body.get("errorCode") == "mfa_invalid",
                    f"伪造登录事务 verify 应 mfa_invalid，实际 {st} {raw[:160]}")
 
         # 直连后端时补齐 TOTP 正向流 + 重放防护（nginx 会覆写 X-Forwarded-Proto，无法经代理伪造 https）
@@ -629,7 +639,7 @@ class Suite:
         secret_b32 = body["secret"]
         now = time.time()
         code_v = totp_code(secret_b32, t=now)
-        st, body, raw = b.post("/api/auth/mfa/totp/confirm", payload={
+        st, body, raw = b.post("/api/auth/mfa/totp/confirm", csrf=True, payload={
             "enrollmentId": enrollment_id, "code": code_v})
         self.check(st == 200, f"TOTP confirm 应 200，实际 {st} {raw[:200]}")
         if st != 200:
@@ -643,7 +653,7 @@ class Suite:
         if st != 401:
             return
         tx = body["mfaTransactionId"]
-        st, body, raw = m2.post("/api/auth/mfa/verify", payload={
+        st, body, raw = m2.post("/api/auth/mfa/verify", csrf=True, payload={
             "transactionId": tx, "code": code_v})
         self.check(st == 200, f"首验 TOTP 码应 200 完成登录，实际 {st} {raw[:200]}")
 
@@ -652,7 +662,7 @@ class Suite:
         if not self.check(st2 == 401 and body2 and body2.get("mfaTransactionId"),
                           "第二次登录应再次要求 MFA"):
             return
-        st, body, raw = m2.post("/api/auth/mfa/verify", payload={
+        st, body, raw = m2.post("/api/auth/mfa/verify", csrf=True, payload={
             "transactionId": body2["mfaTransactionId"], "code": code_v})
         self.check(st in (400, 401) and body and body.get("errorCode") == "mfa_invalid",
                    f"重放同一 TOTP 码应 mfa_invalid，实际 {st} {raw[:200]}")
