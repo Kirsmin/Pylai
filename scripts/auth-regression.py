@@ -406,7 +406,6 @@ class Suite:
         c3, st_new, body = login_client(self.base, u["username"], new_password)
         self.check(st_new == 200 and body and body.get("uid") == u["uid"],
                    f"新密码登录应 200 且 uid 一致，实际 {st_new} {body}")
-        self.new_password_of_csrfer = new_password
 
     # ---- E. Admin BFF CSRF ----
     def s_admin_bff_csrf(self, candidates: list[tuple[str, str]]):
@@ -465,23 +464,10 @@ class Suite:
         if not self.client_secret:
             self.skipped.append("oauth_pkce(no-client-secret)")
             return
-        c = Client(self.base)
-        if self.existing:
-            username, password = self.existing
-            st, _, _ = c.post("/api/auth/login", payload={
-                "usernameOrEmail": username, "password": password})
-        elif getattr(self, "new_password_of_csrfer", None):
-            st, _, _ = c.post("/api/auth/login", payload={
-                "usernameOrEmail": self.u_csrfer["username"],
-                "password": self.new_password_of_csrfer})
-        else:
-            u = register_user(c, self.container)
-            self.u_csrfer = u
-            st, _, _ = c.post("/api/auth/login", payload={
-                "usernameOrEmail": u["username"], "password": u["password"]})
-        self.check(st == 200, "OAuth 场景登录失败")
-        if st != 200:
+        got = self._obtain_user()
+        if got is None:
             return
+        c = got[0]
 
         # 缺 PKCE → invalid_request
         st, headers, body, url = self._authorize(c, challenge=None, state="neg")
@@ -604,9 +590,10 @@ class Suite:
                 "response": {"id": "forged", "rawId": "forged", "type": "public-key",
                              "response": {"attestationObject": "AAAA",
                                           "clientDataJson": "AAAA"}}})
-            # 伪造 attestation 必须被拒：模型绑定失败(422)或 fido2 校验失败(400)均可
-            self.check(st in (400, 422) and body and not body.get("success", True),
-                       f"伪造 attestation 应被拒绝，实际 {st} {raw[:160]}")
+            # 伪造 attestation 必须被拒：模型绑定失败(400/422 ProblemDetails)
+            # 或 fido2 校验失败(400 mfa_invalid)均视为拒绝
+            self.check(st in (400, 422),
+                       f"伪造 attestation 应被拒绝(400/422)，实际 {st} {raw[:160]}")
 
         # 伪造事务 ID 的负路径
         st, body, raw = m.get("/api/auth/mfa/step-up/webauthn/options?transactionId=forged-tx")
