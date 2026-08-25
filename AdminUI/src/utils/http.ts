@@ -38,3 +38,44 @@ export async function parseApiResponse<T>(res: Response): Promise<T | undefined>
   }
   return data as T
 }
+
+// 用户侧 Cookie-CSRF（双提交）：/api 下非 /admin 路径的写请求由后端 CookieCsrfMiddleware 校验，
+// token 由 GET /api/auth/csrf 签发（可读 Cookie Pylaios.Csrf），与 /api/admin 的 Admin BFF token 相互独立。
+const USER_CSRF_COOKIE_PATTERN = /(?:^|;\s*)Pylaios\.Csrf=([^;]*)/
+
+export function readUserCsrfToken(): string | null {
+  return document.cookie.match(USER_CSRF_COOKIE_PATTERN)?.[1] ?? null
+}
+
+export async function ensureUserCsrfToken(): Promise<void> {
+  if (!readUserCsrfToken()) {
+    await rawFetch('/api/auth/csrf').catch(() => undefined)
+  }
+}
+
+export function userCsrfHeaders(): Record<string, string> {
+  const token = readUserCsrfToken()
+  return token ? { 'X-CSRF-Token': token } : {}
+}
+
+async function isCsrfChallenge(res: Response): Promise<boolean> {
+  if (res.status !== 403) return false
+  const probe = await res.clone().json().catch(() => null)
+  return probe?.errorCode === 'csrf_invalid'
+}
+
+/** 用户侧写请求：自动附带 X-CSRF-Token；CSRF 挑战时补签重放一次。 */
+export async function userCsrfFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const send = async (): Promise<Response> => {
+    await ensureUserCsrfToken()
+    const headers = new Headers(init.headers)
+    for (const [key, value] of Object.entries(userCsrfHeaders())) headers.set(key, value)
+    return rawFetch(input, { ...init, headers })
+  }
+  const response = await send()
+  if (!(await isCsrfChallenge(response))) return response
+  await rawFetch('/api/auth/csrf').catch(() => undefined)
+  const headers = new Headers(init.headers)
+  for (const [key, value] of Object.entries(userCsrfHeaders())) headers.set(key, value)
+  return rawFetch(input, { ...init, headers })
+}

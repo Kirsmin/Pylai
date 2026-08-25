@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
-import { API_BASE, ApiError, parseApiResponse, rawFetch } from '@/utils/http'
+import { API_BASE, ApiError, ensureUserCsrfToken, parseApiResponse, rawFetch, userCsrfFetch } from '@/utils/http'
 import { getAssertion } from '@/utils/webauthn'
 import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser } from '@/types/admin'
 
@@ -76,13 +76,30 @@ export const useAuthStore = defineStore('admin-auth', () => {
     return csrfToken.value
   }
 
+  // Admin BFF CSRF（/api/admin/* 写请求）：内存 token ↔ Pylaios.AdminCsrf Cookie 双提交；
+  // 挑战（403 csrf_invalid，如其他标签页轮换过 Cookie）时清空补签并重放一次。
+  async function adminCsrfFetch(path: string, init: RequestInit): Promise<Response> {
+    const send = async (): Promise<Response> => {
+      const headers = new Headers(init.headers)
+      headers.set('X-CSRF-Token', await ensureCsrf())
+      return rawFetch(path, { ...init, headers })
+    }
+    const response = await send()
+    if (response.status !== 403) return response
+    const probe = await response.clone().json().catch(() => null)
+    if (probe?.errorCode !== 'csrf_invalid') return response
+    csrfToken.value = ''
+    return send()
+  }
+
   async function executeOnce<T>(path: string, init: RequestInit = {}): Promise<T | undefined> {
     const method = (init.method || 'GET').toUpperCase()
-    const headers = new Headers(init.headers)
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method))
-      headers.set('X-CSRF-Token', await ensureCsrf())
-
-    const response = await rawFetch(path, { ...init, headers })
+    const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(method)
+    const response = unsafe
+      ? path.startsWith('/api/admin')
+        ? await adminCsrfFetch(path, init)
+        : await userCsrfFetch(path, init)
+      : await rawFetch(path, init)
     if (response.status === 401) {
       user.value = null
       capabilities.value = []
@@ -126,7 +143,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     stepUpError.value = ''
     try {
       const data = await parseApiResponse<{ success: boolean; transactionId: string; methods: string[] }>(
-        await rawFetch('/api/auth/mfa/step-up', { method: 'POST' })
+        await userCsrfFetch('/api/auth/mfa/step-up', { method: 'POST' })
       )
       if (!data?.transactionId) throw new ApiError('无法开始 MFA 验证', 403, 'mfa_invalid')
       stepUpTicket.value = { transactionId: data.transactionId, methods: data.methods || [] }
@@ -145,7 +162,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     stepUpBusy.value = true
     stepUpError.value = ''
     try {
-      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/totp', {
+      await parseApiResponse<{ success: boolean }>(await userCsrfFetch('/api/auth/mfa/step-up/totp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId: ticket.transactionId, code: stepUpCode.value })
@@ -169,7 +186,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
         `/api/auth/mfa/step-up/webauthn/options?transactionId=${encodeURIComponent(ticket.transactionId)}`
       ))
       const response = await getAssertion(options)
-      await parseApiResponse<{ success: boolean }>(await rawFetch('/api/auth/mfa/step-up/webauthn/verify', {
+      await parseApiResponse<{ success: boolean }>(await userCsrfFetch('/api/auth/mfa/step-up/webauthn/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transactionId: ticket.transactionId, response })
@@ -209,13 +226,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
 
   async function logout() {
     try {
-      const data = await parseApiResponse<{ success: boolean; token: string }>(
-        await rawFetch('/api/auth/csrf')
-      )
-      await rawFetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'X-CSRF-Token': data?.token ?? '' }
-      })
+      await parseApiResponse(await userCsrfFetch('/api/auth/logout', { method: 'POST' }))
     } catch {
     }
     user.value = null
@@ -235,7 +246,10 @@ export const useAuthStore = defineStore('admin-auth', () => {
     try {
       if (!oauthError) {
         await loadCapabilities()
-        if (user.value) await loadMfaStatus()
+        if (user.value) {
+          await loadMfaStatus()
+          void ensureUserCsrfToken()
+        }
       }
       const clean = new URL(window.location.href)
       if (oauthError) {

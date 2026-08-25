@@ -58,6 +58,7 @@ public interface IMfaService
     Task<bool> VerifyStepUpWebAuthnAssertionAsync(string transactionId, AuthenticatorAssertionRawResponse response);
     Task MarkStepUpVerifiedAsync(string credentialKey);
     Task<bool> HasCredentialStepUpVerifiedAsync(string credentialKey);
+    Task<bool> HasAnyCredentialAsync(Guid userUid);
     Task<bool> HasRecentStepUpAsync(Guid userUid);
 }
 
@@ -155,6 +156,17 @@ public sealed class MfaService : IMfaService
 
     public async Task<bool> HasCredentialStepUpVerifiedAsync(string credentialKey)
         => await _cache.GetAsync<bool>(StepUpVerifiedPrefix + credentialKey);
+
+    /// <summary>
+    /// 账户是否注册了至少一种可用 MFA 方法（TOTP 或 WebAuthn），与 BeginStepUpAsync 的判定一致。
+    /// </summary>
+    public async Task<bool> HasAnyCredentialAsync(Guid userUid)
+    {
+        var settings = await _context.UserMfaSettings.AsNoTracking().FirstOrDefaultAsync(x => x.UserUid == userUid);
+        if (settings?.TotpEnabled == true && !string.IsNullOrWhiteSpace(settings.EncryptedTotpSecret))
+            return true;
+        return await _context.WebAuthnCredentials.AnyAsync(x => x.UserUid == userUid);
+    }
 
     public async Task<MfaLoginRequirement> BeginStepUpAsync(User user)
     {

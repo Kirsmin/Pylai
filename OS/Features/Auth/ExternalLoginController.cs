@@ -195,9 +195,11 @@ public class ExternalLoginController : ControllerBase
             }
 
             var currentStepUpKey = this.GetStepUpCredentialKey();
+            // 与 RequireMfaStepUpAsync 一致：账户未注册任何 MFA 方法时跳过 step-up（否则 HTTP 部署下绑定死锁）。
             if (string.IsNullOrEmpty(state.SessionStepUpKey)
                 || !string.Equals(state.SessionStepUpKey, currentStepUpKey, StringComparison.Ordinal)
-                || !await _mfa.HasCredentialStepUpVerifiedAsync(state.SessionStepUpKey))
+                || (!await _mfa.HasCredentialStepUpVerifiedAsync(state.SessionStepUpKey)
+                    && await _mfa.HasAnyCredentialAsync(currentUser.Uid)))
             {
                 _logger.LogWarning("外部登录绑定拒绝：发起会话未通过 Step-Up 或会话已变化 | uid:{Uid} | Provider:{Provider}",
                     currentUser.Uid, provider);

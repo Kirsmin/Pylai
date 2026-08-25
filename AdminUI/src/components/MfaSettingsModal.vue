@@ -12,6 +12,8 @@ const secret = ref('')
 const otpauthUri = ref('')
 const code = ref('')
 const passkeyMessage = ref('')
+// 浏览器安全上下文限制：HTTP 部署下 TOTP 注册被后端拒绝、Passkey API 不可用
+const insecureContext = !window.isSecureContext
 
 async function load() {
   await authStore.loadMfaStatus()
@@ -102,9 +104,9 @@ defineExpose({ open })
       <div class="admin-line-card">
         <div class="admin-line-main">
           <strong>TOTP 认证器</strong>
-          <span class="muted">{{ authStore.mfaTotpEnabled ? '已启用' : '未启用' }}</span>
+          <span class="muted">{{ authStore.mfaTotpEnabled ? '已启用' : insecureContext ? '未启用（需 HTTPS 部署才能设置）' : '未启用' }}</span>
         </div>
-        <NButton v-if="!authStore.mfaTotpEnabled && !secret" size="tiny" type="success" ghost :loading="busy" @click="beginTotp">设置</NButton>
+        <NButton v-if="!authStore.mfaTotpEnabled && !secret" size="tiny" type="success" ghost :loading="busy" :disabled="insecureContext" @click="beginTotp">设置</NButton>
       </div>
 
       <div class="admin-line-card">

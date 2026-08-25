@@ -122,10 +122,26 @@ public static class ControllerExtensions
 
         var credentialKey = controller.GetStepUpCredentialKey();
         if (credentialKey is null || !await mfa.HasCredentialStepUpVerifiedAsync(credentialKey))
+        {
+            // 账户未注册任何 MFA 方法时 step-up 无法完成（HTTP 部署下甚至无法注册），
+            // 跳过要求并写审计留痕；已注册方法则维持强制。
+            if (!await mfa.HasAnyCredentialAsync(user.Uid))
+            {
+                var services = controller.HttpContext.RequestServices;
+                await controller.AuditAsync(
+                    services.GetRequiredService<IAuditService>(),
+                    services.GetRequiredService<IpResolutionService>(),
+                    AuthConstants.EventTypes.MfaStepUpSkipped,
+                    user.Uid.ToString(), user.Email, true,
+                    "账户未注册任何 MFA 方法，敏感操作 MFA step-up 已跳过。");
+                return null;
+            }
+
             return new ObjectResult(new { success = false, error = "敏感操作需要 MFA 二次验证。", errorCode = "mfa_step_up_required" })
             {
                 StatusCode = StatusCodes.Status403Forbidden
             };
+        }
 
         return null;
     }
