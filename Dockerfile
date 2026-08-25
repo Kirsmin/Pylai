@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        postgresql-17 redis-server nginx supervisor openssl python3 \
+        postgresql-18 redis-server nginx supervisor openssl python3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ui /ui/dist /opt/pylai/ui

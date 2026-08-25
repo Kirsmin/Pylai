@@ -2006,7 +2006,7 @@ services:
     image: {postgres_image}
     restart: unless-stopped
     volumes:
-      - pylai_pgdata:/var/lib/postgresql/data
+      - pylai_pgdata:/var/lib/postgresql
     environment:
       POSTGRES_USER: ${{PYLAI_DB_USER:?}}
       POSTGRES_PASSWORD: ${{PYLAI_DB_PASSWORD:?}}
@@ -2101,8 +2101,8 @@ volumes:
         services_cfg = services_cfg or {}
 
         compose_text = cls._COMPOSE_TEMPLATE.format(
-            postgres_image=services_cfg.get("PostgresImage", "postgres:17-alpine"),
-            redis_image=services_cfg.get("RedisImage", "redis:7-alpine"),
+            postgres_image=services_cfg.get("PostgresImage", "postgres:18-alpine"),
+            redis_image=services_cfg.get("RedisImage", "redis:8-alpine"),
             backend_image=services_cfg.get("BackendImage", image),
             nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
             config_dir=CONFIG_DIR,
@@ -2497,6 +2497,16 @@ class AppContext:
 # ============================================================================
 # 通用服务函数
 # ============================================================================
+def _version_key(path: Path) -> tuple[int, ...]:
+    meta = parse_tar(path)
+    if meta is None:
+        return (0,)
+    try:
+        return tuple(int(part) for part in meta[0].split("."))
+    except ValueError:
+        return (0,)
+
+
 def select_tar(*, yes: bool, prompt: str = "请选择安装包") -> Path:
     tars = discover_tars()
     if not tars:
@@ -2508,7 +2518,9 @@ def select_tar(*, yes: bool, prompt: str = "请选择安装包") -> Path:
             for p in tars
             if (meta := parse_tar(p)) and meta[1] == host_arch()
         ]
-        return (compatible or tars)[0]
+        if not compatible:
+            raise ManageError(f"当前目录没有与主机架构 {host_arch()} 匹配的安装包。")
+        return sorted(compatible, key=_version_key)[-1]
 
     options: list[tuple[str, Path]] = []
     for path in tars:
@@ -2921,7 +2933,7 @@ class UpdateService:
             return
 
         self.ensure_manager_up_to_date(args.yes)
-        self.update_app(yes=args.yes)
+        self.update_app(yes=args.yes, force_pg_upgrade=args.force_pg_upgrade)
 
     def update_interactive(self) -> None:
         self.update_app(yes=False)
@@ -2943,9 +2955,11 @@ class UpdateService:
         updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
         updater.ensure_up_to_date(yes=yes)
 
-    def update_app(self, *, yes: bool) -> None:
+    def update_app(self, *, yes: bool, force_pg_upgrade: bool = False) -> None:
         ctx = self.ctx
         ctx.require_installed()
+
+        self.check_pg_major_upgrade(force=force_pg_upgrade)
 
         tar_path = select_tar(yes=yes, prompt="请选择新版本安装包")
         version, arch = parse_tar(tar_path) or (
@@ -2958,7 +2972,10 @@ class UpdateService:
         if ctx.manager.auto_backup:
             if ctx.docker.service_running():
                 out("==> 自动备份数据库...")
-                BackupService(ctx).export()
+                try:
+                    BackupService(ctx).export()
+                except ManageError as exc:
+                    out(f"[警告] 自动备份失败，已跳过（{exc}）。建议更新完成后立即手动备份。")
             else:
                 out("[警告] 后端未在运行（可能处于重启循环或已退出），已跳过自动备份。")
 
@@ -2982,6 +2999,40 @@ class UpdateService:
         ctx.state.save()
 
         out("更新完成。")
+
+    def check_pg_major_upgrade(self, *, force: bool = False) -> None:
+        """PostgreSQL 数据目录跨大版本不兼容，升级前 Fail Closed 拦截并给出迁移步骤。"""
+        compose_file = ComposeConfig.COMPOSE_FILE
+        if not compose_file.is_file():
+            return
+        text = compose_file.read_text(encoding="utf-8")
+        old = re.search(r"^\s*image:\s*(postgres:[\w.-]+)\s*$", text, re.MULTILINE)
+        if not old:
+            return
+        old_major = re.match(r"postgres:(\d+)", old.group(1))
+        if not old_major:
+            return
+        old_major = int(old_major.group(1))
+        services_cfg = self.ctx.manager.get("Compose", "Services", default={}) or {}
+        new_image = services_cfg.get("PostgresImage", "postgres:18-alpine")
+        new_major = re.match(r"postgres:(\d+)", new_image)
+        if not new_major or old_major == int(new_major.group(1)):
+            return
+        if force:
+            out(
+                f"[警告] 已确认 PostgreSQL 大版本升级（{old.group(1)} → {new_image}）。"
+                "请自行确保旧数据已备份或可丢弃。"
+            )
+            return
+        raise ManageError(
+            f"PostgreSQL 数据目录跨大版本不兼容（当前 {old.group(1)}，目标 {new_image}），无法直接更新。\n"
+            "迁移步骤：\n"
+            "  1) 确保当前后端 pg_dump 与数据库同版本后执行 `ManagePylai.py backup create` 备份数据；\n"
+            "  2) `docker volume rm pylai_pgdata` 删除旧数据目录（数据已备份）；\n"
+            "  3) 重新执行 `ManagePylai.py update --force-pg-upgrade`（新库将全新初始化）；\n"
+            "  4) `ManagePylai.py backup restore <备份名>` 恢复数据。\n"
+            "数据可丢弃时，可直接执行 `ManagePylai.py update --force-pg-upgrade`。"
+        )
 
     def preflight_config(self, image: str) -> None:
         if not CONFIG_FILE.is_file():
@@ -5423,6 +5474,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_p = subparsers.add_parser("update", help="更新 Pylai")
     update_p.add_argument("--check-only", action="store_true", help="只检查更新，不执行")
+    update_p.add_argument("--force-pg-upgrade", action="store_true", help="跳过 PostgreSQL 大版本升级检查（数据可丢弃或已迁移时使用）")
 
     self_update_p = subparsers.add_parser("self-update", help="更新管理工具自身")
     self_update_p.add_argument("--check-only", action="store_true")
