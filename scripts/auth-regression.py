@@ -511,9 +511,10 @@ class Suite:
             "redirect_uri": "https://oauthdebugger.com/debug",
             "client_id": "pylai-console", "client_secret": self.client_secret,
             "code_verifier": "wrong-verifier-" + "x" * 40})
-        self.check(st in (400, 401) and isinstance(body, dict)
-                   and body.get("error") == "invalid_grant",
-                   f"错误 verifier 应 invalid_grant，实际 {st} {raw[:200]}")
+        parsed = _json(body)
+        self.check(st in (400, 401) and isinstance(parsed, dict)
+                   and parsed.get("error") == "invalid_grant",
+                   f"错误 verifier 应 invalid_grant，实际 {st} {str(parsed)[:200]}")
 
         # 正确 verifier（重新授权拿新码：已有永久授权自动同意）
         verifier, challenge = pkce_pair()
@@ -529,29 +530,31 @@ class Suite:
             "redirect_uri": "https://oauthdebugger.com/debug",
             "client_id": "pylai-console", "client_secret": self.client_secret,
             "code_verifier": verifier})
-        self.check(st == 200 and isinstance(body, dict)
-                   and body.get("access_token") and body.get("refresh_token"),
-                   f"正确 PKCE 交换应得 access/refresh token，实际 {st} {raw[:200]}")
-        if st != 200:
+        tokens = _json(body)
+        if not self.check(st == 200 and isinstance(tokens, dict)
+                          and tokens.get("access_token") and tokens.get("refresh_token"),
+                          f"正确 PKCE 交换应得 access/refresh token，实际 {st} {str(tokens)[:200]}"):
             return
 
         # Refresh 轮换：R1 → R2，R1 重放拒绝
-        r1 = body["refresh_token"]
-        st, _, body2, raw = c.raw("POST", "/connect/token", form={
+        r1 = tokens["refresh_token"]
+        st, _, body2, _ = c.raw("POST", "/connect/token", form={
             "grant_type": "refresh_token", "refresh_token": r1,
             "client_id": "pylai-console", "client_secret": self.client_secret})
-        self.check(st == 200 and isinstance(body2, dict) and body2.get("refresh_token"),
-                   f"refresh 应 200 换新 token，实际 {st} {raw[:200]}")
-        if st != 200:
+        refreshed = _json(body2)
+        if not self.check(st == 200 and isinstance(refreshed, dict)
+                          and refreshed.get("refresh_token"),
+                          f"refresh 应 200 换新 token，实际 {st} {str(refreshed)[:200]}"):
             return
-        r2 = body2["refresh_token"]
+        r2 = refreshed["refresh_token"]
         self.check(r2 != r1, "refresh token 应轮换（新旧不同）")
-        st, _, body3, raw = c.raw("POST", "/connect/token", form={
+        st, _, body3, _ = c.raw("POST", "/connect/token", form={
             "grant_type": "refresh_token", "refresh_token": r1,
             "client_id": "pylai-console", "client_secret": self.client_secret})
-        self.check(st in (400, 401) and isinstance(body3, dict)
-                   and body3.get("error") == "invalid_grant",
-                   f"旧 refresh token 重放应 invalid_grant，实际 {st} {raw[:200]}")
+        replayed = _json(body3)
+        self.check(st in (400, 401) and isinstance(replayed, dict)
+                   and replayed.get("error") == "invalid_grant",
+                   f"旧 refresh token 重放应 invalid_grant，实际 {st} {str(replayed)[:200]}")
 
     # ---- G. MFA/WebAuthn 边界（Fido2 preview 专项）----
     def s_mfa_webauthn_edges(self, candidates: list[tuple[str, str]],
