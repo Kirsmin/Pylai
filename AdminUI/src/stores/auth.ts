@@ -209,7 +209,13 @@ export const useAuthStore = defineStore('admin-auth', () => {
 
   async function logout() {
     try {
-      await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' })
+      const data = await parseApiResponse<{ success: boolean; token: string }>(
+        await rawFetch('/api/auth/csrf')
+      )
+      await rawFetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': data?.token ?? '' }
+      })
     } catch {
     }
     user.value = null
