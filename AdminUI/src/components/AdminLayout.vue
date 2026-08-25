@@ -28,7 +28,13 @@ const icons: Record<string, Component> = {
 
 const themeIcon = computed(() => themeStore.isDark ? MoonStars : Sun)
 
+const avatarLetter = computed(() => {
+  const name = authStore.displayName || authStore.group || '?'
+  return name.trim().charAt(0) || '?'
+})
+
 function isActive(path: string): boolean {
+  if (path === '/') return route.path === '/'
   return route.path === path || route.path.startsWith(`${path}/`)
 }
 
@@ -49,10 +55,13 @@ function groupTone(group: string): string {
   <div class="admin-shell">
     <aside :class="['admin-sidebar', { open: sidebarOpen }]">
       <div class="sidebar-brand" @click="navTo('/')">
-        <span># Pylai</span>
+        <span class="brand-mark">#</span>
+        <span class="brand-name">Pylai</span>
+        <span class="brand-tag">ADMIN</span>
       </div>
 
       <nav class="sidebar-nav">
+        <span class="nav-section-label">管理功能</span>
         <button
           v-for="item in authStore.capabilities"
           :key="item.key"
@@ -67,25 +76,23 @@ function groupTone(group: string): string {
       </nav>
 
       <div class="sidebar-footer">
-        <div class="user-pill">
-          <span class="truncate" style="flex:1">{{ authStore.displayName }}</span>
-          <span
-            class="mono"
-            style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;"
-            :style="{
-              background: `var(--${groupTone(authStore.group)}-soft)`,
-              color: `var(--${groupTone(authStore.group)})`
-            }"
-          >{{ authStore.group }}</span>
+        <div class="user-card">
+          <span class="user-avatar">{{ avatarLetter }}</span>
+          <div class="user-meta">
+            <span class="user-name truncate">{{ authStore.displayName }}</span>
+            <span class="user-group" :style="{ color: `var(--${groupTone(authStore.group)})` }">
+              {{ authStore.group }}
+            </span>
+          </div>
         </div>
-        <div style="display:flex;gap:6px;">
+        <div class="footer-actions">
           <button class="icon-btn" title="切换主题" @click="themeStore.toggle()">
             <NIcon :component="themeIcon" />
           </button>
           <button class="icon-btn" title="MFA 设置" @click="mfaSettingsRef?.open()">
             <NIcon :component="ShieldLock" />
           </button>
-          <button class="icon-btn" title="退出" @click="authStore.logout()">
+          <button class="icon-btn" title="退出登录" @click="authStore.logout()">
             <NIcon :component="Logout" />
           </button>
         </div>
@@ -94,7 +101,7 @@ function groupTone(group: string): string {
 
     <div class="admin-main">
       <header class="admin-header">
-        <div style="display:flex;align-items:center;gap:10px;">
+        <div class="header-left">
           <button class="icon-btn mobile-menu-btn" @click="sidebarOpen = !sidebarOpen">
             <NIcon :component="sidebarOpen ? X : Menu2" />
           </button>
@@ -115,11 +122,3 @@ function groupTone(group: string): string {
     <MfaStepUpModal />
   </div>
 </template>
-
-<style scoped>
-.mobile-overlay {
-  position: fixed; inset: 0; z-index: 45;
-  background: rgba(0,0,0,0.3);
-  backdrop-filter: blur(2px);
-}
-</style>

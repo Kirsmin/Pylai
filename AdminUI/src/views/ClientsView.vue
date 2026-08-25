@@ -242,6 +242,4 @@ function arrayOutput(v: string[] | undefined): string {
 </template>
 
 <style scoped>
-.field-label { font-size:12px; color:var(--text-tertiary); margin-bottom:4px; display:block; }
-textarea.admin-input { resize:vertical; min-height:60px; }
 </style>

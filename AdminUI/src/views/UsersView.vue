@@ -438,21 +438,4 @@ function handleMore(key: string | number, user: AdminUserListItem) {
 </template>
 
 <style scoped>
-.admin-field { display: block; }
-.segmented {
-  display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
-}
-.segmented button {
-  padding: 6px 14px; border: none; background: var(--surface); color: var(--text-secondary);
-  font: inherit; font-size: 13px; cursor: pointer; transition: all var(--transition-fast);
-}
-.segmented button:hover { background: var(--surface-hover); color: var(--text-primary); }
-.segmented button.active { background: var(--success); color: #fff; }
-.pg-btn {
-  min-width: 32px; height: 32px; padding: 0 8px; border: 1px solid var(--border);
-  border-radius: var(--radius-sm); background: var(--surface); color: var(--text-secondary);
-  font-size: 13px; cursor: pointer; transition: all var(--transition-fast);
-}
-.pg-btn:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text-primary); background: var(--surface-hover); }
-.pg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
