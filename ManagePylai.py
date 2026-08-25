@@ -101,7 +101,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.0.25"
+__version__ = "0.0.26"
 
 
 class ManageError(Exception):
@@ -4778,6 +4778,20 @@ button { font: inherit; cursor: pointer; }
   color: var(--text); font-size: 12px; font-family: var(--mono); line-height: 1.7;
   white-space: pre-wrap; word-break: break-all;
 }
+#preview pre .cfg-line { display: block; padding: 0 4px; border-radius: 4px; }
+#preview pre .sec-block {
+  border-left: 3px solid transparent; padding-left: 6px; margin: 4px 0;
+  border-radius: 6px; transition: border-color .15s, background .15s;
+}
+#preview pre .sec-block.active-sec {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+#preview pre .sec-title { color: var(--accent); font-weight: 600; }
+#preview pre .focus-line { border-bottom: 2px solid var(--warning); }
+#preview pre .valid-line { border-bottom: 2px solid var(--ok); }
+#preview pre .invalid-line { border-bottom: 2px solid var(--danger); }
 
 /* ---------- 弹窗 ---------- */
 .modal-mask {
@@ -4791,14 +4805,24 @@ button { font: inherit; cursor: pointer; }
 }
 .modal h3 { padding: 18px 22px 0; font-size: 15px; }
 .modal .body { padding: 14px 22px; overflow-y: auto; flex: 1; }
-.diff-item {
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 10px 14px; margin-bottom: 8px; font-size: 13px;
+.diff-group { margin-bottom: 14px; }
+.diff-group h4 {
+  font-family: var(--mono); font-size: 13px; color: var(--accent);
+  margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
 }
-.diff-item .k { font-family: var(--mono); font-weight: 600; margin-bottom: 6px; }
-.diff-item .old { color: var(--danger); text-decoration: line-through; word-break: break-all; }
-.diff-item .new { color: var(--ok); word-break: break-all; }
-.diff-item .old, .diff-item .new { font-family: var(--mono); font-size: 12px; display: block; }
+.diff-item {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px; font-size: 13px;
+  align-items: start;
+}
+.diff-item .k { grid-column: 1 / -1; font-family: var(--mono); font-weight: 600; margin-bottom: 6px; color: var(--text); }
+.diff-item .old, .diff-item .new { font-family: var(--mono); font-size: 12px; word-break: break-all; line-height: 1.5; }
+.diff-item .old { color: var(--danger); }
+.diff-item .new { color: var(--ok); }
+.diff-item .old::before { content: "改前: "; color: var(--muted); font-family: inherit; }
+.diff-item .new::before { content: "改后: "; color: var(--muted); font-family: inherit; }
+.diff-empty { color: var(--muted); text-align: center; padding: 30px; }
 .modal .foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px 18px; }
 .btn {
   border: 1px solid var(--border-strong); background: var(--panel); color: var(--text);
@@ -4817,6 +4841,12 @@ button { font: inherit; cursor: pointer; }
 }
 #status-modal .body p { font-size: 13.5px; margin-bottom: 10px; color: var(--text); line-height: 1.6; }
 #status-modal .body b { font-family: var(--mono); font-weight: 600; }
+#status-modal .status-summary { font-size: 14px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+#status-modal .status-sec { margin-top: 12px; font-size: 13px; color: var(--accent); }
+#status-modal .status-row { margin: 4px 0 4px 12px; }
+#status-modal .status-row .old { color: var(--danger); text-decoration: line-through; font-family: var(--mono); font-size: 12px; }
+#status-modal .status-row .new { color: var(--ok); font-family: var(--mono); font-size: 12px; }
+#status-modal .status-err { color: var(--danger); font-size: 12px; }
 @media (max-width: 1000px) { #preview { display: none; } }
 @media (max-width: 720px) { #sidebar { display: none; } }
 </style>
@@ -4855,7 +4885,7 @@ button { font: inherit; cursor: pointer; }
   <div class="main">
     <aside id="sidebar"><h2>目录</h2><div id="sec-list"></div></aside>
     <section id="editor"><div class="empty">正在加载配置…</div></section>
-    <aside id="preview"><h2>配置文件预览（脱敏）</h2><pre id="preview-pre"></pre></aside>
+    <aside id="preview"><h2>配置文件预览</h2><pre id="preview-pre"></pre></aside>
   </div>
 </div>
 
@@ -4890,6 +4920,7 @@ let configData = null;          // 配置数据：{ sections, preview, path }
 let original = new Map();       // "Section.Key" -> 原始值
 let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret,rules,error}
 let activeSection = null;
+let currentFocusId = null;
 
 // 邮件模板可用占位符（与后端 EmailSender 渲染一致）
 const MAIL_PLACEHOLDERS = [
@@ -4972,7 +5003,7 @@ async function loadConfig() {
     for (const e of sec.entries)
       original.set(sec.name + "." + e.key, e.value);
   activeSection = configData.sections[0]?.name ?? null;
-  renderSidebar(); renderEditor(); renderPreview(); refreshDirty();
+  renderSidebar(); renderEditor(); renderPreview(); scrollPreviewToSection(activeSection); refreshDirty();
 }
 
 /* ---------- 序列化（与服务端 TomlText 一致） ---------- */
@@ -5088,7 +5119,7 @@ function renderSidebar() {
     if (sec.entries.some(e => edits.has(sec.name + "." + e.key))) badge = '<span class="badge">●</span>';
     if (sec.entries.some(e => edits.get(sec.name + "." + e.key)?.error)) badge = '<span class="badge err">!</span>';
     btn.innerHTML = escapeHtml("[" + sec.name + "]") + badge;
-    btn.onclick = () => { activeSection = sec.name; renderSidebar(); renderEditor(); setTab("editor"); };
+    btn.onclick = () => { activeSection = sec.name; renderSidebar(); renderEditor(); updatePreviewActiveSection(); scrollPreviewToSection(activeSection); setTab("editor"); };
     list.appendChild(btn);
   }
 }
@@ -5108,11 +5139,12 @@ function insertAtCursor(el, text) {
 
 /* ---------- 表单编辑 ---------- */
 function renderEditor() {
+  currentFocusId = null;
   const sec = configData.sections.find(s => s.name === activeSection);
   const box = $("#editor");
   if (!sec) { box.innerHTML = '<div class="empty">没有可编辑的配置段落</div>'; return; }
   box.innerHTML = "<h2>[" + escapeHtml(sec.name) + "]</h2>" +
-    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改实时校验，存在错误时不可提交</div>';
+    '<div class="hint">共 ' + sec.entries.length + ' 项</div>';
   const isMailTheme = sec.name === "MailTheme" || sec.name.startsWith("MailTheme.");
   for (const entry of sec.entries) {
     const id = sec.name + "." + entry.key;
@@ -5149,6 +5181,8 @@ function renderEditor() {
     const input = field.querySelector("input,select,textarea");
     input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
+    input.addEventListener("focus", () => previewFocusLine(sec.name, entry.key));
+    input.addEventListener("blur", () => previewBlurLine(sec.name, entry.key));
     field.querySelectorAll(".chip").forEach(chip =>
       chip.addEventListener("click", () => insertAtCursor(input, chip.dataset.text)));
     box.appendChild(field);
@@ -5208,13 +5242,99 @@ function patchPreview(text, section, key, serialized) {
   return text;
 }
 
+function stripLeadingComments(text) {
+  const lines = text.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    if (t === "" || t.startsWith("#")) i++;
+    else break;
+  }
+  return lines.slice(i).join("\n");
+}
+
 function renderPreview() {
   let text = configData.preview;
+  text = stripLeadingComments(text);
   for (const e of edits.values()) {
     const serialized = e.secret ? '"***"' : serialize(e.type, e.value);
     text = patchPreview(text, e.section, e.key, serialized);
   }
-  $("#preview-pre").textContent = text;
+
+  const lines = text.split("\n");
+  let html = "";
+  let currentSec = null;
+  let buffer = "";
+  function flush() {
+    if (currentSec !== null) {
+      const active = currentSec === activeSection ? " active-sec" : "";
+      html += '<div class="sec-block' + active + '" data-sec="' + escapeHtml(currentSec) + '">' + buffer + '</div>';
+    } else {
+      html += buffer;
+    }
+    buffer = "";
+  }
+  for (const line of lines) {
+    const m = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (m) {
+      flush();
+      currentSec = m[1].trim();
+      buffer += '<span class="cfg-line sec-title" data-sec="' + escapeHtml(currentSec) + '">' + escapeHtml(line) + '</span>';
+    } else if (currentSec !== null) {
+      const km = line.match(/^(\s*)([^=\s]+)\s*=\s*(.*)$/);
+      const keyAttr = km ? ' data-key="' + escapeHtml(km[2]) + '"' : "";
+      buffer += '<span class="cfg-line" data-sec="' + escapeHtml(currentSec) + '"' + keyAttr + '>' + escapeHtml(line) + '</span>';
+    } else {
+      buffer += '<span class="cfg-line">' + escapeHtml(line) + '</span>';
+    }
+  }
+  flush();
+  $("#preview-pre").innerHTML = html;
+  refreshPreviewHighlights();
+}
+
+function scrollPreviewToSection(secName) {
+  if (!secName) return;
+  const block = $("#preview-pre").querySelector('.sec-block[data-sec="' + CSS.escape(secName) + '"]');
+  if (block) block.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function updatePreviewActiveSection() {
+  $("#preview-pre").querySelectorAll(".sec-block").forEach(b =>
+    b.classList.toggle("active-sec", b.dataset.sec === activeSection));
+}
+
+function refreshPreviewHighlights() {
+  const pre = $("#preview-pre");
+  pre.querySelectorAll(".focus-line, .valid-line, .invalid-line").forEach(el =>
+    el.classList.remove("focus-line", "valid-line", "invalid-line"));
+  for (const [id, e] of edits) {
+    if (id === currentFocusId) continue;
+    const [section, key] = id.split(".");
+    const line = pre.querySelector('.cfg-line[data-sec="' + CSS.escape(section) + '"][data-key="' + CSS.escape(key) + '"]');
+    if (line) line.classList.add(e.error ? "invalid-line" : "valid-line");
+  }
+  if (currentFocusId) {
+    const [section, key] = currentFocusId.split(".");
+    const line = pre.querySelector('.cfg-line[data-sec="' + CSS.escape(section) + '"][data-key="' + CSS.escape(key) + '"]');
+    if (line) {
+      line.classList.remove("valid-line", "invalid-line");
+      line.classList.add("focus-line");
+    }
+  }
+}
+
+function previewFocusLine(section, key) {
+  currentFocusId = section + "." + key;
+  refreshPreviewHighlights();
+  const line = $("#preview-pre").querySelector('.cfg-line[data-sec="' + CSS.escape(section) + '"][data-key="' + CSS.escape(key) + '"]');
+  if (line) line.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function previewBlurLine(section, key) {
+  const id = section + "." + key;
+  if (currentFocusId === id) currentFocusId = null;
+  refreshPreviewHighlights();
 }
 
 /* ---------- 提交 ---------- */
@@ -5246,15 +5366,26 @@ $("#submit-btn").addEventListener("click", async () => {
   // 校验通过后展示变更确认弹窗
   const body = $("#diff-body");
   body.innerHTML = "";
+  const groups = {};
   for (const e of edits.values()) {
-    const oldV = displayValue(original.get(e.section + "." + e.key), e.secret);
-    const newV = displayValue(e.value, e.secret);
-    const div = document.createElement("div");
-    div.className = "diff-item";
-    div.innerHTML = '<div class="k">[' + escapeHtml(e.section) + "] " + escapeHtml(e.key) + "</div>" +
-      '<span class="old">' + escapeHtml(oldV) + "</span>" +
-      '<span class="new">' + escapeHtml(newV) + "</span>";
-    body.appendChild(div);
+    if (!groups[e.section]) groups[e.section] = [];
+    groups[e.section].push(e);
+  }
+  for (const sec of Object.keys(groups).sort()) {
+    const group = document.createElement("div");
+    group.className = "diff-group";
+    group.innerHTML = "<h4>[" + escapeHtml(sec) + "]</h4>";
+    for (const e of groups[sec]) {
+      const oldV = displayValue(original.get(e.section + "." + e.key), e.secret);
+      const newV = displayValue(e.value, e.secret);
+      const div = document.createElement("div");
+      div.className = "diff-item";
+      div.innerHTML = '<div class="k">' + escapeHtml(e.key) + "</div>" +
+        '<span class="old">' + escapeHtml(oldV) + "</span>" +
+        '<span class="new">' + escapeHtml(newV) + "</span>";
+      group.appendChild(div);
+    }
+    body.appendChild(group);
   }
   $("#diff-modal").style.display = "flex";
 });
@@ -5283,11 +5414,28 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
   if (t.dataset.tab === "catalog") $("#sidebar").scrollIntoView();
   if (t.dataset.tab === "editor") $("#editor").scrollIntoView();
   if (t.dataset.tab === "status") {
-    $("#status-body").innerHTML =
-      "<p>配置文件：<b>" + escapeHtml(configData.path) + "</b></p>" +
-      "<p>段落数：<b>" + configData.sections.length + "</b></p>" +
-      "<p>未提交变更：<b>" + edits.size + "</b> 项</p>" +
-      "<p>配置以 0600 权限原子写入；保存前经规则校验，容器运行中还会做权威校验；修改后需重启实例生效。</p>";
+    const body = $("#status-body");
+    if (edits.size === 0) {
+      body.innerHTML = "<p>当前没有未提交的变更。</p>";
+    } else {
+      const groups = {};
+      for (const e of edits.values()) {
+        if (!groups[e.section]) groups[e.section] = [];
+        groups[e.section].push(e);
+      }
+      let html = '<p class="status-summary">未提交变更 <b>' + edits.size + '</b> 项</p>';
+      for (const sec of Object.keys(groups).sort()) {
+        html += '<div class="status-sec"><b>[' + escapeHtml(sec) + ']</b></div>';
+        for (const e of groups[sec]) {
+          const oldV = displayValue(original.get(e.section + "." + e.key), e.secret);
+          const newV = displayValue(e.value, e.secret);
+          html += '<p class="status-row"><b>' + escapeHtml(e.key) + '</b>：<span class="old">' + escapeHtml(oldV) +
+            '</span> → <span class="new">' + escapeHtml(newV) + '</span>' +
+            (e.error ? ' <span class="status-err">（错误）</span>' : '') + '</p>';
+        }
+      }
+      body.innerHTML = html;
+    }
     $("#status-modal").style.display = "flex";
   }
 }));
