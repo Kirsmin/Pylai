@@ -14,6 +14,7 @@
   --accent: #3b6ef6;
   --accent-soft: #eef3fe;
   --danger: #d92d20;
+  --danger-soft: #fef3f2;
   --radius: 12px;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -27,7 +28,7 @@ body {
 }
 button { font: inherit; cursor: pointer; }
 
-/* ---------- 密码验证 ---------- */
+/* ---------- 临时密码验证 ---------- */
 #gate {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -87,6 +88,7 @@ button { font: inherit; cursor: pointer; }
 .tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 .topbar .spacer { flex: 1; }
 #dirty-dot { color: #f79009; font-size: 12px; display: none; }
+#err-count { color: var(--danger); font-size: 12px; display: none; margin-right: 8px; }
 #submit-btn {
   border: none; background: var(--accent); color: #fff;
   padding: 7px 20px; border-radius: 8px; font-size: 14px;
@@ -113,6 +115,7 @@ button { font: inherit; cursor: pointer; }
 .sec-item:hover { background: var(--bg); }
 .sec-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 .sec-item .badge { float: right; font-size: 11px; color: #f79009; }
+.sec-item .badge.err { color: var(--danger); font-weight: 700; }
 
 /* 编辑区 */
 #editor { flex: 1; overflow-y: auto; padding: 24px 32px; min-width: 0; }
@@ -124,9 +127,13 @@ button { font: inherit; cursor: pointer; }
   transition: border-color .15s;
 }
 .field.changed { border-color: #f79009; }
-.field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.field.invalid { border-color: var(--danger); }
+.field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 .field label .type { font-size: 11px; color: var(--muted); font-weight: 400; font-family: var(--mono); }
-.field label .secret-tag { font-size: 11px; color: var(--danger); background: #fef3f2; padding: 1px 7px; border-radius: 6px; }
+.field label .secret-tag { font-size: 11px; color: var(--danger); background: var(--danger-soft); padding: 1px 7px; border-radius: 6px; }
+.field .desc { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+.field .err { font-size: 12px; color: var(--danger); margin-top: 6px; display: none; }
+.field.invalid .err { display: block; }
 .field input[type=text], .field input[type=number], .field input[type=password], .field textarea, .field select {
   width: 100%; border: 1px solid var(--border); border-radius: 8px;
   padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
@@ -136,6 +143,7 @@ button { font: inherit; cursor: pointer; }
 .field input:focus, .field textarea:focus, .field select:focus {
   border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: #fff;
 }
+.field.invalid input, .field.invalid textarea, .field.invalid select { border-color: var(--danger); }
 .empty { color: var(--muted); font-size: 14px; padding: 40px; text-align: center; }
 
 /* 预览 */
@@ -218,6 +226,7 @@ button { font: inherit; cursor: pointer; }
     <button class="tab" data-tab="status">状态</button>
     <div class="spacer"></div>
     <span id="dirty-dot">&#9679; 有未提交变更</span>
+    <span id="err-count"></span>
     <button id="submit-btn" disabled>提交</button>
   </div>
   <div class="main">
@@ -254,9 +263,9 @@ button { font: inherit; cursor: pointer; }
 "use strict";
 const $ = (s) => document.querySelector(s);
 let token = null;
-let configData = null;          // { sections, preview, path }
-let original = new Map();       // "Section.Key" -> value
-let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret}
+let configData = null;          // 配置数据：{ sections, preview, path }
+let original = new Map();       // "Section.Key" -> 原始值
+let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret,rules,error}
 let activeSection = null;
 
 /* ---------- 临时密码 ---------- */
@@ -265,6 +274,7 @@ const gateBtn = $("#gate-btn");
 
 boxes.forEach((box, i) => {
   box.addEventListener("input", () => {
+    // 只允许字母数字并自动聚焦下一格
     box.value = box.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     if (box.value && i < boxes.length - 1) boxes[i + 1].focus();
     gateBtn.style.display = boxes.every(b => b.value) ? "inline-flex" : "none";
@@ -274,6 +284,7 @@ boxes.forEach((box, i) => {
     if (e.key === "Enter" && boxes.every(b => b.value)) doAuth();
   });
   box.addEventListener("paste", (e) => {
+    // 整段粘贴：过滤非法字符后按位填充
     e.preventDefault();
     const text = (e.clipboardData.getData("text") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     [...text].slice(0, 8).forEach((ch, j) => { if (boxes[j]) boxes[j].value = ch; });
@@ -285,6 +296,7 @@ boxes[0].focus();
 gateBtn.addEventListener("click", doAuth);
 
 async function doAuth() {
+  // 拼装 XXXX-XXXX 格式临时密码并验证
   const password = boxes.slice(0, 4).map(b => b.value).join("") + "-" + boxes.slice(4).map(b => b.value).join("");
   try {
     const res = await fetch("/api/auth", {
@@ -311,6 +323,7 @@ async function doAuth() {
 
 /* ---------- 数据加载 ---------- */
 async function api(path, options = {}) {
+  // 统一请求封装：自动附带 Bearer Token，HTTP 非 2xx 时抛出错误
   const res = await fetch(path, {
     ...options,
     headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, ...(options.headers || {}) },
@@ -321,6 +334,7 @@ async function api(path, options = {}) {
 }
 
 async function loadConfig() {
+  // 加载配置：建立原始值映射、重置编辑与错误状态
   configData = await api("/api/config");
   original.clear(); edits.clear();
   for (const sec of configData.sections)
@@ -345,6 +359,91 @@ function displayValue(v, secret) {
   return Array.isArray(v) ? "[" + v.join(", ") + "]" : String(v);
 }
 
+/* ---------- 实时校验（与服务端 check_rule 对齐） ---------- */
+function isValidUrl(s) {
+  // 校验 http(s)://host[:port] 形式的合法 URL
+  try {
+    const u = new URL(s);
+    return (u.protocol === "http:" || u.protocol === "https:") && !!u.hostname;
+  } catch { return false; }
+}
+function isValidIp(s) {
+  // 校验 IPv4（分段 0-255）或简化的 IPv6（十六进制冒号形式）
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const m = s.match(ipv4);
+  if (m) return m.slice(1).every(n => Number(n) <= 255);
+  return /^[0-9a-fA-F:]+$/.test(s) && s.includes(":") && (s.match(/:/g) || []).length <= 7;
+}
+function isValidCidr(s) {
+  // 校验 CIDR：合法 IP + /前缀长度
+  const idx = s.lastIndexOf("/");
+  if (idx <= 0) return false;
+  const ip = s.slice(0, idx), prefix = Number(s.slice(idx + 1));
+  if (!isValidIp(ip) || !Number.isInteger(prefix)) return false;
+  const max = ip.includes(":") ? 128 : 32;
+  return prefix >= 0 && prefix <= max;
+}
+function checkScalar(rules, value) {
+  // 按规则校验标量值，返回错误文案（空串表示通过）
+  const kind = rules.kind;
+  if (kind === "boolean") return "";
+  if (kind === "number") {
+    if (typeof value !== "number" || !isFinite(value)) return "必须是有限数字（不能为 NaN / Infinity）";
+    if (rules.allowNegOne && value === -1) return "";
+    if (rules.min != null && value < rules.min) return "不能小于 " + rules.min;
+    if (rules.max != null && value > rules.max) return "不能大于 " + rules.max;
+    return "";
+  }
+  if (kind === "enum") return rules.enum.includes(value) ? "" : "必须是以下之一: " + rules.enum.join(", ");
+  if (kind === "url") {
+    if (!value || !isValidUrl(value)) return "不是合法 URL（应为 http(s)://host[:port]）";
+    if (rules.noPath) {
+      const u = new URL(value);
+      if (u.pathname !== "" && u.pathname !== "/") return "不允许包含路径（应为 http(s)://host[:port]）";
+    }
+    return "";
+  }
+  if (kind === "ip") return isValidIp(value) ? "" : "不是合法 IP";
+  if (kind === "cidr") return isValidCidr(value) ? "" : "不是合法 CIDR";
+  if (kind === "string") {
+    if (rules.required && !String(value).trim()) return "不能为空";
+    return "";
+  }
+  return "";
+}
+function checkArray(rules, value) {
+  // 按规则校验数组及元素，返回错误文案
+  if (!Array.isArray(value)) return "必须是列表";
+  if (rules.required && value.length === 0) return "不能为空";
+  const elem = rules.arrayKind || "string";
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (elem === "url") {
+      if (!isValidUrl(item)) return "第 " + (i + 1) + " 项不是合法 URL: " + item;
+      if (rules.noPath) {
+        const u = new URL(item);
+        if (u.pathname !== "" && u.pathname !== "/") return "第 " + (i + 1) + " 项不允许包含路径";
+      }
+    }
+    if (elem === "ip" && !isValidIp(item)) return "第 " + (i + 1) + " 项不是合法 IP: " + item;
+    if (elem === "cidr" && !isValidCidr(item)) return "第 " + (i + 1) + " 项不是合法 CIDR: " + item;
+    if (elem === "number") {
+      if (typeof item !== "number" || !isFinite(item)) return "第 " + (i + 1) + " 项不是有效数字";
+      if (rules.allowNegOne && item === -1) continue;
+      if (rules.arrayMin != null && item < rules.arrayMin) return "第 " + (i + 1) + " 项不能小于 " + rules.arrayMin;
+      if (rules.arrayMax != null && item > rules.arrayMax) return "第 " + (i + 1) + " 项不能大于 " + rules.arrayMax;
+    }
+    if (elem === "string" && typeof item !== "string") return "第 " + (i + 1) + " 项必须是字符串";
+  }
+  return "";
+}
+function checkValue(rules, value) {
+  // 统一入口：数组走 checkArray，其余走 checkScalar
+  if (!rules) return "";
+  if (rules.kind === "array") return checkArray(rules, value);
+  return checkScalar(rules, value);
+}
+
 /* ---------- 目录 ---------- */
 function renderSidebar() {
   const list = $("#sec-list");
@@ -352,8 +451,10 @@ function renderSidebar() {
   for (const sec of configData.sections) {
     const btn = document.createElement("button");
     btn.className = "sec-item" + (sec.name === activeSection ? " active" : "");
-    const changed = sec.entries.some(e => edits.has(sec.name + "." + e.key));
-    btn.innerHTML = escapeHtml("[" + sec.name + "]") + (changed ? '<span class="badge">●</span>' : "");
+    let badge = "";
+    if (sec.entries.some(e => edits.has(sec.name + "." + e.key))) badge = '<span class="badge">●</span>';
+    if (sec.entries.some(e => edits.get(sec.name + "." + e.key)?.error)) badge = '<span class="badge err">!</span>';
+    btn.innerHTML = escapeHtml("[" + sec.name + "]") + badge;
     btn.onclick = () => { activeSection = sec.name; renderSidebar(); renderEditor(); setTab("editor"); };
     list.appendChild(btn);
   }
@@ -368,7 +469,7 @@ function renderEditor() {
   const box = $("#editor");
   if (!sec) { box.innerHTML = '<div class="empty">没有可编辑的配置段落</div>'; return; }
   box.innerHTML = "<h2>[" + escapeHtml(sec.name) + "]</h2>" +
-    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改后点击右上角「提交」</div>';
+    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改实时校验，存在错误时不可提交</div>';
   for (const entry of sec.entries) {
     const id = sec.name + "." + entry.key;
     const current = edits.has(id) ? edits.get(id).value : entry.value;
@@ -378,6 +479,8 @@ function renderEditor() {
     const label = '<label><span>' + escapeHtml(entry.key) + "</span>" +
       '<span class="type">' + entry.type + "</span>" +
       (entry.secret ? '<span class="secret-tag">敏感</span>' : "") + "</label>";
+    const desc = entry.desc ? '<div class="desc">' + escapeHtml(entry.desc) + "</div>" : "";
+    const errLine = '<div class="err"></div>';
     let control = "";
     if (entry.type === "boolean") {
       control = '<select><option value="true"' + (current ? " selected" : "") + '>true</option>' +
@@ -391,7 +494,7 @@ function renderEditor() {
     } else {
       control = '<input type="' + (entry.secret ? "password" : "text") + '" value="' + escapeHtml(String(current)) + '">';
     }
-    field.innerHTML = label + control;
+    field.innerHTML = label + desc + control + errLine;
     const input = field.querySelector("input,select,textarea");
     input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
@@ -400,6 +503,7 @@ function renderEditor() {
 }
 
 function onEdit(section, entry, raw) {
+  // 输入时：类型转换 + 实时校验 + 更新编辑记录与界面状态
   const id = section + "." + entry.key;
   let value;
   if (entry.type === "boolean") value = raw === "true";
@@ -407,14 +511,25 @@ function onEdit(section, entry, raw) {
   else if (entry.type === "array") {
     const parts = raw.split(",").map(s => s.trim()).filter(s => s !== "");
     const numeric = Array.isArray(entry.value) && entry.value.every(x => typeof x === "number");
-    value = numeric ? parts.map(Number).filter(n => !Number.isNaN(n)) : parts;
+    // 数值数组：仅将可解析项转为数字，非法项保留字符串以便实时报错
+    value = numeric ? parts.map(p => (p === "-1" || /^-?\d+(\.\d+)?$/.test(p)) ? Number(p) : p) : parts;
   } else value = raw;
 
-  if (JSON.stringify(value) === JSON.stringify(original.get(id))) edits.delete(id);
-  else edits.set(id, { section, key: entry.key, type: entry.type, value, secret: entry.secret });
+  let error = "";
+  if (entry.type === "number" && raw === "") error = "该项不能为空";
+  else error = checkValue(entry.rules, value);
 
+  if (JSON.stringify(value) === JSON.stringify(original.get(id))) edits.delete(id);
+  else edits.set(id, { section, key: entry.key, type: entry.type, value, secret: entry.secret, rules: entry.rules, error });
+
+  // 更新字段外观：橙色=有改动，红色=校验错误
   const field = document.querySelector('.field[data-id="' + CSS.escape(id) + '"]');
-  if (field) field.classList.toggle("changed", edits.has(id));
+  if (field) {
+    field.classList.toggle("changed", edits.has(id));
+    field.classList.toggle("invalid", Boolean(error));
+    const errEl = field.querySelector(".err");
+    if (errEl) errEl.textContent = error;
+  }
   renderSidebar(); renderPreview(); refreshDirty();
 }
 
@@ -451,12 +566,31 @@ function renderPreview() {
 
 /* ---------- 提交 ---------- */
 function refreshDirty() {
+  // 有未提交变更 且 全部通过实时校验 时才允许提交
   const dirty = edits.size > 0;
-  $("#submit-btn").disabled = !dirty;
+  const errCount = [...edits.values()].filter(e => e.error).length;
+  $("#submit-btn").disabled = !dirty || errCount > 0;
   $("#dirty-dot").style.display = dirty ? "inline" : "none";
+  $("#err-count").style.display = errCount > 0 ? "inline" : "none";
+  $("#err-count").textContent = "⚠ " + errCount + " 项校验错误";
 }
 
-$("#submit-btn").addEventListener("click", () => {
+$("#submit-btn").addEventListener("click", async () => {
+  // 提交前先请求服务端做整份配置校验（含跨键规则，如 SMTP 配对/CORS 通配符）
+  try {
+    const changes = [...edits.values()].map(e => ({ section: e.section, key: e.key, type: e.type, value: e.value }));
+    const result = await api("/api/validate", { method: "POST", body: JSON.stringify({ changes }) });
+    if (result.errors && result.errors.length) {
+      const first = result.errors[0];
+      toast("校验未通过：[" + first.section + "]. " + first.message);
+      return;
+    }
+  } catch (err) {
+    toast("校验请求失败：" + err.message);
+    return;
+  }
+
+  // 校验通过后展示变更确认弹窗
   const body = $("#diff-body");
   body.innerHTML = "";
   for (const e of edits.values()) {
@@ -500,7 +634,7 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
       "<p>配置文件：<b>" + escapeHtml(configData.path) + "</b></p>" +
       "<p>段落数：<b>" + configData.sections.length + "</b></p>" +
       "<p>未提交变更：<b>" + edits.size + "</b> 项</p>" +
-      "<p>配置以 0600 权限原子写入；修改后需重启实例生效。</p>";
+      "<p>配置以 0600 权限原子写入；保存前经规则校验，容器运行中还会做权威校验；修改后需重启实例生效。</p>";
     $("#status-modal").style.display = "flex";
   }
 }));

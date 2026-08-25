@@ -3406,13 +3406,13 @@ def serialize_editor_value(change: Json) -> str:
     if kind == "boolean":
         return "true" if value else "false"
     if kind == "number":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not _finite_number(value):
             raise ManageError(f"数值类型非法: {value!r}")
         return str(value)
     if kind == "array":
         items = value if isinstance(value, list) else []
         parts = [
-            str(x) if isinstance(x, (int, float)) and not isinstance(x, bool) else toml_str(str(x))
+            str(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and _finite_number(x) else toml_str(str(x))
             for x in items
         ]
         return f"[{', '.join(parts)}]"
@@ -3446,6 +3446,471 @@ def strip_multiline_value(text: str, marker: str, key: str) -> str:
         return text[:start] + "".join(lines) + text[end:]
 
     return text
+
+
+# ============================================================================
+# 配置字段校验规则（白名单，与后端 OS/Features/Config/ConfigValidator.cs 对齐）
+# 每条规则含中文说明 desc（下发前端展示）与校验约束（前端实时 + 服务端保存前双重校验）
+# ============================================================================
+def _bool(desc: str) -> Json:
+    """布尔值：无需额外约束，仅保证类型。"""
+    return {"kind": "boolean", "desc": desc}
+
+
+def _num(desc: str, lo: int, hi: int, *, neg1: bool = False) -> Json:
+    """数值：限制范围 [lo, hi]，neg1 表示允许 -1（如永久封禁）。"""
+    rule: Json = {"kind": "number", "desc": desc, "min": lo, "max": hi}
+    if neg1:
+        rule["allowNegOne"] = True
+    return rule
+
+
+def _enum(desc: str, values: list[str]) -> Json:
+    """枚举：值必须在可选列表内。"""
+    return {"kind": "enum", "desc": desc, "enum": values}
+
+
+def _url(desc: str, *, no_path: bool = False) -> Json:
+    """URL：必须为 http(s)://host[:port]，no_path 要求不带路径。"""
+    return {"kind": "url", "desc": desc, "noPath": no_path}
+
+
+def _ip(desc: str) -> Json:
+    return {"kind": "ip", "desc": desc}
+
+
+def _cidr(desc: str) -> Json:
+    return {"kind": "cidr", "desc": desc}
+
+
+def _str(desc: str, *, required: bool = False) -> Json:
+    rule: Json = {"kind": "string", "desc": desc}
+    if required:
+        rule["required"] = True
+    return rule
+
+
+def _arr(desc: str, elem: str, **extra: Any) -> Json:
+    """数组：元素按 elem（url/ip/cidr/number/string）逐个校验。"""
+    rule: Json = {"kind": "array", "desc": desc, "arrayKind": elem, **extra}
+    return rule
+
+
+EDITOR_RULES: dict[str, Json] = {
+    # ---- 服务监听 ----
+    "Server.Url": _url("后端监听地址，形如 http://0.0.0.0:5000，不带路径", no_path=True),
+    "Server.AllowedHosts": _arr("允许的请求 Host 白名单（生产禁止使用 *）", "string", required=True),
+    "Server.MaxRequestBodyMB": _num("单个请求体最大体积（MB），默认 2", 1, 1024),
+
+    # ---- 跨域 ----
+    "Cors.Enabled": _bool("是否启用 CORS"),
+    "Cors.AllowedOrigins": _arr("允许跨域的前端 Origin 列表", "url"),
+    "Cors.AllowedMethods": _arr("允许的 HTTP 方法", "string"),
+    "Cors.AllowedHeaders": _arr("允许的请求头", "string"),
+    "Cors.AllowCredentials": _bool("是否允许携带 Cookie 凭证（开启时禁止通配符 *）"),
+
+    # ---- 前端地址 ----
+    "Frontend.Url": _url("浏览器访问 Pylai 的公开地址"),
+
+    # ---- IP 解析 ----
+    "IpResolution.TrustedProxies": _arr("可信反向代理 IP 列表", "ip"),
+    "IpResolution.TrustedHeaders": _arr("可信的转发请求头", "string"),
+    "IpResolution.IpWhitelist": _arr("IP 白名单（空为不限制）", "ip"),
+    "IpResolution.ForwardedHeadersEnabled": _bool("是否启用转发请求头解析"),
+    "IpResolution.TrustedNetworks": _arr("可信代理 CIDR 网段列表", "cidr"),
+
+    # ---- 数据库 ----
+    "Database.ConnectionString": _str("PostgreSQL 连接串（含密码，保存后不可见）", required=True),
+
+    # ---- Redis ----
+    "Redis.Host": _str("Redis 主机地址", required=True),
+    "Redis.Port": _num("Redis 端口", 1, 65535),
+    "Redis.Password": _str("Redis 密码（不能为弱口令）"),
+    "Redis.Database": _num("Redis 数据库编号（0-15）", 0, 15),
+    "Redis.ConnectTimeoutMs": _num("Redis 连接超时（毫秒）", 1, 600000),
+
+    # ---- 备份 ----
+    "Backup.Directory": _str("备份文件保存目录", required=True),
+
+    # ---- 身份 ----
+    "Identity.EmailCodeExpireMinutes": _num("邮箱验证码有效期（分钟）", 1, 60),
+    "Identity.Password.RequiredLength": _num("普通用户密码最短长度", 4, 128),
+    "Identity.Password.AdminRequiredLength": _num("Admin/Max 密码最短长度", 4, 128),
+    "Identity.Password.CheckBreachedPasswords": _bool("是否校验密码已泄露（HIBP）"),
+    "Identity.Password.RequireDigit": _bool("密码是否必须包含数字"),
+    "Identity.Password.RequireLowercase": _bool("密码是否必须包含小写字母"),
+    "Identity.Password.RequireUppercase": _bool("密码是否必须包含大写字母"),
+    "Identity.Password.RequireNonAlphanumeric": _bool("密码是否必须包含特殊字符"),
+    "Identity.Lockout.DefaultTimeoutMinutes": _num("登录失败锁定时长（分钟）", 1, 1440),
+    "Identity.Lockout.MaxFailedAttempts": _num("触发锁定前的连续失败次数", 1, 100),
+
+    # ---- Cookie ----
+    "Cookie.Name": _str("身份认证 Cookie 名称", required=True),
+    "Cookie.SessionName": _str("会话 Cookie 名称", required=True),
+    "Cookie.HttpOnly": _bool("Cookie 是否禁止 JS 读取"),
+    "Cookie.SameSite": _enum("SameSite 策略", ["Unspecified", "None", "Lax", "Strict"]),
+    "Cookie.SecurePolicy": _enum("Cookie 安全策略", ["None", "Always", "SameAsRequest"]),
+    "Cookie.ExpireDays": _num("登录有效期（天）", 1, 365),
+    "Cookie.SlidingExpiration": _bool("是否滑动续期"),
+
+    # ---- 数据保护 ----
+    "DataProtection.KeyDirectory": _str("DataProtection 密钥目录（生产必须持久化）", required=True),
+
+    # ---- 部署 ----
+    "Deployment.BundledNginx": _bool("是否由镜像内置 Nginx 反代"),
+
+    # ---- OpenIddict ----
+    "OpenIddict.Issuer": _url("OIDC 颁发者地址，不带路径", no_path=True),
+    "OpenIddict.RequireHttps": _bool("是否强制 HTTPS（开启后 Issuer 必须为 https）"),
+    "OpenIddict.AccessToken.LifetimeHours": _num("访问令牌有效期（小时）", 1, 720),
+    "OpenIddict.AccessToken.DisableEncryption": _bool("是否禁用访问令牌加密"),
+    "OpenIddict.RefreshToken.LifetimeDays": _num("刷新令牌有效期（天）", 1, 365),
+    "OpenIddict.IdentityToken.LifetimeHours": _num("身份令牌有效期（小时）", 1, 720),
+    "OpenIddict.Endpoints.Authorize": _str("授权端点路径", required=True),
+    "OpenIddict.Endpoints.Token": _str("令牌端点路径", required=True),
+    "OpenIddict.Endpoints.UserInfo": _str("UserInfo 端点路径", required=True),
+    "OpenIddict.Endpoints.Introspect": _str("内省端点路径", required=True),
+    "OpenIddict.Endpoints.EndSession": _str("登出端点路径", required=True),
+    "OpenIddict.Grants.AuthorizationCode": _bool("启用授权码授权"),
+    "OpenIddict.Grants.RefreshToken": _bool("启用刷新令牌"),
+    "OpenIddict.Grants.ClientCredentials": _bool("启用客户端凭证"),
+    "OpenIddict.Scopes.openId": _bool("启用 openid scope"),
+    "OpenIddict.Scopes.profileBasic": _bool("启用 profile:basic scope"),
+    "OpenIddict.Scopes.profileMail": _bool("启用 profile:mail scope"),
+    "OpenIddict.Scopes.profileRole": _bool("启用 profile:role scope"),
+    "OpenIddict.Scopes.offlineAccess": _bool("启用 offline_access scope"),
+    "OpenIddict.Certificates.Signing.Path": _str("签名证书 PFX 路径（数据库托管签名时可为空）"),
+    "OpenIddict.Certificates.Signing.Password": _str("签名证书 PFX 密码"),
+    "OpenIddict.Certificates.Encryption.Path": _str("加密证书 PFX 路径（生产环境必需）"),
+    "OpenIddict.Certificates.Encryption.Password": _str("加密证书 PFX 密码"),
+    "OpenIddict.SigningKeyEncryption.KeyFile": _str("签名密钥加密 KEK 文件路径（数据库托管签名时必需）"),
+
+    # ---- 第三方登录 ----
+    "ExternalLogin.Facebook.AppId": _str("Facebook AppId（留空关闭）"),
+    "ExternalLogin.Facebook.AppSecret": _str("Facebook AppSecret"),
+    "ExternalLogin.Microsoft.ClientId": _str("Microsoft ClientId（留空关闭）"),
+    "ExternalLogin.Microsoft.ClientSecret": _str("Microsoft ClientSecret"),
+    "ExternalLogin.Github.ClientId": _str("GitHub ClientId（留空关闭）"),
+    "ExternalLogin.Github.ClientSecret": _str("GitHub ClientSecret"),
+
+    # ---- 邮件 ----
+    "Email.FromName": _str("发件人显示名称"),
+    "Email.FromAddress": _str("发件人邮箱（与 SMTP Host 同空或同配）"),
+    "Email.Smtp.Host": _str("SMTP 服务器地址（与 FromAddress 同空或同配）"),
+    "Email.Smtp.Port": _num("SMTP 端口（465 隐式 TLS / 587 STARTTLS / 25 明文）", 1, 65535),
+    "Email.Smtp.Security": _enum("SMTP 加密方式", ["None", "StartTls", "SslOnConnect"]),
+    "Email.Smtp.Username": _str("SMTP 用户名（无认证留空）"),
+    "Email.Smtp.Password": _str("SMTP 密码（无认证留空）"),
+
+    # ---- 邮件模板 ----
+    "MailTheme.Register.Title": _str("注册邮件标题", required=True),
+    "MailTheme.Register.Context": _str("注册邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.Bind.Title": _str("绑定邮箱邮件标题", required=True),
+    "MailTheme.Bind.Context": _str("绑定邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.Change.Title": _str("更换邮箱邮件标题", required=True),
+    "MailTheme.Change.Context": _str("更换邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.PasswordReset.Title": _str("密码重置邮件标题", required=True),
+    "MailTheme.PasswordReset.Context": _str("密码重置邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+
+    # ---- 日志 ----
+    "Logging.DefaultLevel": _enum("默认日志级别", ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"]),
+    "Logging.MicrosoftAspNetCoreLevel": _enum("ASP.NET Core 框架日志级别", ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"]),
+    "Logging.PylaiosLevel": _enum("Pylaios 日志级别", ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"]),
+
+    # ---- 清理 ----
+    "TokenCleanup.Enabled": _bool("是否定期清理过期 Token"),
+
+    # ---- 登录限流 ----
+    "LoginRateLimit.MaxFailuresPerIp": _num("单个 IP 触发封禁的失败次数", 1, 1000),
+    "LoginRateLimit.BanDurationMinutes": _arr("逐级封禁时长（分钟，-1 为永久）", "number", arrayMin=1, allowNegOne=True),
+    "LoginRateLimit.CooldownDays": _num("封禁冷却天数（0 为不冷却）", 0, 365),
+
+    # ---- 管理 API 限流 ----
+    "AdminRateLimit.MaxFailuresFirstBan": _num("管理 API 首次封禁失败次数", 1, 100),
+    "AdminRateLimit.FirstBanDurationSeconds": _num("管理 API 首次封禁时长（秒）", 1, 3600),
+    "AdminRateLimit.MaxFailuresSecondBan": _num("管理 API 二次封禁失败次数", 1, 1000),
+    "AdminRateLimit.SecondBanDurationHours": _num("管理 API 二次封禁时长（小时）", 1, 8760),
+
+    # ---- 邀请码 ----
+    "InviteCode.ServerPepper": _str("邀请码 HMAC 密钥（生产必须配置）", required=True),
+    "InviteCode.MaxFailuresPerIp": _num("单 IP 邀请码失败次数上限", 1, 1000),
+    "InviteCode.BanDurationHours": _num("邀请码失败封禁时长（小时）", 1, 8760),
+    "InviteCode.EmailCodeBanDurationHours": _num("邮箱验证码失败封禁时长（小时）", 1, 8760),
+    "InviteCode.UsernameCheckMaxPerHourPerIp": _num("单 IP 每小时用户名检查次数上限", 1, 10000),
+    "InviteCode.MaxRedemptions": _num("单个邀请码最大核销次数", 1, 100000),
+    "InviteCode.DefaultLifetimeHours": _num("邀请码默认有效期（小时）", 1, 8760),
+
+    # ---- 种子账号 ----
+    "Seeds.DefaultAdmin.Email": _str("初始 Admin 邮箱/登录名"),
+    "Seeds.DefaultAdmin.Password": _str("初始 Admin 密码（留空由后端按策略生成）"),
+    "Seeds.DefaultAdmin.DisplayName": _str("初始 Admin 显示名"),
+    "Seeds.DefaultUser.Email": _str("初始 Normal 邮箱/登录名"),
+    "Seeds.DefaultUser.Password": _str("初始 Normal 密码（留空由后端按策略生成）"),
+    "Seeds.DefaultUser.DisplayName": _str("初始 Normal 显示名"),
+    "Seeds.DefaultMax.Email": _str("初始 Max 邮箱/登录名"),
+    "Seeds.DefaultMax.Password": _str("初始 Max 密码（留空由后端按策略生成）"),
+    "Seeds.DefaultMax.DisplayName": _str("初始 Max 显示名"),
+
+    # ---- 用户 Token ----
+    "UserToken.DefaultLifetimeDays": _num("用户 Token 默认有效期（天，0 为永久，生产上限 90）", 0, 90),
+
+    # ---- 二次验证限流 ----
+    "ConfirmationRateLimit.MaxFailures": _num("特殊功能二次验证失败次数上限", 1, 1000),
+    "ConfirmationRateLimit.BanDurationHours": _num("二次验证失败封禁时长（小时）", 1, 8760),
+
+    # ---- MFA ----
+    "Mfa.RelyingPartyId": _str("WebAuthn 依赖方 ID（通常为域名，必填）", required=True),
+    "Mfa.RelyingPartyName": _str("WebAuthn 依赖方显示名称"),
+    "Mfa.Origins": _arr("WebAuthn 允许的 Origin 列表（必填，不带路径）", "url", noPath=True, required=True),
+    "Mfa.ChallengeLifetimeMinutes": _num("MFA 挑战有效期（分钟）", 1, 60),
+    "Mfa.RequireForAdmin": _bool("Admin 及以上角色是否强制 MFA"),
+    "Mfa.RequireWebAuthnForMax": _bool("Max 角色是否强制使用 WebAuthn（需 HTTPS）"),
+}
+
+# 密码弱值（与 deploy/entrypoint.py WEAK_SECRETS 保持一致）
+EDITOR_WEAK_SECRETS = {"change-me", "changeme", "password", "secret", "123456", "pylai"}
+DB_PASSWORD_RE = re.compile(r"Password=([^;]+)")  # 仅用于连接串弱口令检测
+
+
+def _finite_number(value: Any) -> bool:
+    """过滤 NaN / Infinity 等非法数值（Python 会序列化它们进 TOML 造成启动失败）。"""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) == float(value) and abs(float(value)) != float("inf")
+
+
+def _value_error(message: str) -> list[str]:
+    return [message] if message else []
+
+
+def _check_scalar(rule: Json, value: Any) -> list[str]:
+    """按规则校验单个标量值，返回错误文案列表。"""
+    kind = rule.get("kind")
+    errors: list[str] = []
+
+    if kind == "boolean":
+        return errors
+
+    if kind == "number":
+        if not _finite_number(value):
+            return [f"必须是有限数字（不能为 NaN / Infinity）"]
+        lo, hi = rule.get("min"), rule.get("max")
+        if rule.get("allowNegOne") and value == -1:
+            return errors
+        if lo is not None and value < lo:
+            errors.append(f"不能小于 {lo}")
+        if hi is not None and value > hi:
+            errors.append(f"不能大于 {hi}")
+        return errors
+
+    if kind == "enum":
+        allowed = rule.get("enum", [])
+        if value not in allowed:
+            return [f"必须是以下之一: {', '.join(allowed)}"]
+        return errors
+
+    if kind in ("url", "ip", "cidr"):
+        if not isinstance(value, str) or not value.strip():
+            return [f"{kind.upper()} 不能为空"]
+        value = value.strip()
+        if kind == "url":
+            if not is_valid_url(value):
+                return ["不是合法 URL（应为 http(s)://host[:port]）"]
+            if rule.get("noPath") and urlparse(value).path not in ("", "/"):
+                return ["不允许包含路径（应为 http(s)://host[:port]）"]
+        elif kind == "ip":
+            if not is_valid_ip(value):
+                return [f"不是合法 IP: {value}"]
+        elif kind == "cidr":
+            if not is_valid_cidr(value):
+                return [f"不是合法 CIDR: {value}"]
+        return errors
+
+    if kind == "string":
+        if not isinstance(value, str):
+            return ["必须是字符串"]
+        if rule.get("required") and not value.strip():
+            return ["不能为空"]
+        if rule.get("pattern") and not re.fullmatch(rule["pattern"], value):
+            return [f"格式不合法: {value}"]
+        return errors
+
+    return errors
+
+
+def _check_array(rule: Json, value: Any) -> list[str]:
+    """按规则校验数组（及数组内元素）。"""
+    if not isinstance(value, list):
+        return ["必须是列表"]
+
+    if rule.get("required") and not value:
+        return ["不能为空"]
+
+    elem = rule.get("arrayKind", "string")
+    errors: list[str] = []
+    for index, item in enumerate(value):
+        if elem == "url":
+            if not (isinstance(item, str) and is_valid_url(item)):
+                errors.append(f"第 {index + 1} 项不是合法 URL: {item}")
+            elif rule.get("noPath") and urlparse(item).path not in ("", "/"):
+                errors.append(f"第 {index + 1} 项不允许包含路径: {item}")
+        elif elem == "ip":
+            if not (isinstance(item, str) and is_valid_ip(item)):
+                errors.append(f"第 {index + 1} 项不是合法 IP: {item}")
+        elif elem == "cidr":
+            if not (isinstance(item, str) and is_valid_cidr(item)):
+                errors.append(f"第 {index + 1} 项不是合法 CIDR: {item}")
+        elif elem == "number":
+            if not _finite_number(item):
+                errors.append(f"第 {index + 1} 项不是有效数字: {item}")
+                continue
+            if rule.get("allowNegOne") and item == -1:
+                continue
+            lo, hi = rule.get("arrayMin"), rule.get("arrayMax")
+            if lo is not None and item < lo:
+                errors.append(f"第 {index + 1} 项不能小于 {lo}")
+            if hi is not None and item > hi:
+                errors.append(f"第 {index + 1} 项不能大于 {hi}")
+        elif elem == "string":
+            if not isinstance(item, str):
+                errors.append(f"第 {index + 1} 项必须是字符串")
+    return errors
+
+
+def check_rule(rule: Json, value: Any) -> list[str]:
+    """按规则校验一个值（数组走 _check_array，其余走 _check_scalar）。"""
+    if rule.get("kind") == "array":
+        return _check_array(rule, value)
+    return _check_scalar(rule, value)
+
+
+def extract_connection_string_password(connection_string: str) -> str:
+    """从连接串中提取密码，仅用于弱口令检测。"""
+    if m := DB_PASSWORD_RE.search(connection_string):
+        return m.group(1).strip()
+    return ""
+
+
+def weak_secret_hit(value: str) -> bool:
+    """命中已知弱值清单则拒绝（与后端 ProductionSecurityGate / entrypoint 一致）。"""
+    return value.strip().lower() in EDITOR_WEAK_SECRETS
+
+
+def validate_full_text(text: str) -> list[tuple[str, str, str]]:
+    """对整份配置做语义校验（与后端四阶段校验对齐，Fail Closed）。
+
+    返回 [(section, key, 错误信息)]，空列表表示通过。
+    """
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        return [("", "", f"配置不是合法 TOML: {exc}")]
+
+    issues: list[tuple[str, str, str]] = []
+
+    def visit(path: str, table: dict[str, Any]) -> None:
+        for key, value in table.items():
+            if isinstance(value, dict):
+                visit(f"{path}.{key}" if path else key, value)
+                continue
+            rule = EDITOR_RULES.get(f"{path}.{key}")
+            if not rule:
+                continue
+            for message in check_rule(rule, value):
+                issues.append((path, key, f"[{path}].{key}：{message}"))
+
+    for key, value in parsed.items():
+        if isinstance(value, dict):
+            visit(key, value)
+        else:
+            rule = EDITOR_RULES.get(key)
+            if rule:
+                for message in check_rule(rule, value):
+                    issues.append(("", key, f"{key}：{message}"))
+
+    # ---- 跨键校验（与 ConfigValidator.cs 对齐） ----
+    def g(path: str, default: Any = None) -> Any:
+        current: Any = parsed
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        return current
+
+    smtp_host = g("Email.Smtp.Host", "")
+    from_address = g("Email.FromAddress", "")
+    if bool(smtp_host.strip()) != bool(from_address.strip()):
+        issues.append(("Email", "Email", "[Email] 邮件服务未配置完整：Email.Smtp.Host 与 Email.FromAddress 必须同时配置或同时留空"))
+
+    smtp_security = g("Email.Smtp.Security", "")
+    smtp_port = g("Email.Smtp.Port", 587)
+    if smtp_port == 465 and str(smtp_security).lower() != "sslconnect":
+        issues.append(("Email.Smtp", "Security", "[Email.Smtp].Security：端口 465 为隐式 TLS，必须使用 SslOnConnect"))
+
+    allow_credentials = g("Cors.AllowCredentials", False)
+    allowed_origins = g("Cors.AllowedOrigins", [])
+    if allow_credentials and "*" in allowed_origins:
+        issues.append(("Cors", "AllowedOrigins", "[Cors].AllowedOrigins：AllowCredentials=true 时禁止使用通配符 *"))
+
+    require_https = g("OpenIddict.RequireHttps", False)
+    issuer = g("OpenIddict.Issuer", "")
+    if require_https and not str(issuer).startswith("https://"):
+        issues.append(("OpenIddict", "Issuer", "[OpenIddict].Issuer：RequireHttps=true 时必须使用 https"))
+
+    # 邮件模板正文必须包含验证码占位符
+    for theme in ("Register", "Bind", "Change", "PasswordReset"):
+        context = g(f"MailTheme.{theme}.Context", "")
+        if isinstance(context, str) and context and "%%CaptchaCode%%" not in context:
+            issues.append((f"MailTheme.{theme}", "Context", f"[MailTheme.{theme}].Context：正文必须包含占位符 %%CaptchaCode%%"))
+
+    # ---- 弱口令检测 ----
+    db_connection = g("Database.ConnectionString", "")
+    if isinstance(db_connection, str) and weak_secret_hit(extract_connection_string_password(db_connection)):
+        issues.append(("Database", "ConnectionString", "[Database].ConnectionString：数据库密码为已知弱值，请使用随机强密码"))
+    redis_password = g("Redis.Password", "")
+    if isinstance(redis_password, str) and redis_password and weak_secret_hit(redis_password):
+        issues.append(("Redis", "Password", "[Redis].Password：Redis 密码为已知弱值，请使用随机强密码"))
+
+    return issues
+
+
+# 供前端实时校验下发的精简规则（保留约束，去除内部字段）
+def frontend_rule(rule: Json) -> Json:
+    out_rule: Json = {"kind": rule.get("kind"), "desc": rule.get("desc", "")}
+    for field in ("enum", "min", "max", "required", "noPath", "allowNegOne", "arrayKind", "arrayMin", "arrayMax"):
+        if field in rule:
+            out_rule[field] = rule[field]
+    return out_rule
+
+
+# 网页编辑器运行上下文（由 ManagePylai 注入 docker/state，用于保存后容器权威校验）
+EDITOR_CTX: dict[str, Any] = {}
+
+
+def authoritative_validate() -> list[str]:
+    """若 backend 容器正在运行，用容器内 CLI 做权威校验（config validate）。
+
+    返回错误文案列表，空列表表示通过或容器不可用。
+    """
+    docker = EDITOR_CTX.get("docker")
+    if docker is None:
+        return []
+    try:
+        if not docker.service_running("backend"):
+            return []
+    except Exception:
+        return []
+
+    result = docker.exec_pylaios(
+        "config",
+        "validate",
+        "--config",
+        PYLAI_CONFIG_ARG,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode == 0:
+        return []
+    output = (result.stdout + result.stderr).strip()
+    return [output or "容器内 config validate 校验未通过"]
 
 
 class ConfigEditorServer(ThreadingHTTPServer):
@@ -3533,6 +3998,20 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "临时密码错误"}, 401)
             return
 
+        if path == "/api/validate":
+            if not self._authorized():
+                self._send_json({"error": "未授权"}, 401)
+                return
+            try:
+                issues = self._validate_changes(data.get("changes"))
+            except ManageError as exc:
+                self._send_json({"error": str(exc)}, 400)
+                return
+            self._send_json({"ok": not issues, "errors": [
+                {"section": sec, "key": key, "message": msg} for sec, key, msg in issues
+            ]})
+            return
+
         if path == "/api/save":
             if not self._authorized():
                 self._send_json({"error": "未授权"}, 401)
@@ -3542,7 +4021,7 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             except ManageError as exc:
                 self._send_json({"error": str(exc)}, 400)
                 return
-            self._send_json({"ok": True, "preview": preview})
+            self._send_json({"ok": True, "preview": preview, "authoritative": True})
             return
 
         self._send_json({"error": "Not Found"}, 404)
@@ -3565,11 +4044,14 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             for key, value in table.items():
                 if isinstance(value, dict):
                     continue
+                rule = EDITOR_RULES.get(f"{path}.{key}")
                 entries.append({
                     "key": key,
                     "type": editor_value_kind(value),
                     "value": value,
                     "secret": bool(re.search(r"Password|Secret|ConnectionString", key, re.IGNORECASE)),
+                    "desc": rule.get("desc", "") if rule else "",
+                    "rules": frontend_rule(rule) if rule else {"kind": editor_value_kind(value), "desc": ""},
                 })
             if entries:
                 sections.append({"name": path, "entries": entries})
@@ -3587,9 +4069,8 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             "preview": mask_config_text(text),
         }
 
-    def _apply_changes(self, changes: Any) -> str:
-        if not CONFIG_FILE.is_file():
-            raise ManageError("配置文件不存在")
+    def _build_changes_text(self, changes: Any) -> str:
+        """把变更应用到当前配置文本，返回新文本（不写盘）。"""
         if not isinstance(changes, list) or not changes:
             raise ManageError("没有需要提交的变更")
         if len(changes) > 500:
@@ -3612,16 +4093,40 @@ class ConfigEditorHandler(BaseHTTPRequestHandler):
             t.text = strip_multiline_value(t.text, marker, key)
             t.set(marker, key, serialize_editor_value(change), required=True)
 
-        new_text = str(t)
+        return str(t)
+
+    def _validate_changes(self, changes: Any) -> list[tuple[str, str, str]]:
+        """对变更后的整份配置做语义校验（含跨键规则），返回问题列表。"""
+        new_text = self._build_changes_text(changes)
         try:
             tomllib.loads(new_text)
         except tomllib.TOMLDecodeError as exc:
-            raise ManageError(f"变更后配置不是合法 TOML，已放弃写入: {exc}") from exc
+            raise ManageError(f"变更后配置不是合法 TOML: {exc}") from exc
+        return validate_full_text(new_text)
 
+    def _apply_changes(self, changes: Any) -> str:
+        if not CONFIG_FILE.is_file():
+            raise ManageError("配置文件不存在")
+
+        new_text = self._build_changes_text(changes)
+
+        # 语义校验（Fail Closed）：有错误绝不写盘
+        issues = validate_full_text(new_text)
+        if issues:
+            detail = "\n".join(msg for _, _, msg in issues[:10])
+            more = f"（另有 {len(issues) - 10} 项）" if len(issues) > 10 else ""
+            raise ManageError(f"配置校验未通过，已拒绝保存：\n{detail}{more}")
+
+        old_text = CONFIG_FILE.read_text(encoding="utf-8")
         atomic_write(CONFIG_FILE, new_text)
+
+        # 容器权威校验兜底：失败则还原旧配置
+        container_errors = authoritative_validate()
+        if container_errors:
+            atomic_write(CONFIG_FILE, old_text)
+            raise ManageError("容器内 config validate 校验未通过，已还原原配置：\n" + "\n".join(container_errors))
+
         return mask_config_text(new_text)
-
-
 
 CONFIG_EDITOR_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -3639,6 +4144,7 @@ CONFIG_EDITOR_HTML = r"""<!DOCTYPE html>
   --accent: #3b6ef6;
   --accent-soft: #eef3fe;
   --danger: #d92d20;
+  --danger-soft: #fef3f2;
   --radius: 12px;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -3652,7 +4158,7 @@ body {
 }
 button { font: inherit; cursor: pointer; }
 
-/* ---------- 密码验证 ---------- */
+/* ---------- 临时密码验证 ---------- */
 #gate {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -3712,6 +4218,7 @@ button { font: inherit; cursor: pointer; }
 .tab.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 .topbar .spacer { flex: 1; }
 #dirty-dot { color: #f79009; font-size: 12px; display: none; }
+#err-count { color: var(--danger); font-size: 12px; display: none; margin-right: 8px; }
 #submit-btn {
   border: none; background: var(--accent); color: #fff;
   padding: 7px 20px; border-radius: 8px; font-size: 14px;
@@ -3738,6 +4245,7 @@ button { font: inherit; cursor: pointer; }
 .sec-item:hover { background: var(--bg); }
 .sec-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 .sec-item .badge { float: right; font-size: 11px; color: #f79009; }
+.sec-item .badge.err { color: var(--danger); font-weight: 700; }
 
 /* 编辑区 */
 #editor { flex: 1; overflow-y: auto; padding: 24px 32px; min-width: 0; }
@@ -3749,9 +4257,13 @@ button { font: inherit; cursor: pointer; }
   transition: border-color .15s;
 }
 .field.changed { border-color: #f79009; }
-.field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 8px; }
+.field.invalid { border-color: var(--danger); }
+.field label { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 .field label .type { font-size: 11px; color: var(--muted); font-weight: 400; font-family: var(--mono); }
-.field label .secret-tag { font-size: 11px; color: var(--danger); background: #fef3f2; padding: 1px 7px; border-radius: 6px; }
+.field label .secret-tag { font-size: 11px; color: var(--danger); background: var(--danger-soft); padding: 1px 7px; border-radius: 6px; }
+.field .desc { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+.field .err { font-size: 12px; color: var(--danger); margin-top: 6px; display: none; }
+.field.invalid .err { display: block; }
 .field input[type=text], .field input[type=number], .field input[type=password], .field textarea, .field select {
   width: 100%; border: 1px solid var(--border); border-radius: 8px;
   padding: 8px 12px; font-size: 13.5px; font-family: var(--mono);
@@ -3761,6 +4273,7 @@ button { font: inherit; cursor: pointer; }
 .field input:focus, .field textarea:focus, .field select:focus {
   border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: #fff;
 }
+.field.invalid input, .field.invalid textarea, .field.invalid select { border-color: var(--danger); }
 .empty { color: var(--muted); font-size: 14px; padding: 40px; text-align: center; }
 
 /* 预览 */
@@ -3843,6 +4356,7 @@ button { font: inherit; cursor: pointer; }
     <button class="tab" data-tab="status">状态</button>
     <div class="spacer"></div>
     <span id="dirty-dot">&#9679; 有未提交变更</span>
+    <span id="err-count"></span>
     <button id="submit-btn" disabled>提交</button>
   </div>
   <div class="main">
@@ -3879,9 +4393,9 @@ button { font: inherit; cursor: pointer; }
 "use strict";
 const $ = (s) => document.querySelector(s);
 let token = null;
-let configData = null;          // { sections, preview, path }
-let original = new Map();       // "Section.Key" -> value
-let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret}
+let configData = null;          // 配置数据：{ sections, preview, path }
+let original = new Map();       // "Section.Key" -> 原始值
+let edits = new Map();          // "Section.Key" -> {section,key,type,value,secret,rules,error}
 let activeSection = null;
 
 /* ---------- 临时密码 ---------- */
@@ -3890,6 +4404,7 @@ const gateBtn = $("#gate-btn");
 
 boxes.forEach((box, i) => {
   box.addEventListener("input", () => {
+    // 只允许字母数字并自动聚焦下一格
     box.value = box.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     if (box.value && i < boxes.length - 1) boxes[i + 1].focus();
     gateBtn.style.display = boxes.every(b => b.value) ? "inline-flex" : "none";
@@ -3899,6 +4414,7 @@ boxes.forEach((box, i) => {
     if (e.key === "Enter" && boxes.every(b => b.value)) doAuth();
   });
   box.addEventListener("paste", (e) => {
+    // 整段粘贴：过滤非法字符后按位填充
     e.preventDefault();
     const text = (e.clipboardData.getData("text") || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
     [...text].slice(0, 8).forEach((ch, j) => { if (boxes[j]) boxes[j].value = ch; });
@@ -3910,6 +4426,7 @@ boxes[0].focus();
 gateBtn.addEventListener("click", doAuth);
 
 async function doAuth() {
+  // 拼装 XXXX-XXXX 格式临时密码并验证
   const password = boxes.slice(0, 4).map(b => b.value).join("") + "-" + boxes.slice(4).map(b => b.value).join("");
   try {
     const res = await fetch("/api/auth", {
@@ -3936,6 +4453,7 @@ async function doAuth() {
 
 /* ---------- 数据加载 ---------- */
 async function api(path, options = {}) {
+  // 统一请求封装：自动附带 Bearer Token，HTTP 非 2xx 时抛出错误
   const res = await fetch(path, {
     ...options,
     headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token, ...(options.headers || {}) },
@@ -3946,6 +4464,7 @@ async function api(path, options = {}) {
 }
 
 async function loadConfig() {
+  // 加载配置：建立原始值映射、重置编辑与错误状态
   configData = await api("/api/config");
   original.clear(); edits.clear();
   for (const sec of configData.sections)
@@ -3970,6 +4489,91 @@ function displayValue(v, secret) {
   return Array.isArray(v) ? "[" + v.join(", ") + "]" : String(v);
 }
 
+/* ---------- 实时校验（与服务端 check_rule 对齐） ---------- */
+function isValidUrl(s) {
+  // 校验 http(s)://host[:port] 形式的合法 URL
+  try {
+    const u = new URL(s);
+    return (u.protocol === "http:" || u.protocol === "https:") && !!u.hostname;
+  } catch { return false; }
+}
+function isValidIp(s) {
+  // 校验 IPv4（分段 0-255）或简化的 IPv6（十六进制冒号形式）
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const m = s.match(ipv4);
+  if (m) return m.slice(1).every(n => Number(n) <= 255);
+  return /^[0-9a-fA-F:]+$/.test(s) && s.includes(":") && (s.match(/:/g) || []).length <= 7;
+}
+function isValidCidr(s) {
+  // 校验 CIDR：合法 IP + /前缀长度
+  const idx = s.lastIndexOf("/");
+  if (idx <= 0) return false;
+  const ip = s.slice(0, idx), prefix = Number(s.slice(idx + 1));
+  if (!isValidIp(ip) || !Number.isInteger(prefix)) return false;
+  const max = ip.includes(":") ? 128 : 32;
+  return prefix >= 0 && prefix <= max;
+}
+function checkScalar(rules, value) {
+  // 按规则校验标量值，返回错误文案（空串表示通过）
+  const kind = rules.kind;
+  if (kind === "boolean") return "";
+  if (kind === "number") {
+    if (typeof value !== "number" || !isFinite(value)) return "必须是有限数字（不能为 NaN / Infinity）";
+    if (rules.allowNegOne && value === -1) return "";
+    if (rules.min != null && value < rules.min) return "不能小于 " + rules.min;
+    if (rules.max != null && value > rules.max) return "不能大于 " + rules.max;
+    return "";
+  }
+  if (kind === "enum") return rules.enum.includes(value) ? "" : "必须是以下之一: " + rules.enum.join(", ");
+  if (kind === "url") {
+    if (!value || !isValidUrl(value)) return "不是合法 URL（应为 http(s)://host[:port]）";
+    if (rules.noPath) {
+      const u = new URL(value);
+      if (u.pathname !== "" && u.pathname !== "/") return "不允许包含路径（应为 http(s)://host[:port]）";
+    }
+    return "";
+  }
+  if (kind === "ip") return isValidIp(value) ? "" : "不是合法 IP";
+  if (kind === "cidr") return isValidCidr(value) ? "" : "不是合法 CIDR";
+  if (kind === "string") {
+    if (rules.required && !String(value).trim()) return "不能为空";
+    return "";
+  }
+  return "";
+}
+function checkArray(rules, value) {
+  // 按规则校验数组及元素，返回错误文案
+  if (!Array.isArray(value)) return "必须是列表";
+  if (rules.required && value.length === 0) return "不能为空";
+  const elem = rules.arrayKind || "string";
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (elem === "url") {
+      if (!isValidUrl(item)) return "第 " + (i + 1) + " 项不是合法 URL: " + item;
+      if (rules.noPath) {
+        const u = new URL(item);
+        if (u.pathname !== "" && u.pathname !== "/") return "第 " + (i + 1) + " 项不允许包含路径";
+      }
+    }
+    if (elem === "ip" && !isValidIp(item)) return "第 " + (i + 1) + " 项不是合法 IP: " + item;
+    if (elem === "cidr" && !isValidCidr(item)) return "第 " + (i + 1) + " 项不是合法 CIDR: " + item;
+    if (elem === "number") {
+      if (typeof item !== "number" || !isFinite(item)) return "第 " + (i + 1) + " 项不是有效数字";
+      if (rules.allowNegOne && item === -1) continue;
+      if (rules.arrayMin != null && item < rules.arrayMin) return "第 " + (i + 1) + " 项不能小于 " + rules.arrayMin;
+      if (rules.arrayMax != null && item > rules.arrayMax) return "第 " + (i + 1) + " 项不能大于 " + rules.arrayMax;
+    }
+    if (elem === "string" && typeof item !== "string") return "第 " + (i + 1) + " 项必须是字符串";
+  }
+  return "";
+}
+function checkValue(rules, value) {
+  // 统一入口：数组走 checkArray，其余走 checkScalar
+  if (!rules) return "";
+  if (rules.kind === "array") return checkArray(rules, value);
+  return checkScalar(rules, value);
+}
+
 /* ---------- 目录 ---------- */
 function renderSidebar() {
   const list = $("#sec-list");
@@ -3977,8 +4581,10 @@ function renderSidebar() {
   for (const sec of configData.sections) {
     const btn = document.createElement("button");
     btn.className = "sec-item" + (sec.name === activeSection ? " active" : "");
-    const changed = sec.entries.some(e => edits.has(sec.name + "." + e.key));
-    btn.innerHTML = escapeHtml("[" + sec.name + "]") + (changed ? '<span class="badge">●</span>' : "");
+    let badge = "";
+    if (sec.entries.some(e => edits.has(sec.name + "." + e.key))) badge = '<span class="badge">●</span>';
+    if (sec.entries.some(e => edits.get(sec.name + "." + e.key)?.error)) badge = '<span class="badge err">!</span>';
+    btn.innerHTML = escapeHtml("[" + sec.name + "]") + badge;
     btn.onclick = () => { activeSection = sec.name; renderSidebar(); renderEditor(); setTab("editor"); };
     list.appendChild(btn);
   }
@@ -3993,7 +4599,7 @@ function renderEditor() {
   const box = $("#editor");
   if (!sec) { box.innerHTML = '<div class="empty">没有可编辑的配置段落</div>'; return; }
   box.innerHTML = "<h2>[" + escapeHtml(sec.name) + "]</h2>" +
-    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改后点击右上角「提交」</div>';
+    '<div class="hint">共 ' + sec.entries.length + ' 项 · 修改实时校验，存在错误时不可提交</div>';
   for (const entry of sec.entries) {
     const id = sec.name + "." + entry.key;
     const current = edits.has(id) ? edits.get(id).value : entry.value;
@@ -4003,6 +4609,8 @@ function renderEditor() {
     const label = '<label><span>' + escapeHtml(entry.key) + "</span>" +
       '<span class="type">' + entry.type + "</span>" +
       (entry.secret ? '<span class="secret-tag">敏感</span>' : "") + "</label>";
+    const desc = entry.desc ? '<div class="desc">' + escapeHtml(entry.desc) + "</div>" : "";
+    const errLine = '<div class="err"></div>';
     let control = "";
     if (entry.type === "boolean") {
       control = '<select><option value="true"' + (current ? " selected" : "") + '>true</option>' +
@@ -4016,7 +4624,7 @@ function renderEditor() {
     } else {
       control = '<input type="' + (entry.secret ? "password" : "text") + '" value="' + escapeHtml(String(current)) + '">';
     }
-    field.innerHTML = label + control;
+    field.innerHTML = label + desc + control + errLine;
     const input = field.querySelector("input,select,textarea");
     input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
@@ -4025,6 +4633,7 @@ function renderEditor() {
 }
 
 function onEdit(section, entry, raw) {
+  // 输入时：类型转换 + 实时校验 + 更新编辑记录与界面状态
   const id = section + "." + entry.key;
   let value;
   if (entry.type === "boolean") value = raw === "true";
@@ -4032,14 +4641,25 @@ function onEdit(section, entry, raw) {
   else if (entry.type === "array") {
     const parts = raw.split(",").map(s => s.trim()).filter(s => s !== "");
     const numeric = Array.isArray(entry.value) && entry.value.every(x => typeof x === "number");
-    value = numeric ? parts.map(Number).filter(n => !Number.isNaN(n)) : parts;
+    // 数值数组：仅将可解析项转为数字，非法项保留字符串以便实时报错
+    value = numeric ? parts.map(p => (p === "-1" || /^-?\d+(\.\d+)?$/.test(p)) ? Number(p) : p) : parts;
   } else value = raw;
 
-  if (JSON.stringify(value) === JSON.stringify(original.get(id))) edits.delete(id);
-  else edits.set(id, { section, key: entry.key, type: entry.type, value, secret: entry.secret });
+  let error = "";
+  if (entry.type === "number" && raw === "") error = "该项不能为空";
+  else error = checkValue(entry.rules, value);
 
+  if (JSON.stringify(value) === JSON.stringify(original.get(id))) edits.delete(id);
+  else edits.set(id, { section, key: entry.key, type: entry.type, value, secret: entry.secret, rules: entry.rules, error });
+
+  // 更新字段外观：橙色=有改动，红色=校验错误
   const field = document.querySelector('.field[data-id="' + CSS.escape(id) + '"]');
-  if (field) field.classList.toggle("changed", edits.has(id));
+  if (field) {
+    field.classList.toggle("changed", edits.has(id));
+    field.classList.toggle("invalid", Boolean(error));
+    const errEl = field.querySelector(".err");
+    if (errEl) errEl.textContent = error;
+  }
   renderSidebar(); renderPreview(); refreshDirty();
 }
 
@@ -4076,12 +4696,31 @@ function renderPreview() {
 
 /* ---------- 提交 ---------- */
 function refreshDirty() {
+  // 有未提交变更 且 全部通过实时校验 时才允许提交
   const dirty = edits.size > 0;
-  $("#submit-btn").disabled = !dirty;
+  const errCount = [...edits.values()].filter(e => e.error).length;
+  $("#submit-btn").disabled = !dirty || errCount > 0;
   $("#dirty-dot").style.display = dirty ? "inline" : "none";
+  $("#err-count").style.display = errCount > 0 ? "inline" : "none";
+  $("#err-count").textContent = "⚠ " + errCount + " 项校验错误";
 }
 
-$("#submit-btn").addEventListener("click", () => {
+$("#submit-btn").addEventListener("click", async () => {
+  // 提交前先请求服务端做整份配置校验（含跨键规则，如 SMTP 配对/CORS 通配符）
+  try {
+    const changes = [...edits.values()].map(e => ({ section: e.section, key: e.key, type: e.type, value: e.value }));
+    const result = await api("/api/validate", { method: "POST", body: JSON.stringify({ changes }) });
+    if (result.errors && result.errors.length) {
+      const first = result.errors[0];
+      toast("校验未通过：[" + first.section + "]. " + first.message);
+      return;
+    }
+  } catch (err) {
+    toast("校验请求失败：" + err.message);
+    return;
+  }
+
+  // 校验通过后展示变更确认弹窗
   const body = $("#diff-body");
   body.innerHTML = "";
   for (const e of edits.values()) {
@@ -4125,7 +4764,7 @@ document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () =>
       "<p>配置文件：<b>" + escapeHtml(configData.path) + "</b></p>" +
       "<p>段落数：<b>" + configData.sections.length + "</b></p>" +
       "<p>未提交变更：<b>" + edits.size + "</b> 项</p>" +
-      "<p>配置以 0600 权限原子写入；修改后需重启实例生效。</p>";
+      "<p>配置以 0600 权限原子写入；保存前经规则校验，容器运行中还会做权威校验；修改后需重启实例生效。</p>";
     $("#status-modal").style.display = "flex";
   }
 }));
@@ -4165,6 +4804,9 @@ class ConfigService:
         if not CONFIG_FILE.is_file():
             out("配置文件不存在")
             return
+
+        # 注入容器校验上下文：backend 容器运行时，保存后追加权威 config validate 兜底
+        EDITOR_CTX.update(docker=self.ctx.docker)
 
         port = find_free_port()
         password = generate_editor_password()

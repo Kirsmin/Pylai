@@ -35,6 +35,11 @@ jobs:
         working-directory: OS
         run: dotnet build Pylaios.csproj -c Release
 
+      - name: ManagePylai 语法与 ConfigEditor 同步检查
+        run: |
+          python3 -m py_compile ManagePylai.py ConfigEditor/server_code.py scripts/sync_config_editor.py scripts/release.py
+          python3 scripts/sync_config_editor.py --check
+
       - name: Config validate（生产安全配置 + DataProtection KEK）
         working-directory: OS
         run: |

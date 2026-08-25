@@ -170,6 +170,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def sync_config_editor() -> None:
+    """构建前同步 ConfigEditor/ 源码到 ManagePylai.py（发布单文件分发必需）。"""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "sync_config_editor.py")],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"同步 ConfigEditor 到 ManagePylai.py 失败:\n{result.stderr or result.stdout}")
+    print(result.stdout.strip())
+
+
 def main() -> int:
     args = parse_args()
     version = normalize_version(args.version)
@@ -178,6 +190,8 @@ def main() -> int:
         raise SystemExit("找不到 Dockerfile")
     if not MANAGE_PY.is_file():
         raise SystemExit("找不到 ManagePylai.py，请先创建管理工具")
+
+    sync_config_editor()
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     selected = TARGETS.items() if args.target == "all" else [(args.target, TARGETS[args.target])]
