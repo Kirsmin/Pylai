@@ -188,20 +188,20 @@ button { font: inherit; cursor: pointer; }
 }
 .chip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
-/* ---------- 预览（固定浅色，不跟随主题） ---------- */
+/* ---------- 预览（跟随主题，明暗自适应） ---------- */
 #preview {
   width: 420px; flex: none;
-  background: #f7f8fa; color: #333a45; color-scheme: light;
-  border-left: 1px solid #e2e5ea;
+  background: var(--panel-soft); color: var(--text);
+  border-left: 1px solid var(--border);
   display: flex; flex-direction: column; min-height: 0;
 }
 #preview h2 {
-  font-size: 12px; color: #7a828e; font-weight: 500;
-  padding: 12px 16px; border-bottom: 1px solid #e8ebef; flex: none;
+  font-size: 12px; color: var(--muted); font-weight: 500;
+  padding: 12px 16px; border-bottom: 1px solid var(--border); flex: none;
 }
 #preview pre {
   flex: 1; overflow: auto; padding: 14px 16px;
-  color: #3d4652; font-size: 12px; font-family: var(--mono); line-height: 1.7;
+  color: var(--text); font-size: 12px; font-family: var(--mono); line-height: 1.7;
   white-space: pre-wrap; word-break: break-all;
 }
 
