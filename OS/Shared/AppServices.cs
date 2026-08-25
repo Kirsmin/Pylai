@@ -141,6 +141,11 @@ public static class AppServices
                     : config.OpenIddict.RefreshToken.LifetimeHours / 24;
                 options.SetRefreshTokenLifetime(TimeSpan.FromDays(refreshDays));
 
+                // Refresh Token 严格轮换：OpenIddict 默认提供 30 秒重放宽限，
+                // 对认证基础设施属不必要的攻击面（被盗 token 可在窗口内复用）。
+                // 归零后已兑换 token 立即拒绝，重放触发整链吊销（RFC 6749 Security BCP）。
+                options.SetRefreshTokenReuseLeeway(TimeSpan.Zero);
+
                 options.SetIdentityTokenLifetime(TimeSpan.FromHours(config.OpenIddict.IdentityToken.LifetimeHours));
             })
             .AddValidation(options =>
