@@ -2113,6 +2113,25 @@ volumes:
         cls.write_nginx_conf()
 
     @classmethod
+    def regenerate(cls, image: str, manager: ManagerConfig | None = None) -> None:
+        """更新时按最新模板全量重渲染 compose（保留现有 .env 凭据与 nginx 配置）。"""
+        ensure_home()
+
+        services_cfg = manager.get("Compose", "Services", default={}) if manager else {}
+        services_cfg = services_cfg or {}
+
+        compose_text = cls._COMPOSE_TEMPLATE.format(
+            postgres_image=services_cfg.get("PostgresImage", "postgres:18-alpine"),
+            redis_image=services_cfg.get("RedisImage", "redis:8-alpine"),
+            backend_image=services_cfg.get("BackendImage", image),
+            nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
+            config_dir=CONFIG_DIR,
+        )
+
+        atomic_write(cls.COMPOSE_FILE, compose_text)
+        cls.write_nginx_conf()
+
+    @classmethod
     def write_nginx_conf(cls) -> None:
         # 拆分拓扑站点配置：静态资源来自 backend 容器同步的共享卷（/var/lib/pylai/www），
         # API/OIDC 反代到 backend 服务；conf.d 片段处于 http 上下文，types 与主配置合并追加
@@ -2981,7 +3000,8 @@ class UpdateService:
 
         self.preflight_config(image)
 
-        ctx.docker.set_backend_image(image)
+        # 按最新模板全量重渲染 compose（基础设施镜像随版本升级；.env 凭据保留）
+        ComposeConfig.regenerate(image, ctx.manager)
         # 预检 compose 语法
         try:
             ctx.docker.validate_compose()
