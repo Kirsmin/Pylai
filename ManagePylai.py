@@ -3508,10 +3508,12 @@ def _cidr(desc: str) -> Json:
     return {"kind": "cidr", "desc": desc}
 
 
-def _str(desc: str, *, required: bool = False) -> Json:
+def _str(desc: str, *, required: bool = False, require_placeholder: str | None = None) -> Json:
     rule: Json = {"kind": "string", "desc": desc}
     if required:
         rule["required"] = True
+    if require_placeholder:
+        rule["requirePlaceholder"] = require_placeholder
     return rule
 
 
@@ -3629,13 +3631,13 @@ EDITOR_RULES: dict[str, Json] = {
 
     # ---- 邮件模板 ----
     "MailTheme.Register.Title": _str("注册邮件标题", required=True),
-    "MailTheme.Register.Context": _str("注册邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.Register.Context": _str("注册邮件正文（必须包含 %%CaptchaCode%%）", required=True, require_placeholder="%%CaptchaCode%%"),
     "MailTheme.Bind.Title": _str("绑定邮箱邮件标题", required=True),
-    "MailTheme.Bind.Context": _str("绑定邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.Bind.Context": _str("绑定邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True, require_placeholder="%%CaptchaCode%%"),
     "MailTheme.Change.Title": _str("更换邮箱邮件标题", required=True),
-    "MailTheme.Change.Context": _str("更换邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.Change.Context": _str("更换邮箱邮件正文（必须包含 %%CaptchaCode%%）", required=True, require_placeholder="%%CaptchaCode%%"),
     "MailTheme.PasswordReset.Title": _str("密码重置邮件标题", required=True),
-    "MailTheme.PasswordReset.Context": _str("密码重置邮件正文（必须包含 %%CaptchaCode%%）", required=True),
+    "MailTheme.PasswordReset.Context": _str("密码重置邮件正文（必须包含 %%CaptchaCode%%）", required=True, require_placeholder="%%CaptchaCode%%"),
 
     # ---- 日志 ----
     "Logging.DefaultLevel": _enum("默认日志级别", ["Trace", "Debug", "Information", "Warning", "Error", "Critical", "None"]),
@@ -3754,6 +3756,8 @@ def _check_scalar(rule: Json, value: Any) -> list[str]:
             return ["必须是字符串"]
         if rule.get("required") and not value.strip():
             return ["不能为空"]
+        if rule.get("requirePlaceholder") and rule["requirePlaceholder"] not in value:
+            return [f"必须包含占位符 {rule['requirePlaceholder']}"]
         if rule.get("pattern") and not re.fullmatch(rule["pattern"], value):
             return [f"格式不合法: {value}"]
         return errors
@@ -3880,11 +3884,13 @@ def validate_full_text(text: str) -> list[tuple[str, str, str]]:
     if require_https and not str(issuer).startswith("https://"):
         issues.append(("OpenIddict", "Issuer", "[OpenIddict].Issuer：RequireHttps=true 时必须使用 https"))
 
-    # 邮件模板正文必须包含验证码占位符
+    # 邮件模板必须完整：段落/键缺失时规则遍历不可达，这里兜底（值缺失占位符由规则层 requirePlaceholder 拦截）
     for theme in ("Register", "Bind", "Change", "PasswordReset"):
-        context = g(f"MailTheme.{theme}.Context", "")
-        if isinstance(context, str) and context and "%%CaptchaCode%%" not in context:
-            issues.append((f"MailTheme.{theme}", "Context", f"[MailTheme.{theme}].Context：正文必须包含占位符 %%CaptchaCode%%"))
+        theme_table = g(f"MailTheme.{theme}", None)
+        if not isinstance(theme_table, dict):
+            issues.append(("MailTheme", theme, f"[MailTheme.{theme}] 段落缺失：必须配置邮件模板（正文须包含占位符 %%CaptchaCode%%）"))
+        elif "Context" not in theme_table:
+            issues.append((f"MailTheme.{theme}", "Context", f"[MailTheme.{theme}].Context：不能为空（正文必须包含占位符 %%CaptchaCode%%）"))
 
     # ---- 弱口令检测 ----
     db_connection = g("Database.ConnectionString", "")
@@ -3900,7 +3906,7 @@ def validate_full_text(text: str) -> list[tuple[str, str, str]]:
 # 供前端实时校验下发的精简规则（保留约束，去除内部字段）
 def frontend_rule(rule: Json) -> Json:
     out_rule: Json = {"kind": rule.get("kind"), "desc": rule.get("desc", "")}
-    for field in ("enum", "min", "max", "required", "noPath", "allowNegOne", "arrayKind", "arrayMin", "arrayMax"):
+    for field in ("enum", "min", "max", "required", "noPath", "allowNegOne", "arrayKind", "arrayMin", "arrayMax", "requirePlaceholder"):
         if field in rule:
             out_rule[field] = rule[field]
     return out_rule
@@ -4562,6 +4568,8 @@ function checkScalar(rules, value) {
   if (kind === "cidr") return isValidCidr(value) ? "" : "不是合法 CIDR";
   if (kind === "string") {
     if (rules.required && !String(value).trim()) return "不能为空";
+    if (rules.requirePlaceholder && String(value) && !String(value).includes(rules.requirePlaceholder))
+      return "必须包含占位符 " + rules.requirePlaceholder;
     return "";
   }
   return "";

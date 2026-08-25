@@ -407,6 +407,8 @@ function checkScalar(rules, value) {
   if (kind === "cidr") return isValidCidr(value) ? "" : "不是合法 CIDR";
   if (kind === "string") {
     if (rules.required && !String(value).trim()) return "不能为空";
+    if (rules.requirePlaceholder && String(value) && !String(value).includes(rules.requirePlaceholder))
+      return "必须包含占位符 " + rules.requirePlaceholder;
     return "";
   }
   return "";
