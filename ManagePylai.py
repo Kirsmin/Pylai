@@ -68,6 +68,9 @@ DATA_DIR = HOME / "data"
 BACKUP_DIR = HOME / "backups"
 HOST_NGINX_FILE = HOME / "host-nginx.conf"
 
+# 云端（GitHub Release）下载的 tar 安装包缓存目录（可通过 ManagerConfig.toml [Updates] DownloadDir 覆盖）
+DEFAULT_DOWNLOAD_DIR = HOME / "downloads"
+
 # 与 deploy/entrypoint.py WEAK_SECRETS 保持一致，本地预检 Fail Closed
 WEAK_SECRETS = {"change-me", "changeme", "password", "secret", "123456", "pylai"}
 
@@ -98,7 +101,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "1.0.0"
+__version__ = "0.0.25"
 
 
 class ManageError(Exception):
@@ -1189,7 +1192,10 @@ class ManagerConfig:
     _DEFAULT_TOML = """\
 [Manager]
 Version = "{version}"
-mirror = "{mirror}"
+
+[Manager.Source]
+Mirror = "{mirror}"
+BaseUrl = "{base_url}"
 
 [Manager.State]
 LastCheck = "{last_check}"
@@ -1202,6 +1208,11 @@ ProjectName = "{project_name}"
 AutoBackupBeforeUpdate = {auto_backup}
 BackupRetentionDays = {retention}
 
+[Updates]
+AutoCheck = {auto_check}
+IncludePrerelease = {include_prerelease}
+DownloadDir = "{download_dir}"
+
 [Logging]
 Level = "{level}"
 """
@@ -1210,6 +1221,21 @@ Level = "{level}"
         if self.path.is_file():
             with suppress(OSError, tomllib.TOMLDecodeError):
                 self._data = tomllib.loads(self.path.read_text(encoding="utf-8"))
+            self._migrate_keys()
+
+    def _migrate_keys(self) -> None:
+        """旧版键名（mirror / base_url，小写下划线风格）迁移到统一大写风格。"""
+        mgr = self._data.get("Manager")
+        if not isinstance(mgr, dict):
+            return
+        source = mgr.setdefault("Source", {})
+        if not isinstance(source, dict):
+            return
+        if "mirror" in mgr and "Mirror" not in source:
+            source["Mirror"] = mgr["mirror"]
+        custom = mgr.get("Custom")
+        if isinstance(custom, dict) and "base_url" in custom and "BaseUrl" not in source:
+            source["BaseUrl"] = custom["base_url"]
 
     def get(self, *keys: str, default: Any = None) -> Any:
         current: Any = self._data
@@ -1238,19 +1264,18 @@ Level = "{level}"
 
         text = self._DEFAULT_TOML.format(
             version=self.get("Manager", "Version", default=__version__),
-            mirror=self.get("Manager", "mirror", default="Github"),
+            mirror=self.mirror,
+            base_url=self.custom_mirror_base or "",
             last_check=self.get("Manager", "State", "LastCheck", default=utc_now_iso()),
             skip_version_line=skip_version_line,
             project_name=self.get("Compose", "ProjectName", default="pylai"),
-            auto_backup="true" if self.get("Security", "AutoBackupBeforeUpdate", default=True) else "false",
+            auto_backup="true" if self.auto_backup else "false",
             retention=self.get("Security", "BackupRetentionDays", default=7),
+            auto_check="true" if self.auto_check else "false",
+            include_prerelease="true" if self.include_prerelease else "false",
+            download_dir=self.download_dir,
             level=self.get("Logging", "Level", default="info"),
         )
-
-        custom = self.get("Manager", "Custom", default={}) or {}
-        if custom:
-            text += "\n[Manager.Custom]\n"
-            text += "".join(f"{k} = {json.dumps(v)}\n" for k, v in custom.items())
 
         services = self.get("Compose", "Services", default={}) or {}
         if services:
@@ -1261,7 +1286,23 @@ Level = "{level}"
 
     @property
     def mirror(self) -> str:
-        return str(self.get("Manager", "mirror", default="Github"))
+        return str(self.get("Manager", "Source", "Mirror", default="Github"))
+
+    def set_mirror(self, mirror: str) -> None:
+        self.set("Manager", "Source", "Mirror", value=mirror)
+        self.save()
+
+    @property
+    def custom_mirror_base(self) -> str | None:
+        value = self.get("Manager", "Source", "BaseUrl", default=None)
+        if not value:
+            return None
+        base = str(value).strip().rstrip("/")
+        return base or None
+
+    def set_custom_mirror_base(self, base_url: str | None) -> None:
+        self.set("Manager", "Source", "BaseUrl", value=base_url or "")
+        self.save()
 
     @property
     def version(self) -> str:
@@ -1279,6 +1320,35 @@ Level = "{level}"
     def auto_backup(self) -> bool:
         return bool(self.get("Security", "AutoBackupBeforeUpdate", default=True))
 
+    def set_auto_backup(self, enabled: bool) -> None:
+        self.set("Security", "AutoBackupBeforeUpdate", value=bool(enabled))
+        self.save()
+
+    @property
+    def auto_check(self) -> bool:
+        return bool(self.get("Updates", "AutoCheck", default=True))
+
+    def set_auto_check(self, enabled: bool) -> None:
+        self.set("Updates", "AutoCheck", value=bool(enabled))
+        self.save()
+
+    @property
+    def include_prerelease(self) -> bool:
+        return bool(self.get("Updates", "IncludePrerelease", default=False))
+
+    def set_include_prerelease(self, enabled: bool) -> None:
+        self.set("Updates", "IncludePrerelease", value=bool(enabled))
+        self.save()
+
+    @property
+    def download_dir(self) -> str:
+        value = self.get("Updates", "DownloadDir", default="")
+        return str(value) if value else str(DEFAULT_DOWNLOAD_DIR)
+
+    def set_download_dir(self, path: str) -> None:
+        self.set("Updates", "DownloadDir", value=str(path) if path.strip() else "")
+        self.save()
+
     @property
     def skip_version(self) -> str | None:
         value = self.get("Manager", "State", "SkipVersion", default=None)
@@ -1291,11 +1361,6 @@ Level = "{level}"
         else:
             self.set("Manager", "State", "SkipVersion", value=version)
         self.save()
-
-    @property
-    def custom_mirror_base(self) -> str | None:
-        value = self.get("Manager", "Custom", "base_url", default=None)
-        return str(value) if value else None
 
 
 @dataclass(slots=True)
@@ -2293,6 +2358,66 @@ class ReleaseClient:
 
         return None
 
+    def list_releases(
+        self,
+        *,
+        include_prerelease: bool = False,
+        limit: int = 12,
+    ) -> list[Json]:
+        """列出远端历史发布版本（GitHub API，按发布时间倒序）。
+
+        自定义镜像源（静态文件服务器）无法枚举历史版本，返回空列表。
+        每个元素: {version, prerelease, published_at, assets: [name]}。
+        """
+        if self.is_custom:
+            return []
+
+        items: list[Json] = []
+        try:
+            request = urllib.request.Request(
+                self._api_url(f"releases?per_page={limit}"),
+                headers={
+                    "User-Agent": self.USER_AGENT,
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            return []
+
+        for rel in data or []:
+            if not isinstance(rel, dict):
+                continue
+            tag = str(rel.get("tag_name", "")).removeprefix("v").removeprefix("V")
+            if not tag:
+                continue
+            if rel.get("prerelease") and not include_prerelease:
+                continue
+            items.append(
+                {
+                    "version": tag,
+                    "prerelease": bool(rel.get("prerelease")),
+                    "published_at": str(rel.get("published_at", "")),
+                    "assets": [a.get("name") for a in (rel.get("assets") or []) if isinstance(a, dict)],
+                }
+            )
+        return items
+
+    def fetch_asset_sha256(self, version: str, filename: str) -> str | None:
+        """获取远端 <filename>.sha256 校验文件的第一段哈希；失败返回 None。"""
+        url = self._release_url(version, f"{filename}.sha256")
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
+            with urllib.request.urlopen(request, timeout=30) as resp:
+                text = resp.read().decode("utf-8", "replace").strip()
+            if not text:
+                return None
+            return text.split()[0].lower()
+        except (OSError, urllib.error.URLError):
+            return None
+
     def download(
         self,
         version: str,
@@ -2306,14 +2431,20 @@ class ReleaseClient:
 
         try:
             request = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
+            digest = hashlib.sha256()
             with urllib.request.urlopen(request, timeout=300) as resp:
-                dest.write_bytes(resp.read())
+                with dest.open("wb") as f:
+                    while chunk := resp.read(1024 * 1024):
+                        digest.update(chunk)
+                        f.write(chunk)
         except (OSError, urllib.error.URLError) as exc:
+            dest.unlink(missing_ok=True)
             raise ManageError(f"下载失败: {exc}") from exc
 
         if sha256_expected:
-            actual = hashlib.sha256(dest.read_bytes()).hexdigest()
+            actual = digest.hexdigest()
             if actual != sha256_expected:
+                dest.unlink(missing_ok=True)
                 raise ManageError(f"SHA256 校验失败: 期望 {sha256_expected}, 实际 {actual}")
 
 
@@ -2484,6 +2615,121 @@ class SelfUpdater:
                 out(f"已设置跳过版本 {version}。")
 
             out("警告：使用旧版本管理工具更新可能存在兼容性问题。")
+
+
+# ============================================================================
+# 云端分发（GitHub Release 下载 + 版本选择）
+# ============================================================================
+RELEASE_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$")
+
+
+def normalize_release_version(raw: str) -> str:
+    """规范化用户输入的版本号：去掉 v/V 前缀，校验合法格式。"""
+    version = str(raw).strip()
+    if version.startswith(("v", "V")):
+        version = version[1:]
+    if not RELEASE_VERSION_RE.match(version):
+        raise ManageError(
+            f"非法版本号: {raw!r}（格式应为 0.0.1，可选 -预发布后缀）"
+        )
+    return version
+
+
+def resolve_remote_version(
+    client: ReleaseClient,
+    manager: ManagerConfig,
+    *,
+    requested: str | None = None,
+    yes: bool = False,
+    prompt: str = "请选择要从云端使用（安装/更新）的版本",
+) -> str:
+    """解析云端目标版本：--version 指定 > 交互选择列表 > 默认最新。"""
+    if requested:
+        return normalize_release_version(requested)
+
+    releases = client.list_releases(include_prerelease=manager.include_prerelease, limit=12)
+    # 过滤后为空（如仅剩预发布）时回退列出全部
+    if not releases and not manager.include_prerelease:
+        releases = client.list_releases(include_prerelease=True, limit=12)
+
+    if not releases:
+        # 自定义镜像源或列表失败：回退到最新版本
+        if latest := client.check_latest():
+            version, _, _ = latest
+            if yes:
+                out(f"云端最近版本: v{version}（自定义镜像源无法枚举历史版本）")
+                return version
+            out(f"云端最近版本: v{version}")
+            if ask_bool("使用该版本？", True):
+                return version
+        raise ManageError("无法获取云端版本信息，请检查网络与镜像源设置。")
+
+    if yes:
+        # 非交互模式：默认取列表首个（已按配置过滤预发布，最新优先）
+        return releases[0]["version"]
+
+    options = [
+        (
+            f"v{r['version']}（{'预发布' if r['prerelease'] else '正式版'}）",
+            r["version"],
+        )
+        for r in releases
+    ]
+    chosen = choose(options, prompt)
+    if not chosen:
+        raise ManageError("未选择版本。")
+    return chosen
+
+
+def ensure_remote_tar(
+    client: ReleaseClient,
+    manager: ManagerConfig,
+    version: str,
+    *,
+    force: bool = False,
+) -> Path:
+    """从云端下载（或复用缓存）Pylai-<version>-Linux-<arch>.tar，并 SHA256 校验。
+
+    下载目录默认 ~/.pylai/downloads，可通过 ManagerConfig.toml [Updates] DownloadDir 配置。
+    已缓存且哈希匹配时直接复用，避免重复下载大文件。
+    """
+    arch = host_arch()
+    filename = f"Pylai-{version}-Linux-{arch}.tar"
+
+    dest_dir = Path(manager.download_dir).expanduser()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+
+    remote_sha = client.fetch_asset_sha256(version, filename)
+    if not remote_sha:
+        raise ManageError(
+            f"无法获取 {filename}.sha256（版本 v{version} 可能未发布对应架构产物或网络异常）。"
+        )
+
+    if dest.is_file() and not force:
+        actual = hashlib.sha256(dest.read_bytes()).hexdigest()
+        if actual == remote_sha:
+            out(f"==> 使用已下载的安装包: {dest}")
+            return dest
+        out("[警告] 缓存安装包校验不匹配，重新下载。")
+
+    client.download(version, filename, dest, sha256_expected=remote_sha)
+    out(f"==> 下载完成: {dest}（SHA256 校验通过）")
+    return dest
+
+
+def choose_install_source(prompt: str = "请选择安装/更新来源") -> str:
+    """交互选择安装/更新包的来源：本地 tar 或云端 GitHub Release。"""
+    chosen = choose(
+        [
+            ("本地磁盘上的 Pylai-<version>-Linux-<arch>.tar", "local"),
+            ("从云端 GitHub Release 下载并选择版本", "remote"),
+        ],
+        prompt,
+    )
+    if chosen is None:
+        raise ManageError("未选择来源。")
+    return chosen
 
 
 # ============================================================================
@@ -2668,7 +2914,7 @@ class InstallService:
         self.ctx = ctx
 
     def install_cli(self, args: argparse.Namespace) -> None:
-        tar_path = select_tar(yes=args.yes)
+        tar_path = self._resolve_install_tar(args)
         image = self.ctx.docker.load_image_tar(tar_path)
         answers = self.resolve_answers(args)
         interactive = not (args.yes or args.pylai_config or args.env_file)
@@ -2700,8 +2946,35 @@ class InstallService:
             yes_mode=args.yes,
         )
 
+    def _resolve_install_tar(self, args: argparse.Namespace) -> Path:
+        """解析安装包来源：--from-remote 从云端下载，否则从本地磁盘选择。"""
+        from_remote = bool(getattr(args, "from_remote", False))
+        if from_remote:
+            client = ReleaseClient(self.ctx.manager)
+            version = resolve_remote_version(
+                client,
+                self.ctx.manager,
+                requested=getattr(args, "version", None),
+                yes=bool(args.yes),
+                prompt="请选择要安装的版本",
+            )
+            return ensure_remote_tar(client, self.ctx.manager, version, force=bool(getattr(args, "force", False)))
+        return select_tar(yes=args.yes)
+
     def install_interactive(self) -> None:
-        tar_path = select_tar(yes=False)
+        source = choose_install_source("请选择安装包的来源")
+        client = ReleaseClient(self.ctx.manager)
+
+        if source == "remote":
+            version = resolve_remote_version(
+                client,
+                self.ctx.manager,
+                prompt="请选择要安装的版本",
+            )
+            tar_path = ensure_remote_tar(client, self.ctx.manager, version)
+        else:
+            tar_path = select_tar(yes=False)
+
         image = self.ctx.docker.load_image_tar(tar_path)
         answers = InstallAnswers.collect_interactive()
 
@@ -2949,13 +3222,27 @@ class UpdateService:
     def update_cli(self, args: argparse.Namespace) -> None:
         if args.check_only:
             self.check_manager_update()
+            self.check_app_update()
             return
 
         self.ensure_manager_up_to_date(args.yes)
-        self.update_app(yes=args.yes, force_pg_upgrade=args.force_pg_upgrade)
+
+        from_remote = bool(getattr(args, "from_remote", False))
+        self.update_app(
+            yes=args.yes,
+            force_pg_upgrade=args.force_pg_upgrade,
+            source="remote" if from_remote else "local",
+            version=getattr(args, "version", None),
+            force=getattr(args, "force", False),
+        )
 
     def update_interactive(self) -> None:
-        self.update_app(yes=False)
+        source = choose_install_source("请选择更新包的来源")
+        self.update_app(
+            yes=False,
+            source=source,
+            version=None,
+        )
 
     def check_manager_update(self) -> None:
         client = ReleaseClient(self.ctx.manager)
@@ -2969,18 +3256,76 @@ class UpdateService:
         else:
             out("当前已是最新，或无法获取版本信息。")
 
+    def check_app_update(self) -> None:
+        """报告云端最新 Pylai 应用版本（与已部署版本比较）。"""
+        ctx = self.ctx
+        if not ctx.state.installed:
+            out("Pylai 未安装，无法比较版本。")
+            return
+
+        client = ReleaseClient(ctx.manager)
+        latest = client.check_latest()
+        if not latest:
+            out("无法获取云端最新 Pylai 版本信息。")
+            return
+
+        version, _, info = latest
+        updater = SelfUpdater(client, ctx.manager, ctx.state)
+        if info and "dbSchemaVersion" in info:
+            out(f"最新 Pylai 版本: v{version}（dbSchemaVersion: {info['dbSchemaVersion']}）")
+        else:
+            out(f"最新 Pylai 版本: v{version}")
+
+        if updater.version_gt(version, ctx.state.version):
+            out(f"> 当前已部署 v{ctx.state.version}，可执行 `update --from-remote --yes` 升级。")
+        elif version == ctx.state.version:
+            out(f"> 当前已是最新版本 v{ctx.state.version}。")
+        else:
+            out(f"> 当前部署 v{ctx.state.version} 高于云端最新 v{version}（已回滚/领先）。")
+
     def ensure_manager_up_to_date(self, yes: bool) -> None:
         client = ReleaseClient(self.ctx.manager)
         updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
         updater.ensure_up_to_date(yes=yes)
 
-    def update_app(self, *, yes: bool, force_pg_upgrade: bool = False) -> None:
+    def update_app(
+        self,
+        *,
+        yes: bool,
+        force_pg_upgrade: bool = False,
+        source: str = "local",
+        version: str | None = None,
+        force: bool = False,
+    ) -> None:
         ctx = self.ctx
         ctx.require_installed()
 
         self.check_pg_major_upgrade(force=force_pg_upgrade)
 
-        tar_path = select_tar(yes=yes, prompt="请选择新版本安装包")
+        if source == "remote":
+            client = ReleaseClient(ctx.manager)
+            target_version = resolve_remote_version(
+                client,
+                ctx.manager,
+                requested=version,
+                yes=yes,
+                prompt="请选择要更新到的版本",
+            )
+            # 降级保护：目标版本低于当前部署版本时给出警告
+            if yes:
+                out(f"云端安装包版本: v{target_version}")
+            if SelfUpdater.version_gt(ctx.state.version, target_version):
+                if not yes and not ask_bool(
+                    f"目标版本 v{target_version} 低于当前部署 v{ctx.state.version}（降级），仍要继续？",
+                    False,
+                ):
+                    out("已取消。")
+                    return
+                out("[警告] 正在执行版本回退（降级），请确认数据兼容性。")
+            tar_path = ensure_remote_tar(client, ctx.manager, target_version, force=force)
+        else:
+            tar_path = select_tar(yes=yes, prompt="请选择新版本安装包")
+
         version, arch = parse_tar(tar_path) or (
             ctx.state.version,
             ctx.state.architecture,
@@ -5187,6 +5532,78 @@ class ConfigService:
 
 
 # ============================================================================
+# 管理工具设置（ManagerConfig.toml）
+# ============================================================================
+MIRROR_OPTIONS: list[tuple[str, str]] = [
+    ("Github — GitHub 官方源", "Github"),
+    ("ghproxy — GitHub 加速镜像", "ghproxy"),
+    ("Custom — 自定义镜像源（需填 BaseUrl）", "Custom"),
+]
+
+
+class SettingsService:
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def view(self) -> None:
+        manager = self.ctx.manager
+        out("当前管理工具设置（~/.pylai/ManagerConfig.toml，可手动编辑）：")
+        out(f"  [Manager.Source] Mirror      = {manager.mirror}")
+        out(f"  [Manager.Source] BaseUrl     = {manager.custom_mirror_base or ''}")
+        out(f"  [Updates]        AutoCheck       = {str(manager.auto_check).lower()}")
+        out(f"  [Updates]        IncludePrerelease = {str(manager.include_prerelease).lower()}")
+        out(f"  [Updates]        DownloadDir     = {manager.download_dir}")
+        out(f"  [Security]       AutoBackupBeforeUpdate = {str(manager.auto_backup).lower()}")
+        out(f"  [Logging]        Level           = {manager.logging_level}")
+
+    def change_mirror(self) -> None:
+        manager = self.ctx.manager
+        chosen = choose(MIRROR_OPTIONS, "请选择更新/下载镜像源")
+        if chosen is None:
+            return
+
+        if chosen == "Custom":
+            base = ask(
+                "自定义镜像源 BaseUrl（如 https://mirror.example.com，须能提供 releases/v<ver>/ 下载）",
+                manager.custom_mirror_base or "",
+            ).strip().rstrip("/")
+            if not base or not is_valid_url(base):
+                out("BaseUrl 必须是以 http(s) 开头的合法地址，已取消。")
+                return
+            manager.set_custom_mirror_base(base)
+        else:
+            manager.set_custom_mirror_base(None)
+
+        manager.set_mirror(chosen)
+        out(f"镜像源已设为 {chosen}。")
+
+    def change_auto_check(self) -> None:
+        manager = self.ctx.manager
+        enabled = ask_bool("每次运行时自动检查更新并提示？", manager.auto_check)
+        manager.set_auto_check(enabled)
+        out(f"AutoCheck 已设为 {str(enabled).lower()}。")
+
+    def change_include_prerelease(self) -> None:
+        manager = self.ctx.manager
+        enabled = ask_bool("版本列表是否包含预发布版本？", manager.include_prerelease)
+        manager.set_include_prerelease(enabled)
+        out(f"IncludePrerelease 已设为 {str(enabled).lower()}。")
+
+    def change_download_dir(self) -> None:
+        manager = self.ctx.manager
+        current = manager.download_dir
+        path = ask(f"下载缓存目录（留空恢复默认 {DEFAULT_DOWNLOAD_DIR}）", current).strip()
+        manager.set_download_dir(path or str(DEFAULT_DOWNLOAD_DIR))
+        out(f"DownloadDir 已设为 {manager.download_dir}。")
+
+    def change_auto_backup(self) -> None:
+        manager = self.ctx.manager
+        enabled = ask_bool("更新前自动备份数据库？", manager.auto_backup)
+        manager.set_auto_backup(enabled)
+        out(f"AutoBackupBeforeUpdate 已设为 {str(enabled).lower()}。")
+
+
+# ============================================================================
 # 交互菜单
 # ============================================================================
 class InteractiveMenu:
@@ -5233,10 +5650,13 @@ class InteractiveMenu:
 
         out("\n[工具]")
         out("  [12] 检查 ManagePylai.py 更新")
+        out("  [13] 管理工具设置（镜像源/自动检查/下载目录）")
 
         out("\n[0] 退出")
 
     def run(self) -> None:
+        self.auto_check_notify()
+
         while True:
             self.print_header()
             self.print_menu()
@@ -5276,6 +5696,8 @@ class InteractiveMenu:
                         self.security()
                     case "12":
                         self.self_update()
+                    case "13":
+                        self.settings()
                     case _:
                         out("选择无效。")
             except ManageError as exc:
@@ -5284,6 +5706,38 @@ class InteractiveMenu:
                 raise
             except Exception as exc:
                 out(f"未预期错误: {exc}")
+
+    def auto_check_notify(self) -> None:
+        """启动时按 ManagerConfig [Updates] AutoCheck 配置静默检查并提示新版本。"""
+        ctx = self.ctx
+        if not ctx.manager.auto_check:
+            return
+
+        try:
+            client = ReleaseClient(ctx.manager)
+            latest = client.check_latest()
+        except Exception:
+            return
+        if not latest:
+            return
+
+        version, _, info = latest
+        updater = SelfUpdater(client, ctx.manager, ctx.state)
+
+        if updater.version_gt(version, __version__) and ctx.manager.skip_version != version:
+            out(f"[通知] 管理工具新版本可用 v{version}，主菜单 [12] 可更新。")
+
+        if ctx.state.installed and updater.version_gt(version, ctx.state.version):
+            if info and "dbSchemaVersion" in info:
+                out(
+                    f"[通知] Pylai 新版本可用 v{version}（当前 v{ctx.state.version}，"
+                    f"dbSchemaVersion: {info['dbSchemaVersion']}），主菜单 [2] 可从云端更新。"
+                )
+            else:
+                out(
+                    f"[通知] Pylai 新版本可用 v{version}（当前 v{ctx.state.version}），"
+                    "主菜单 [2] 可从云端更新。"
+                )
 
     def install(self) -> None:
         if self.ctx.state.installed:
@@ -5294,6 +5748,22 @@ class InteractiveMenu:
 
     def update(self) -> None:
         UpdateService(self.ctx).update_interactive()
+
+    def settings(self) -> None:
+        settings = SettingsService(self.ctx)
+
+        run_submenu(
+            "管理工具设置（写入 ~/.pylai/ManagerConfig.toml）",
+            "主菜单",
+            [
+                ("查看当前设置", settings.view),
+                ("修改镜像源（Mirror / BaseUrl）", settings.change_mirror),
+                ("自动检查更新（AutoCheck）", settings.change_auto_check),
+                ("版本列表包含预发布（IncludePrerelease）", settings.change_include_prerelease),
+                ("下载缓存目录（DownloadDir）", settings.change_download_dir),
+                ("更新前自动备份（AutoBackupBeforeUpdate）", settings.change_auto_backup),
+            ],
+        )
 
     def uninstall(self) -> None:
         uninstall(self.ctx, yes=False, purge=False)
@@ -5566,10 +6036,38 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="兼容模式：镜像未提供 pylai.template.toml 时回退到 pylai.example.toml（不推荐）",
     )
+    install_p.add_argument(
+        "--from-remote",
+        action="store_true",
+        help="从云端 GitHub Release 下载安装包（不读本地 tar）",
+    )
+    install_p.add_argument(
+        "--version",
+        help="指定要安装的版本号（如 0.0.25；缺省取最新；仅与 --from-remote 搭配）",
+    )
+    install_p.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略下载缓存，强制重新下载",
+    )
 
     update_p = subparsers.add_parser("update", help="更新 Pylai")
-    update_p.add_argument("--check-only", action="store_true", help="只检查更新，不执行")
+    update_p.add_argument("--check-only", action="store_true", help="只检查更新（管理工具 + Pylai 应用），不执行")
     update_p.add_argument("--force-pg-upgrade", action="store_true", help="跳过 PostgreSQL 大版本升级检查（数据可丢弃或已迁移时使用）")
+    update_p.add_argument(
+        "--from-remote",
+        action="store_true",
+        help="从云端 GitHub Release 下载并更新（不读本地 tar）",
+    )
+    update_p.add_argument(
+        "--version",
+        help="指定要更新到的版本号（如 0.0.25；缺省取最新；仅与 --from-remote 搭配）",
+    )
+    update_p.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略下载缓存，强制重新下载",
+    )
 
     self_update_p = subparsers.add_parser("self-update", help="更新管理工具自身")
     self_update_p.add_argument("--check-only", action="store_true")

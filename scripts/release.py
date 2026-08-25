@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -223,6 +224,18 @@ def main() -> int:
 
     manage_dst = DIST_DIR / "ManagePylai.py"
     shutil.copy2(MANAGE_PY, manage_dst)
+    # 注入发行版本号：否则自更新比较（__version__）永远失真，ManagePylai 无法发现新版本
+    text = manage_dst.read_text(encoding="utf-8")
+    patched, count = re.subn(
+        r'^__version__ = "[^"]*"',
+        f'__version__ = "{version}"',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise SystemExit("无法定位 ManagePylai.py 中的 __version__ 以便注入发行版本号")
+    manage_dst.write_text(patched, encoding="utf-8")
     manage_checksum = sha256_file(manage_dst)
     (DIST_DIR / "ManagePylai.py.sha256").write_text(
         f"{manage_checksum}  ManagePylai.py\n", encoding="utf-8")
