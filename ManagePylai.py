@@ -3157,6 +3157,13 @@ class InstallService:
         self.print_summary(answers)
         out("提示：建议使用主机 Nginx 反代，主菜单 [8] 可生成配置模板。")
 
+        if interactive:
+            out("\n==> 自动打开网页配置编辑器（可检查/调整安装生成的配置，按回车键关闭）...")
+            try:
+                ConfigService(self.ctx).edit_in_web()
+            except Exception as exc:
+                out(f"[警告] 网页配置编辑器启动失败: {exc}（可稍后经主菜单 [7] → 网页编辑 打开）")
+
     def fix_container_hosts(self) -> None:
         config = self.ctx.config
 
