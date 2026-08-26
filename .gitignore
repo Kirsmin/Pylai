@@ -13,7 +13,6 @@
 *.pyc
 
 # IDE / 编辑器
-**/.trae/
 **/.vscode/
 **/.idea/
 *.suo
@@ -71,4 +70,3 @@ bk-Pylai-20260808/
 
 # 安全与部署文档保持本地封闭（用户决策 2026-08-26），不入库
 SECURITY.md
-docs/

@@ -101,7 +101,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.0.27"
+__version__ = "0.0.34"
 
 
 class ManageError(Exception):
@@ -111,6 +111,440 @@ class ManageError(Exception):
 class UnsupportedArchitectureError(ManageError):
     """主机 CPU 架构不受支持（无静默回退）。"""
 
+
+
+
+# ============================================================================
+# 新增：帮助系统
+# ============================================================================
+class HelpSystem:
+    """统一帮助系统，每个配置项都有说明。"""
+
+    TOPICS: dict[str, str] = {
+        "public_url": """
+对外访问地址是用户浏览器访问 Pylai 的完整 URL。
+  • 内网部署: http://192.168.1.100:8080
+  • 公网部署: https://pylai.example.com
+  • 本地测试: http://localhost:8080
+
+注意：这会影响 OAuth 回调和邮件链接的正确性。
+        """,
+        "public_port": """
+容器 80 端口映射到主机的端口。
+用户将通过 http://<主机IP>:<此端口> 访问 Pylai。
+如果主机已有 Nginx 反代，建议避免使用 80/443。
+        """,
+        "api_port": """
+后端 API 服务映射到本机的端口（仅绑定 127.0.0.1）。
+外部无法直接访问，仅供内部健康检查和必要时的直接调用。
+        """,
+        "db_password": """
+PostgreSQL 数据库密码，将自动生成强密码。
+通常无需手动修改，除非有特定安全策略要求。
+        """,
+        "redis_password": """
+Redis 缓存密码，将自动生成强密码。
+        """,
+        "trusted_proxies": """
+可信代理 IP 是反向代理服务器（如 Nginx）的地址。
+Pylai 需要知道这些地址才能正确解析用户真实 IP。
+
+默认值 127.0.0.1,::1 适用于本机 Nginx 反代场景。
+        """,
+        "trusted_networks": """
+可信网络 CIDR，来自这些网段的请求会被视为内部请求。
+默认 172.16.0.0/12 覆盖 Docker 默认网桥范围。
+        """,
+        "smtp": """
+SMTP 配置用于发送邮件通知（密码重置、邀请等）。
+不配置则无法发送邮件，但系统仍可正常使用。
+        """,
+        "encryption_cert": """
+OpenIddict 加密证书用于保护令牌安全。
+生产环境必须配置持久化证书，否则容器重启后所有会话将失效。
+        """,
+        "mfa": """
+MFA（多因素认证）可保护高权限账户安全。
+• Admin 强制 MFA：登录时必须提供 TOTP 验证码
+• Max 强制 WebAuthn：需 HTTPS 环境，使用硬件密钥/指纹等
+        """,
+    }
+
+    @classmethod
+    def show(cls, topic: str) -> None:
+        if text := cls.TOPICS.get(topic):
+            out(f"\n┌─ 帮助: {topic}")
+            for line in text.strip().split("\n"):
+                out(f"│ {line}")
+            out("└" + "─" * 50)
+        else:
+            out(f"暂无 '{topic}' 的帮助信息。")
+
+    @classmethod
+    def print_hint(cls, topic: str) -> None:
+        """打印简短提示。"""
+        if text := cls.TOPICS.get(topic):
+            first_line = text.strip().split("\n")[0].strip()
+            out(f"  💡 {first_line}")
+
+
+# ============================================================================
+# 新增：操作流水线 - 带步骤追踪和回滚
+# ============================================================================
+@dataclass
+class PipelineStep:
+    name: str
+    fn: Callable[[], Any]
+    rollback: Callable[[], None] | None = None
+    checkpoint: bool = False
+
+
+class OperationPipeline:
+    """统一操作流水线，带步骤追踪和自动回滚。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.steps: list[PipelineStep] = []
+        self.completed: list[PipelineStep] = []
+        self._results: list[Any] = []
+
+    def add(
+        self,
+        name: str,
+        fn: Callable[[], Any],
+        *,
+        rollback: Callable[[], None] | None = None,
+        checkpoint: bool = False,
+    ) -> Self:
+        self.steps.append(PipelineStep(name, fn, rollback, checkpoint))
+        return self
+
+    def run(self) -> list[Any]:
+        out(f"\n▶ {self.name}")
+        out("─" * 50)
+
+        for idx, step in enumerate(self.steps, 1):
+            out(f"\n  [{idx}/{len(self.steps)}] {step.name} ...", end="")
+
+            try:
+                result = step.fn()
+                self.completed.append(step)
+                self._results.append(result)
+                out(" ✓")
+
+                if step.checkpoint:
+                    out(f"  📍 检查点已保存（可从步骤 {idx} 恢复）")
+
+            except Exception as exc:
+                out(" ✗")
+                out(f"\n  错误: {exc}")
+                self._handle_failure(idx, exc)
+                raise
+
+        out(f"\n✓ {self.name} 完成")
+        out("=" * 50)
+        return self._results
+
+    def _handle_failure(self, failed_idx: int, exc: Exception) -> None:
+        """执行回滚。"""
+        if not self.completed:
+            return
+
+        out(f"\n  正在回滚已完成的步骤...")
+        for step in reversed(self.completed):
+            if step.rollback:
+                try:
+                    step.rollback()
+                    out(f"    ↩ {step.name} 已回滚")
+                except Exception as rollback_exc:
+                    out(f"    ⚠ {step.name} 回滚失败: {rollback_exc}")
+
+
+# ============================================================================
+# 新增：安装向导 - 分阶段 + 可回退
+# ============================================================================
+class WizardBackError(Exception):
+    """用户要求返回上一步。"""
+
+
+class WizardSkipError(Exception):
+    """用户要求跳过当前阶段。"""
+
+
+@dataclass
+class WizardPhase:
+    name: str
+    fields: list[str]
+    required: bool = True
+    help_topic: str = ""
+
+
+class InstallWizard:
+    """分阶段安装向导，支持返回上一步和查看帮助。"""
+
+    PHASES: list[WizardPhase] = [
+        WizardPhase("基础配置", ["public_url", "public_port", "api_port"], help_topic="public_url"),
+        WizardPhase("数据库", ["db_user", "db_name"], help_topic="db_password"),
+        WizardPhase("初始账号", ["max_account", "admin_account", "user_account"]),
+        WizardPhase("邮件服务", ["smtp"], required=False, help_topic="smtp"),
+        WizardPhase("安全证书", ["encryption_cert"], help_topic="encryption_cert"),
+        WizardPhase("网络与安全", ["trusted_proxies", "trusted_networks", "cors", "mfa"], help_topic="trusted_proxies"),
+    ]
+
+    def __init__(self) -> None:
+        self.answers = InstallAnswers()
+        self._history: list[int] = []
+        self._phase_idx = 0
+
+    def run(self) -> InstallAnswers:
+        """运行向导，返回收集到的答案。"""
+        while self._phase_idx < len(self.PHASES):
+            phase = self.PHASES[self._phase_idx]
+
+            if not phase.required:
+                out(f"\n{'─' * 50}")
+                out(f"  步骤 {self._phase_idx + 1}/{len(self.PHASES)}: {phase.name}")
+                out(f"{'─' * 50}")
+                out("  此步骤为可选配置，按 Enter 跳过，或按 '?' 查看帮助")
+                hint = input("  是否配置？ [y/N/?] ").strip().lower()
+                if hint in ("?", "h", "help"):
+                    HelpSystem.show(phase.help_topic or phase.fields[0])
+                    continue
+                if hint not in ("y", "yes"):
+                    self._phase_idx += 1
+                    continue
+
+            try:
+                self._collect_phase(phase)
+                self._history.append(self._phase_idx)
+                self._phase_idx += 1
+            except WizardBackError:
+                if self._history:
+                    self._phase_idx = self._history.pop()
+                else:
+                    out("已经是第一步，无法继续返回。")
+                continue
+            except WizardSkipError:
+                self._phase_idx += 1
+                continue
+
+        return self.answers
+
+    def _collect_phase(self, phase: WizardPhase) -> None:
+        """收集一个阶段的输入。"""
+        out(f"\n{'─' * 50}")
+        out(f"  步骤 {self._phase_idx + 1}/{len(self.PHASES)}: {phase.name}")
+        out(f"{'─' * 50}")
+        out("  提示: 按 '?' 查看帮助 | 按 '<' 返回上一步 | 按 '!' 跳过此阶段")
+        out()
+
+        if phase.help_topic:
+            HelpSystem.print_hint(phase.help_topic)
+            out()
+
+        for field in phase.fields:
+            self._collect_field(field)
+
+    def _collect_field(self, field: str) -> None:
+        """收集单个字段的输入。"""
+        match field:
+            case "public_url":
+                default = self._detect_public_url()
+                self.answers.public_url = self._ask(
+                    "对外访问地址（浏览器访问 Pylai 的 URL）",
+                    default,
+                    help_topic="public_url",
+                )
+            case "public_port":
+                self.answers.public_port = self._ask_int(
+                    "容器 80 映射到主机端口", 8080,
+                    help_topic="public_port",
+                )
+            case "api_port":
+                self.answers.api_port = self._ask_int(
+                    "后端 5000 映射到本机端口（仅绑定 127.0.0.1）", 5000,
+                    help_topic="api_port",
+                )
+            case "db_user":
+                self.answers.db_user = self._ask("PostgreSQL 用户名", "pylai")
+            case "db_name":
+                self.answers.db_name = self._ask("PostgreSQL 数据库名", "pylai")
+            case "max_account":
+                self._collect_max_account()
+            case "admin_account":
+                self._collect_admin_account()
+            case "user_account":
+                self._collect_user_account()
+            case "smtp":
+                self._collect_smtp()
+            case "encryption_cert":
+                self._collect_encryption_cert()
+            case "trusted_proxies":
+                val = self._ask("可信代理 IP（逗号分隔）", "127.0.0.1,::1", help_topic="trusted_proxies")
+                self.answers.trusted_proxies = split_csv(val)
+            case "trusted_networks":
+                val = self._ask("可信代理 CIDR（逗号分隔）", "172.16.0.0/12", help_topic="trusted_networks")
+                self.answers.trusted_networks = split_csv(val)
+            case "cors":
+                val = self._ask("额外 CORS Origin（逗号分隔，没有留空）", "", allow_blank=True)
+                self.answers.extra_cors_origins = split_csv(val)
+            case "mfa":
+                self._collect_mfa()
+
+    def _ask(
+        self,
+        prompt: str,
+        default: str = "",
+        *,
+        secret: bool = False,
+        allow_blank: bool = False,
+        help_topic: str = "",
+    ) -> str:
+        """增强版 ask，支持帮助和导航。"""
+        suffix = ""
+        if help_topic:
+            suffix += " [?帮助]"
+        suffix += " [<返回]" if self._history else ""
+
+        while True:
+            prompt_line = f"{prompt}{suffix}: "
+
+            try:
+                raw = getpass.getpass(prompt_line) if secret else input(prompt_line)
+            except (EOFError, KeyboardInterrupt):
+                out("\n已退出。")
+                raise SystemExit(0)
+
+            value = raw.strip()
+
+            # 帮助
+            if value == "?" and help_topic:
+                HelpSystem.show(help_topic)
+                continue
+
+            # 返回上一步
+            if value == "<" and self._history:
+                raise WizardBackError()
+
+            # 跳过
+            if value == "!":
+                raise WizardSkipError()
+
+            if value:
+                return value
+            if default is not None:
+                return default
+            if allow_blank:
+                return ""
+
+            out("该项不能为空。")
+
+    def _ask_int(
+        self,
+        prompt: str,
+        default: int,
+        *,
+        minimum: int = 1,
+        maximum: int = 65535,
+        help_topic: str = "",
+    ) -> int:
+        while True:
+            raw = self._ask(prompt, str(default), help_topic=help_topic)
+            with suppress(ValueError):
+                value = int(raw)
+                if minimum <= value <= maximum:
+                    return value
+            out(f"请输入 {minimum}-{maximum} 之间的数字。")
+
+    def _ask_bool(self, prompt: str, default: bool = True) -> bool:
+        suffix = " [Y/n]" if default else " [y/N]"
+        while True:
+            value = self._ask(f"{prompt}{suffix}", allow_blank=True).strip().lower()
+            if not value:
+                return default
+            if value in {"y", "yes", "1"}:
+                return True
+            if value in {"n", "no", "0"}:
+                return False
+            out("请输入 y 或 n。")
+
+    def _detect_public_url(self) -> str:
+        """检测建议的 public_url。"""
+        # 尝试获取本机 IP
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and ip not in ("127.0.0.1", "localhost"):
+                return f"http://{ip}:8080"
+        except Exception:
+            pass
+        return "http://localhost:8080"
+
+    def _collect_max_account(self) -> None:
+        out("\n-- Max 账号（最高权限，必须创建）--")
+        email = self._ask("Max 账号邮箱/登录名", "max@pylai.local")
+        password = self._ask("Max 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+        self.answers.max_account = SeedAccount(
+            role="max",
+            email=email,
+            password=password,
+            display_name="Max User",
+        )
+
+    def _collect_admin_account(self) -> None:
+        if self._ask_bool("创建初始 Admin 账号？", True):
+            email = self._ask("Admin 账号邮箱/登录名", "admin@pylai.local")
+            password = self._ask("Admin 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+            self.answers.admin_account = SeedAccount(
+                role="admin",
+                email=email,
+                password=password,
+                display_name="Administrator",
+            )
+
+    def _collect_user_account(self) -> None:
+        if self._ask_bool("创建初始 Normal 测试账号？", False):
+            email = self._ask("Normal 账号邮箱/登录名", "user@pylai.local")
+            password = self._ask("Normal 账号密码（留空自动生成）", "", secret=True, allow_blank=True)
+            self.answers.user_account = SeedAccount(
+                role="user",
+                email=email,
+                password=password,
+                display_name="Test User",
+            )
+
+    def _collect_smtp(self) -> None:
+        if self._ask_bool("配置 SMTP 邮件发送？", False):
+            smtp = configure_smtp_interactive()
+            if smtp:
+                self.answers.smtp = smtp
+
+    def _collect_encryption_cert(self) -> None:
+        out("\n-- 加密证书（生产环境必需）--")
+        HelpSystem.print_hint("encryption_cert")
+
+        if shutil.which("openssl") and self._ask_bool("自动生成加密证书？", True):
+            self.answers.encryption_pfx, self.answers.encryption_pfx_password = generate_encryption_pfx()
+            out("  ✓ 加密证书已自动生成")
+        else:
+            path = self._ask("加密 PFX 文件路径（留空则跳过，但生产环境必需）", "", allow_blank=True)
+            if path:
+                password = self._ask("加密 PFX 密码（无密码可留空）", "", secret=True, allow_blank=True)
+                self.answers.encryption_pfx = import_pfx(Path(path).expanduser(), "encryption.pfx")
+                self.answers.encryption_pfx_password = password
+
+    def _collect_mfa(self) -> None:
+        out("\n-- 高权限账户 MFA --")
+        HelpSystem.print_hint("mfa")
+
+        self.answers.mfa_for_admin = self._ask_bool("Admin 及以上角色登录时强制要求 MFA？", False)
+        if self.answers.mfa_for_admin:
+            self.answers.mfa_webauthn_for_max = self._ask_bool(
+                "Max 角色强制使用 WebAuthn（需 HTTPS 环境，HTTP 内网部署请勿开启）？",
+                False,
+            )
 
 # ============================================================================
 # 基础工具
@@ -2947,116 +3381,191 @@ def service_action(ctx: AppContext, action: ServiceAction) -> None:
 # 安装 / 更新 / 备份 / 用户 / 安全 / 配置服务
 # ============================================================================
 class InstallService:
+    """安装服务 - 新流程：必选项 → Web编辑器 → 启动容器。"""
+
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
 
+    # ========================================================================
+    # 公共入口
+    # ========================================================================
     def install_cli(self, args: argparse.Namespace) -> None:
+        """CLI 入口。"""
         tar_path = self._resolve_install_tar(args)
         image = self.ctx.docker.load_image_tar(tar_path)
-        answers = self.resolve_answers(args)
+
+        # 判断模式
+        from_existing = bool(args.pylai_config)
+        use_env = bool(args.env_file or args.yes)
         interactive = not (args.yes or args.pylai_config or args.env_file)
         allow_compat = bool(getattr(args, "compat", False))
 
         if getattr(args, "dry_run", False):
-            out("[dry-run] 预览安装配置（不实际启动）：")
-            validate_answers(answers)
-            out(f"  public_url: {answers.public_url}")
-            out(f"  public_port: {answers.public_port}  api_port: {answers.api_port}")
-            out(f"  db: {answers.db_user}@{answers.db_name}  redis: ***")
-            out(f"  image: {image}  compat: {allow_compat}")
-            # 尝试生成配置到内存并校验，不落盘
-            try:
-                PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
-                out("  配置模板渲染通过（已写入 pylai.toml，dry-run 场景可手动检查）")
-            except Exception as e:
-                out(f"  配置生成失败: {e}")
-            out("  Compose 预览: ~/.pylai/docker-compose.yml / ~/.pylai/.env")
+            self._dry_run(image, args, allow_compat)
             return
 
-        self.core_install(
-            tar_path,
-            image,
-            answers,
-            from_existing=bool(args.pylai_config),
-            interactive=interactive,
-            allow_compat=allow_compat,
-            yes_mode=args.yes,
-        )
-
-    def _resolve_install_tar(self, args: argparse.Namespace) -> Path:
-        """解析安装包来源：--from-remote 从云端下载，否则从本地磁盘选择。"""
-        from_remote = bool(getattr(args, "from_remote", False))
-        if from_remote:
-            client = ReleaseClient(self.ctx.manager)
-            version = resolve_remote_version(
-                client,
-                self.ctx.manager,
-                requested=getattr(args, "version", None),
-                yes=bool(args.yes),
-                prompt="请选择要安装的版本",
-            )
-            return ensure_remote_tar(client, self.ctx.manager, version, force=bool(getattr(args, "force", False)))
-        return select_tar(yes=args.yes)
+        if from_existing:
+            # 从现有配置安装
+            answers = self._answers_from_config(args)
+            self._run_install_pipeline(tar_path, image, answers, from_existing=True, interactive=False)
+        elif use_env:
+            # 非交互模式
+            answers = self._answers_from_env(args)
+            self._run_install_pipeline(tar_path, image, answers, from_existing=False, interactive=False, yes_mode=args.yes)
+        else:
+            # 交互模式：新向导流程
+            self._interactive_install(tar_path, image, allow_compat=allow_compat)
 
     def install_interactive(self) -> None:
+        """交互菜单入口。"""
         source = choose_install_source("请选择安装包的来源")
         client = ReleaseClient(self.ctx.manager)
 
         if source == "remote":
-            version = resolve_remote_version(
-                client,
-                self.ctx.manager,
-                prompt="请选择要安装的版本",
-            )
+            version = resolve_remote_version(client, self.ctx.manager, prompt="请选择要安装的版本")
             tar_path = ensure_remote_tar(client, self.ctx.manager, version)
         else:
             tar_path = select_tar(yes=False)
 
         image = self.ctx.docker.load_image_tar(tar_path)
-        answers = InstallAnswers.collect_interactive()
+        self._interactive_install(tar_path, image, allow_compat=False)
 
-        self.core_install(
-            tar_path,
-            image,
-            answers,
-            from_existing=False,
-            interactive=True,
-            allow_compat=False,
-            yes_mode=False,
+    # ========================================================================
+    # 新交互安装流程：必选项 → Web编辑器 → 启动
+    # ========================================================================
+    def _interactive_install(self, tar_path: Path, image: str, *, allow_compat: bool = False) -> None:
+        """新的交互安装流程。"""
+        ctx = self.ctx
+
+        # ---- 阶段 1: 分阶段向导收集必选项 ----
+        out("\n" + "=" * 60)
+        out("  Pylai 安装向导")
+        out("=" * 60)
+        out("\n将分步收集必要配置，之后可在网页编辑器中调整高级选项。\n")
+
+        wizard = InstallWizard()
+        answers = wizard.run()
+
+        # 自动生成密码
+        if not answers.db_password:
+            answers.db_password = secrets.token_hex(16)
+        if not answers.redis_password:
+            answers.redis_password = secrets.token_hex(16)
+        if not answers.invite_pepper:
+            answers.invite_pepper = secrets.token_hex(32)
+
+        # ---- 阶段 2: 生成基础配置 ----
+        out("\n" + "─" * 60)
+        out("  正在生成基础配置...")
+        out("─" * 60)
+
+        validate_answers(answers)
+        PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
+        ctx.config.reload()
+        self.fix_container_hosts()
+        ctx.config.validate()
+
+        ComposeConfig.generate(answers, ctx.manager, image)
+        ctx.docker.validate_compose()
+
+        ensure_signing_kek()
+        self.ensure_signing_certificate(answers)
+        self.ensure_encryption_certificate(answers, interactive=True)
+
+        out("  ✓ 基础配置已生成")
+
+        # ---- 阶段 3: 启动 Web 配置编辑器 ----
+        out("\n" + "=" * 60)
+        out("  网页配置编辑器")
+        out("=" * 60)
+        out("\n基础配置已完成。现在打开网页编辑器，您可以：")
+        out("  • 查看和调整所有配置项")
+        out("  • 配置 SMTP、MFA 等高级选项")
+        out("  • 确认无误后保存并启动服务")
+        out("\n按 Enter 启动编辑器（或输入 'skip' 跳过，使用默认配置）...")
+
+        try:
+            user_input = input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            user_input = ""
+
+        if user_input != "skip":
+            try:
+                # 启动编辑器，等待用户完成
+                self._run_web_editor()
+            except Exception as exc:
+                out(f"\n[警告] 网页编辑器异常: {exc}")
+                if not ask_bool("是否继续使用当前配置启动？", True):
+                    raise ManageError("安装已取消。")
+
+        # 重新加载可能已修改的配置
+        ctx.config.reload()
+
+        # ---- 阶段 4: 确认启动 ----
+        out("\n" + "=" * 60)
+        out("  准备启动")
+        out("=" * 60)
+
+        # 显示最终配置摘要
+        self._preview_config(answers)
+
+        if not ask_bool("\n确认使用以上配置启动 Pylai？", True):
+            out("安装已取消。配置已保存，可稍后手动启动。")
+            return
+
+        # ---- 阶段 5: 启动容器 ----
+        self._run_install_pipeline(
+            tar_path, image, answers,
+            from_existing=False, interactive=True, yes_mode=False,
+            skip_config=True,  # 已生成过配置
         )
 
-    def resolve_answers(self, args: argparse.Namespace) -> InstallAnswers:
-        if args.pylai_config:
-            source = Path(args.pylai_config).expanduser()
-            self.ctx.config = PylaiConfig.from_existing(source)
-            answers = self.ctx.config.extract_answers()
+    def _run_web_editor(self) -> None:
+        """启动网页编辑器并等待用户完成。"""
+        if not CONFIG_FILE.is_file():
+            raise ManageError("配置文件不存在")
 
-            answers.public_port = as_int(
-                os.environ.get("PYLAI_PUBLIC_PORT"),
-                answers.public_port,
-            )
-            answers.api_port = as_int(
-                os.environ.get("PYLAI_API_PORT"),
-                answers.api_port,
-            )
+        # 注入容器校验上下文
+        EDITOR_CTX.update(docker=self.ctx.docker)
 
-            if not answers.db_password or not answers.redis_password:
-                raise ManageError(
-                    "从现有配置无法提取数据库/Redis 密码，请检查 pylai.toml。"
-                )
+        port = find_free_port()
+        password = generate_editor_password()
+        server = ConfigEditorServer(port, password)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
 
-            return answers
+        out(f"\n🌐 编辑器已启动: http://127.0.0.1:{port}")
+        out(f"🔑 临时密码: {password}")
+        out("\n请在浏览器中完成配置编辑并保存。")
+        out("完成后按 Enter 键继续...")
 
-        if args.env_file:
-            return InstallAnswers.from_env(parse_env_file(Path(args.env_file).expanduser()))
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            out()
+        finally:
+            server.shutdown()
+            server.server_close()
 
-        if args.yes:
-            env = {k: v for k, v in os.environ.items() if k.startswith("PYLAI_")}
-            return InstallAnswers.from_env(env)
+        out("网页编辑器已关闭。")
 
-        return InstallAnswers.collect_interactive()
+    def _preview_config(self, answers: InstallAnswers) -> None:
+        """显示配置摘要。"""
+        out(f"\n  对外地址: {answers.public_url}")
+        out(f"  公开端口: {answers.public_port}")
+        out(f"  API 端口: {answers.api_port}")
+        out(f"  数据库:   {answers.db_user}@{answers.db_name}")
+        out(f"  Max 账号: {answers.max_account.email}")
+        if answers.admin_account:
+            out(f"  Admin 账号: {answers.admin_account.email}")
+        if answers.smtp.enabled:
+            out(f"  SMTP:     {answers.smtp.host}:{answers.smtp.port}")
+        out(f"  加密证书: {'已配置' if answers.encryption_pfx else '未配置（建议配置）'}")
 
-    def core_install(
+    # ========================================================================
+    # 流水线安装（CLI 和最终启动共用）
+    # ========================================================================
+    def _run_install_pipeline(
         self,
         tar_path: Path,
         image: str,
@@ -3066,103 +3575,120 @@ class InstallService:
         interactive: bool,
         allow_compat: bool = False,
         yes_mode: bool = False,
+        skip_config: bool = False,
     ) -> None:
+        """使用 OperationPipeline 执行安装。"""
         ctx = self.ctx
 
-        # ---- 安装流水线（每步带序号，便于定位失败点） ----
-        steps: list[tuple[str, Callable[[], None]]] = []
+        pipeline = OperationPipeline("Pylai 安装")
 
-        def step_validate() -> None:
-            validate_answers(answers)
+        # 步骤 1: 校验
+        pipeline.add("校验输入与弱密码预检", lambda: validate_answers(answers))
 
-        def step_config() -> None:
-            if not from_existing:
-                PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
-                ctx.config.reload()
-            self.fix_container_hosts()
-            # 生成后再次校验 TOML 合法性
-            ctx.config.validate()
-            out(f"  配置已写入: {CONFIG_FILE}（脱敏预览见 [6] 查看配置）")
+        # 步骤 2: 生成配置（如需要）
+        if not skip_config:
+            def step_config() -> None:
+                if not from_existing:
+                    PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
+                    ctx.config.reload()
+                self.fix_container_hosts()
+                ctx.config.validate()
+            pipeline.add("生成配置", step_config, checkpoint=True)
 
+        # 步骤 3: 生成 Compose
         def step_compose() -> None:
             ComposeConfig.generate(answers, ctx.manager, image)
-            # 预检 compose 语法
-            try:
-                ctx.docker.validate_compose()
-            except ManageError as e:
-                raise ManageError(f"Compose 校验失败:\n{e}") from e
-            out(f"  Compose 已生成: {HOME / 'docker-compose.yml'} / {HOME / '.env'}")
+            ctx.docker.validate_compose()
+        pipeline.add("生成 Compose", step_compose)
 
-        def step_volumes() -> None:
-            ComposeConfig.ensure_volumes()
+        # 步骤 4: 创建数据卷
+        pipeline.add("创建数据卷", ComposeConfig.ensure_volumes)
 
+        # 步骤 5: 准备证书
         def step_certs() -> None:
             ensure_signing_kek()
             self.ensure_signing_certificate(answers)
             self.ensure_encryption_certificate(answers, interactive=interactive)
-            if answers.encryption_pfx:
-                out(f"  加密证书: {answers.encryption_pfx}")
+        pipeline.add("准备证书与 KEK", step_certs)
 
+        # 步骤 6: 启动容器
         def step_start() -> None:
             ctx.docker.ensure_docker()
             ctx.docker.start(image, answers)
-            out(f"  容器已启动: {image} (public:{answers.public_port} api:{answers.api_port})")
+        pipeline.add("启动容器", step_start)
 
+        # 步骤 7: 健康检查
         def step_health() -> None:
-            out(f"==> 等待健康检查 http://127.0.0.1:{answers.api_port}/health/ready ...")
-            # 取消超时自动取消，超过 300s 仅警告（按用户要求）
+            out(f"\n==> 等待健康检查 http://127.0.0.1:{answers.api_port}/health/ready ...")
             healthy = ctx.docker.wait_healthy(answers.api_port, timeout=None, warn_after=300)
             if not healthy:
                 ctx.docker.dump_diagnostics(tail=200)
-                # 失败时保留现场，询问是否清理（yes_mode 则默认保留）
-                if not yes_mode and not interactive:
-                    # 非交互非 yes 模式（CLI --yes 已在外层）默认保留，提示手动清理
-                    pass
-                elif not yes_mode:
+                if interactive and not yes_mode:
                     out("\n[提示] 安装失败，现场已保留以便排查。")
-                    if ask_bool("是否清理本次创建的容器与数据卷（保留则可手动排查）？", False):
-                        out("==> 清理中...")
+                    if ask_bool("是否清理本次创建的容器与数据卷？", False):
                         with suppress(Exception):
                             ctx.docker.compose("down", "-v", check=False)
                 raise ManageError("服务启动失败，请根据上方诊断信息排查。")
+        pipeline.add("健康检查", step_health)
 
-        steps = [
-            ("校验输入与弱密码预检", step_validate),
-            ("生成配置", step_config),
-            ("生成 Compose", step_compose),
-            ("创建数据卷", step_volumes),
-            ("准备证书与 KEK", step_certs),
-            ("启动容器", step_start),
-            ("健康检查", step_health),
-        ]
+        # 执行流水线
+        pipeline.run()
 
-        total = len(steps)
-        for idx, (label, fn) in enumerate(steps, 1):
-            out(f"\n[{idx}/{total}] {label} ...")
-            try:
-                fn()
-                out(f"  ✓ {label} 完成")
-            except ManageError:
-                out(f"  ✗ {label} 失败")
-                # 任何一步失败后，若已生成 compose 则提示诊断
-                if idx >= 3:
-                    with suppress(Exception):
-                        ctx.docker.dump_diagnostics(tail=100)
-                raise
-            except Exception as exc:
-                out(f"  ✗ {label} 异常: {exc}")
-                raise ManageError(f"{label} 失败: {exc}") from exc
-
+        # 保存状态
         self.save_state(tar_path, image, answers)
         self.print_summary(answers)
-        out("提示：建议使用主机 Nginx 反代，主菜单 [8] 可生成配置模板。")
+        out("\n提示：建议使用主机 Nginx 反代，主菜单 [8] 可生成配置模板。")
 
-        if interactive:
-            out("\n==> 自动打开网页配置编辑器（可检查/调整安装生成的配置，按回车键关闭）...")
-            try:
-                ConfigService(self.ctx).edit_in_web()
-            except Exception as exc:
-                out(f"[警告] 网页配置编辑器启动失败: {exc}（可稍后经主菜单 [7] → 网页编辑 打开）")
+    # ========================================================================
+    # 辅助方法
+    # ========================================================================
+    def _resolve_install_tar(self, args: argparse.Namespace) -> Path:
+        """解析安装包来源。"""
+        from_remote = bool(getattr(args, "from_remote", False))
+        if from_remote:
+            client = ReleaseClient(self.ctx.manager)
+            version = resolve_remote_version(
+                client, self.ctx.manager,
+                requested=getattr(args, "version", None),
+                yes=bool(args.yes),
+                prompt="请选择要安装的版本",
+            )
+            return ensure_remote_tar(client, self.ctx.manager, version, force=bool(getattr(args, "force", False)))
+        return select_tar(yes=args.yes)
+
+    def _answers_from_config(self, args: argparse.Namespace) -> InstallAnswers:
+        """从现有配置提取答案。"""
+        source = Path(args.pylai_config).expanduser()
+        self.ctx.config = PylaiConfig.from_existing(source)
+        answers = self.ctx.config.extract_answers()
+        answers.public_port = as_int(os.environ.get("PYLAI_PUBLIC_PORT"), answers.public_port)
+        answers.api_port = as_int(os.environ.get("PYLAI_API_PORT"), answers.api_port)
+        if not answers.db_password or not answers.redis_password:
+            raise ManageError("从现有配置无法提取数据库/Redis 密码，请检查 pylai.toml。")
+        return answers
+
+    def _answers_from_env(self, args: argparse.Namespace) -> InstallAnswers:
+        """从环境变量提取答案。"""
+        if args.env_file:
+            return InstallAnswers.from_env(parse_env_file(Path(args.env_file).expanduser()))
+        env = {k: v for k, v in os.environ.items() if k.startswith("PYLAI_")}
+        return InstallAnswers.from_env(env)
+
+    def _dry_run(self, image: str, args: argparse.Namespace, allow_compat: bool) -> None:
+        """干运行模式。"""
+        out("[dry-run] 预览安装配置（不实际启动）：")
+        answers = self._answers_from_env(args) if args.env_file or args.yes else InstallAnswers.collect_interactive()
+        validate_answers(answers)
+        out(f"  public_url: {answers.public_url}")
+        out(f"  public_port: {answers.public_port}  api_port: {answers.api_port}")
+        out(f"  db: {answers.db_user}@{answers.db_name}  redis: ***")
+        out(f"  image: {image}  compat: {allow_compat}")
+        try:
+            PylaiConfig.generate_from_template(image, answers, allow_compat=allow_compat)
+            out("  配置模板渲染通过")
+        except Exception as e:
+            out(f"  配置生成失败: {e}")
+        out("  Compose 预览: ~/.pylai/docker-compose.yml / ~/.pylai/.env")
 
     def fix_container_hosts(self) -> None:
         config = self.ctx.config
@@ -5898,26 +6424,148 @@ class SettingsService:
 # 交互菜单
 # ============================================================================
 class InteractiveMenu:
+    """交互式菜单 - 带面包屑导航。"""
+
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
+        self._breadcrumb: list[str] = []
+        self._last_choice: str | None = None
 
-    def print_header(self) -> None:
+    # ========================================================================
+    # 导航辅助
+    # ========================================================================
+    def _enter(self, name: str) -> None:
+        self._breadcrumb.append(name)
+
+    def _exit(self) -> None:
+        if self._breadcrumb:
+            self._breadcrumb.pop()
+
+    def _print_header(self) -> None:
         ctx = self.ctx
+        path = " > ".join(self._breadcrumb) if self._breadcrumb else "主菜单"
 
         out(f"\n{'=' * 50}")
-        out(f"  ManagePylai  v{__version__}")
-        out(f"  项目: {ctx.manager.project_name}")
+        out(f"  {path}")
+        out(f"{'=' * 50}")
 
         if ctx.state.installed:
-            status = "运行中" if ctx.docker.service_running() else "已停止"
-            out(f"  状态: {status}  |  版本: {ctx.state.version}")
+            running = ctx.docker.service_running()
+            status = "🟢 运行中" if running else "🔴 已停止"
+            out(f"  版本: v{ctx.state.version} | {status}")
             out(f"  地址: {ctx.state.public_url}")
         else:
             out("  状态: 未安装")
 
         out(f"{'=' * 50}")
 
-    def print_menu(self) -> None:
+    def _prompt(self) -> str:
+        try:
+            return input("\n> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            out("\n再见。")
+            raise SystemExit(0)
+
+    def _confirm_back(self) -> bool:
+        """询问是否返回上级。"""
+        out("\n  [b] 返回上级 | [q] 退出程序")
+        return True
+
+    # ========================================================================
+    # 统一子菜单
+    # ========================================================================
+    def run_submenu(self, title: str, items: list[tuple[str, Callable[[], None]]]) -> None:
+        """统一子菜单：支持数字选择、b返回、q退出。"""
+        self._enter(title)
+
+        while True:
+            self._print_header()
+
+            for idx, (label, _) in enumerate(items, 1):
+                out(f"  [{idx}] {label}")
+            out("  [b] 返回上级")
+            out("  [q] 退出程序")
+
+            choice = self._prompt()
+
+            if choice in ("b", "back"):
+                self._exit()
+                return
+            if choice in ("q", "quit", "exit"):
+                out("再见。")
+                raise SystemExit(0)
+
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(items):
+                    items[idx][1]()
+                    if not self._breadcrumb:  # 如果已返回主菜单则退出
+                        return
+            except ManageError as exc:
+                out(f"错误: {exc}")
+                input("按 Enter 继续...")
+            except SystemExit:
+                raise
+            except Exception as exc:
+                out(f"未预期错误: {exc}")
+                input("按 Enter 继续...")
+
+    # ========================================================================
+    # 主菜单
+    # ========================================================================
+    def run(self) -> None:
+        self.auto_check_notify()
+
+        while True:
+            self._breadcrumb = []  # 重置面包屑
+            self._print_header()
+            self._print_main_menu()
+
+            choice = self._prompt()
+
+            try:
+                match choice:
+                    case "0" | "q" | "quit" | "exit":
+                        out("再见。")
+                        return
+                    case "1":
+                        self._install()
+                    case "2":
+                        self._update()
+                    case "3":
+                        self._uninstall()
+                    case "4":
+                        self._run_control()
+                    case "5":
+                        self._logs()
+                    case "6":
+                        self._view_config()
+                    case "7":
+                        self._edit_config()
+                    case "8":
+                        self._generate_nginx()
+                    case "9":
+                        self._users()
+                    case "10":
+                        self._backup()
+                    case "11":
+                        self._security()
+                    case "12":
+                        self._self_update()
+                    case "13":
+                        self._settings()
+                    case _:
+                        out("选择无效。")
+            except ManageError as exc:
+                out(f"错误: {exc}")
+                input("按 Enter 继续...")
+            except SystemExit:
+                raise
+            except Exception as exc:
+                out(f"未预期错误: {exc}")
+                input("按 Enter 继续...")
+
+    def _print_main_menu(self) -> None:
         out("\n[安装与更新]")
         out("  [1] 安装 Pylai")
         out("  [2] 更新 Pylai")
@@ -5941,62 +6589,149 @@ class InteractiveMenu:
 
         out("\n[工具]")
         out("  [12] 检查 ManagePylai.py 更新")
-        out("  [13] 管理工具设置（镜像源/自动检查/下载目录）")
+        out("  [13] 管理工具设置")
 
         out("\n[0] 退出")
 
-    def run(self) -> None:
-        self.auto_check_notify()
+    # ========================================================================
+    # 菜单动作
+    # ========================================================================
+    def _install(self) -> None:
+        if self.ctx.state.installed:
+            out("检测到已有安装。如需重新安装，请先卸载。")
+            return
+        InstallService(self.ctx).install_interactive()
 
-        while True:
-            self.print_header()
-            self.print_menu()
+    def _update(self) -> None:
+        UpdateService(self.ctx).update_interactive()
 
-            try:
-                choice = input("\n> ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                out("\n再见。")
-                return
+    def _uninstall(self) -> None:
+        uninstall(self.ctx, yes=False, purge=False)
 
-            try:
-                match choice:
-                    case "0" | "q" | "quit" | "exit":
-                        out("再见。")
-                        return
-                    case "1":
-                        self.install()
-                    case "2":
-                        self.update()
-                    case "3":
-                        self.uninstall()
-                    case "4":
-                        self.run_control()
-                    case "5":
-                        self.logs()
-                    case "6":
-                        self.view_config()
-                    case "7":
-                        self.edit_config()
-                    case "8":
-                        self.generate_nginx()
-                    case "9":
-                        self.users()
-                    case "10":
-                        self.backup()
-                    case "11":
-                        self.security()
-                    case "12":
-                        self.self_update()
-                    case "13":
-                        self.settings()
-                    case _:
-                        out("选择无效。")
-            except ManageError as exc:
-                out(f"错误: {exc}")
-            except SystemExit:
-                raise
-            except Exception as exc:
-                out(f"未预期错误: {exc}")
+    def _run_control(self) -> None:
+        self.ctx.require_installed()
+        status = self.ctx.docker.service_status()
+        out(f"\n当前状态: {status}")
+
+        self.run_submenu(
+            "运行控制",
+            [
+                ("启动", lambda: service_action(self.ctx, "start")),
+                ("停止", lambda: service_action(self.ctx, "stop")),
+                ("重启", lambda: service_action(self.ctx, "restart")),
+                ("查看简要状态", lambda: service_action(self.ctx, "status")),
+            ],
+        )
+
+    def _logs(self) -> None:
+        self.ctx.require_installed()
+        self.run_submenu(
+            "日志查看",
+            [
+                ("最近 100 行", lambda: self.ctx.docker.view_logs(100)),
+                ("最近 500 行", lambda: self.ctx.docker.view_logs(500)),
+                ("最近 2000 行", lambda: self.ctx.docker.view_logs(2000)),
+                ("全部日志", lambda: self.ctx.docker.view_logs("all")),
+            ],
+        )
+
+    def _view_config(self) -> None:
+        ConfigService(self.ctx).view()
+        input("\n按 Enter 返回...")
+
+    def _edit_config(self) -> None:
+        self.ctx.require_installed()
+        config_service = ConfigService(self.ctx)
+
+        self.run_submenu(
+            "修改配置",
+            [
+                ("🌐 在网页编辑（推荐）", config_service.edit_in_web),
+                ("修改公开地址", config_service.change_url),
+                ("修改端口", config_service.change_ports),
+                ("修改 SMTP 邮件配置", config_service.change_smtp),
+                ("修改 MFA 配置", config_service.change_mfa),
+                ("修改 Max 账号密码", lambda: config_service.reset_password("max")),
+                ("修改 Admin 账号密码", lambda: config_service.reset_password("admin")),
+            ],
+        )
+
+    def _generate_nginx(self) -> None:
+        ConfigService(self.ctx).generate_nginx()
+        input("\n按 Enter 返回...")
+
+    def _users(self) -> None:
+        self.ctx.require_running()
+        users = UserService(self.ctx)
+
+        self.run_submenu(
+            "用户管理",
+            [
+                ("用户列表", users.list_users),
+                ("查看用户详情", users.show_user),
+                ("创建用户", lambda: users.create_user(interactive=True)),
+                ("删除用户", users.delete_user),
+                ("修改用户密码", users.reset_password),
+                ("设置用户组", lambda: users.set_group(interactive=True)),
+                ("设置用户状态", lambda: users.set_status(interactive=True)),
+                ("吊销用户全部会话", users.revoke_sessions),
+            ],
+        )
+
+    def _backup(self) -> None:
+        self.ctx.require_installed()
+        backup = BackupService(self.ctx)
+
+        self.run_submenu(
+            "备份与恢复",
+            [
+                ("导出全部数据", backup.export),
+                ("导入全部数据", backup.restore_interactive),
+                ("查看备份目录", backup.list_backups),
+            ],
+        )
+
+    def _security(self) -> None:
+        self.ctx.require_running()
+        security = SecurityService(self.ctx)
+
+        self.run_submenu(
+            "安全维护",
+            [
+                ("签名密钥状态", security.key_status),
+                ("人工轮换签名密钥", security.key_rotate),
+                ("数据库迁移状态", security.db_status),
+                ("执行 db bootstrap", security.db_bootstrap),
+            ],
+        )
+
+    def _self_update(self) -> None:
+        client = ReleaseClient(self.ctx.manager)
+        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
+
+        if result := updater.check():
+            version, _ = result
+            out(f"发现新版本: {version}")
+            if ask_bool("是否更新管理工具？", True):
+                updater.update()
+        else:
+            out("当前已是最新版本，或无法获取版本信息。")
+        input("\n按 Enter 返回...")
+
+    def _settings(self) -> None:
+        settings = SettingsService(self.ctx)
+
+        self.run_submenu(
+            "管理工具设置",
+            [
+                ("查看当前设置", settings.view),
+                ("修改镜像源", settings.change_mirror),
+                ("自动检查更新", settings.change_auto_check),
+                ("包含预发布版本", settings.change_include_prerelease),
+                ("下载缓存目录", settings.change_download_dir),
+                ("更新前自动备份", settings.change_auto_backup),
+            ],
+        )
 
     def auto_check_notify(self) -> None:
         """启动时按 ManagerConfig [Updates] AutoCheck 配置静默检查并提示新版本。"""
@@ -6030,158 +6765,7 @@ class InteractiveMenu:
                     "主菜单 [2] 可从云端更新。"
                 )
 
-    def install(self) -> None:
-        if self.ctx.state.installed:
-            out("检测到已有安装。如需重新安装，请先卸载。")
-            return
 
-        InstallService(self.ctx).install_interactive()
-
-    def update(self) -> None:
-        UpdateService(self.ctx).update_interactive()
-
-    def settings(self) -> None:
-        settings = SettingsService(self.ctx)
-
-        run_submenu(
-            "管理工具设置（写入 ~/.pylai/ManagerConfig.toml）",
-            "主菜单",
-            [
-                ("查看当前设置", settings.view),
-                ("修改镜像源（Mirror / BaseUrl）", settings.change_mirror),
-                ("自动检查更新（AutoCheck）", settings.change_auto_check),
-                ("版本列表包含预发布（IncludePrerelease）", settings.change_include_prerelease),
-                ("下载缓存目录（DownloadDir）", settings.change_download_dir),
-                ("更新前自动备份（AutoBackupBeforeUpdate）", settings.change_auto_backup),
-            ],
-        )
-
-    def uninstall(self) -> None:
-        uninstall(self.ctx, yes=False, purge=False)
-
-    def run_control(self) -> None:
-        self.ctx.require_installed()
-        status = self.ctx.docker.service_status()
-        out(f"\n当前状态: {status}")
-
-        run_submenu(
-            "运行控制",
-            "主菜单",
-            [
-                ("启动", lambda: service_action(self.ctx, "start")),
-                ("停止", lambda: service_action(self.ctx, "stop")),
-                ("重启", lambda: service_action(self.ctx, "restart")),
-                ("查看简要状态", lambda: service_action(self.ctx, "status")),
-            ],
-        )
-
-    def logs(self) -> None:
-        self.ctx.require_installed()
-
-        run_submenu(
-            "日志查看",
-            "主菜单",
-            [
-                ("最近 100 行", lambda: self.ctx.docker.view_logs(100)),
-                ("最近 500 行", lambda: self.ctx.docker.view_logs(500)),
-                ("最近 2000 行", lambda: self.ctx.docker.view_logs(2000)),
-                ("全部日志", lambda: self.ctx.docker.view_logs("all")),
-            ],
-        )
-
-    def view_config(self) -> None:
-        ConfigService(self.ctx).view()
-
-    def edit_config(self) -> None:
-        self.ctx.require_installed()
-
-        config_service = ConfigService(self.ctx)
-
-        run_submenu(
-            "修改配置",
-            "主菜单",
-            [
-                ("在网页编辑 ->", config_service.edit_in_web),
-                ("修改公开地址", config_service.change_url),
-                ("修改端口", config_service.change_ports),
-                ("修改 SMTP 邮件配置", config_service.change_smtp),
-                ("修改 MFA 配置", config_service.change_mfa),
-                ("修改 Max 账号密码", lambda: config_service.reset_password("max")),
-                ("修改 Admin 账号密码", lambda: config_service.reset_password("admin")),
-            ],
-        )
-
-    def generate_nginx(self) -> None:
-        ConfigService(self.ctx).generate_nginx()
-
-    def users(self) -> None:
-        self.ctx.require_running()
-
-        users = UserService(self.ctx)
-
-        run_submenu(
-            "用户管理",
-            "主菜单",
-            [
-                ("用户列表", users.list_users),
-                ("查看用户详情", users.show_user),
-                ("创建用户", lambda: users.create_user(interactive=True)),
-                ("删除用户", users.delete_user),
-                ("修改用户密码", users.reset_password),
-                ("设置用户组", lambda: users.set_group(interactive=True)),
-                ("设置用户状态", lambda: users.set_status(interactive=True)),
-                ("吊销用户全部会话", users.revoke_sessions),
-            ],
-        )
-
-    def backup(self) -> None:
-        self.ctx.require_installed()
-
-        backup = BackupService(self.ctx)
-
-        run_submenu(
-            "备份与恢复",
-            "主菜单",
-            [
-                ("导出全部数据（数据库全量快照）", backup.export),
-                ("导入全部数据（停止后端并全量覆盖）", backup.restore_interactive),
-                ("查看主机备份目录", backup.list_backups),
-            ],
-        )
-
-    def security(self) -> None:
-        self.ctx.require_running()
-
-        security = SecurityService(self.ctx)
-
-        run_submenu(
-            "安全维护",
-            "主菜单",
-            [
-                ("签名密钥状态", security.key_status),
-                ("人工轮换签名密钥", security.key_rotate),
-                ("数据库迁移状态", security.db_status),
-                ("执行 db bootstrap（幂等）", security.db_bootstrap),
-            ],
-        )
-
-    def self_update(self) -> None:
-        client = ReleaseClient(self.ctx.manager)
-        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
-
-        if result := updater.check():
-            version, _ = result
-            out(f"发现新版本: {version}")
-
-            if ask_bool("是否更新管理工具？", True):
-                updater.update()
-        else:
-            out("当前已是最新版本，或无法获取版本信息。")
-
-
-# ============================================================================
-# CLI 命令
-# ============================================================================
 def cmd_install(ctx: AppContext, args: argparse.Namespace) -> None:
     if ctx.state.installed:
         raise ManageError("检测到已有安装。如需重新安装，请先卸载。")
