@@ -4790,6 +4790,7 @@ button { font: inherit; cursor: pointer; }
   transition: border-color .15s, box-shadow .15s, background .15s;
 }
 .field textarea { min-height: 140px; resize: vertical; line-height: 1.6; }
+.field textarea.mail-context { min-height: 260px; }
 .field input:focus, .field textarea:focus, .field select:focus {
   border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--panel);
 }
@@ -4836,6 +4837,21 @@ button { font: inherit; cursor: pointer; }
 #preview pre .focus-line { border-bottom: 2px solid var(--warning); }
 #preview pre .valid-line { border-bottom: 2px solid var(--ok); }
 #preview pre .invalid-line { border-bottom: 2px solid var(--danger); }
+
+#preview pre .multiline-line { display: block; }
+#preview pre .ml-toggle {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+}
+#preview pre .ml-toggle:hover { background: var(--accent); color: #fff; }
 
 /* ---------- 弹窗 ---------- */
 .modal-mask {
@@ -5211,6 +5227,9 @@ function renderEditor() {
       control = '<input type="text" value="' + escapeHtml(current.join(", ")) + '" placeholder="以英文逗号分隔">';
     } else if (typeof current === "string" && current.includes("\n")) {
       control = "<textarea>" + escapeHtml(current) + "</textarea>";
+    } else if (isMailTheme && entry.key === "Context") {
+      // 邮件正文强制使用多行文本框
+      control = '<textarea class="mail-context">' + escapeHtml(String(current)) + "</textarea>";
     } else {
       control = '<input type="' + (entry.secret ? "password" : "text") + '" value="' + escapeHtml(String(current)) + '">';
     }
@@ -5309,6 +5328,8 @@ function renderPreview() {
   let html = "";
   let currentSec = null;
   let buffer = "";
+  let multilineBuffer = null;  // { key, sec, lines: [] }
+
   function flush() {
     if (currentSec !== null) {
       const active = currentSec === activeSection ? " active-sec" : "";
@@ -5318,13 +5339,64 @@ function renderPreview() {
     }
     buffer = "";
   }
-  for (const line of lines) {
+
+  function flushMultiline() {
+    if (!multilineBuffer) return;
+    const fullText = multilineBuffer.lines.join("\n");
+    const isLong = multilineBuffer.lines.length > 3;
+    const displayText = isLong ? multilineBuffer.lines.slice(0, 3).join("\n") : fullText;
+    const keyAttr = ' data-key="' + escapeHtml(multilineBuffer.key) + '"';
+    const secAttr = ' data-sec="' + escapeHtml(multilineBuffer.sec) + '"';
+    const mid = 'ml-' + multilineBuffer.sec.replace(/\./g, "-") + '-' + multilineBuffer.key;
+    if (isLong) {
+      buffer += '<span class="cfg-line multiline-line"' + secAttr + keyAttr + '>' +
+        '<span class="ml-content" id="' + mid + '-short">' + escapeHtml(displayText) + '</span>' +
+        '<span class="ml-content" id="' + mid + '-full" style="display:none">' + escapeHtml(fullText) + '</span>' +
+        '<button type="button" class="ml-toggle" data-mid="' + mid + '" data-expanded="false">▼ 展开</button>' +
+        '</span>';
+    } else {
+      buffer += '<span class="cfg-line"' + secAttr + keyAttr + '>' + escapeHtml(fullText) + '</span>';
+    }
+    multilineBuffer = null;
+  }
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
     const m = line.match(/^\s*\[([^\]]+)\]\s*$/);
     if (m) {
+      flushMultiline();
       flush();
       currentSec = m[1].trim();
       buffer += '<span class="cfg-line sec-title" data-sec="' + escapeHtml(currentSec) + '">' + escapeHtml(line) + '</span>';
-    } else if (currentSec !== null) {
+      continue;
+    }
+
+    // 检测多行字符串开始
+    if (!multilineBuffer) {
+      const km = line.match(/^(\s*)([^=\s]+)\s*=\s*('''|\"\"\")(.*)$/);
+      if (km && currentSec !== null) {
+        const quote = km[3];
+        const rest = km[4];
+        if (!rest.includes(quote)) {
+          multilineBuffer = { key: km[2], sec: currentSec, lines: [line], endQuote: quote };
+          continue;
+        }
+        // 单行但用三引号包裹，直接渲染
+        const keyAttr = ' data-key="' + escapeHtml(km[2]) + '"';
+        buffer += '<span class="cfg-line" data-sec="' + escapeHtml(currentSec) + '"' + keyAttr + '>' + escapeHtml(line) + '</span>';
+        continue;
+      }
+    }
+
+    if (multilineBuffer) {
+      multilineBuffer.lines.push(line);
+      if (line.includes(multilineBuffer.endQuote)) {
+        flushMultiline();
+      }
+      continue;
+    }
+
+    if (currentSec !== null) {
       const km = line.match(/^(\s*)([^=\s]+)\s*=\s*(.*)$/);
       const keyAttr = km ? ' data-key="' + escapeHtml(km[2]) + '"' : "";
       buffer += '<span class="cfg-line" data-sec="' + escapeHtml(currentSec) + '"' + keyAttr + '>' + escapeHtml(line) + '</span>';
@@ -5332,8 +5404,31 @@ function renderPreview() {
       buffer += '<span class="cfg-line">' + escapeHtml(line) + '</span>';
     }
   }
+  flushMultiline();
   flush();
   $("#preview-pre").innerHTML = html;
+
+  // 绑定多行展开/折叠按钮
+  $("#preview-pre").querySelectorAll(".ml-toggle").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const mid = btn.dataset.mid;
+      const expanded = btn.dataset.expanded === "true";
+      const shortEl = $("#" + mid + "-short");
+      const fullEl = $("#" + mid + "-full");
+      if (expanded) {
+        shortEl.style.display = "";
+        fullEl.style.display = "none";
+        btn.dataset.expanded = "false";
+        btn.textContent = "▼ 展开";
+      } else {
+        shortEl.style.display = "none";
+        fullEl.style.display = "";
+        btn.dataset.expanded = "true";
+        btn.textContent = "▲ 折叠";
+      }
+    });
+  });
+
   refreshPreviewHighlights();
 }
 
@@ -5354,12 +5449,16 @@ function refreshPreviewHighlights() {
     el.classList.remove("focus-line", "valid-line", "invalid-line"));
   for (const [id, e] of edits) {
     if (id === currentFocusId) continue;
-    const [section, key] = id.split(".");
+    const dotIdx = id.indexOf(".");
+    const section = id.slice(0, dotIdx);
+    const key = id.slice(dotIdx + 1);
     const line = pre.querySelector('.cfg-line[data-sec="' + CSS.escape(section) + '"][data-key="' + CSS.escape(key) + '"]');
     if (line) line.classList.add(e.error ? "invalid-line" : "valid-line");
   }
   if (currentFocusId) {
-    const [section, key] = currentFocusId.split(".");
+    const dotIdx = currentFocusId.indexOf(".");
+    const section = currentFocusId.slice(0, dotIdx);
+    const key = currentFocusId.slice(dotIdx + 1);
     const line = pre.querySelector('.cfg-line[data-sec="' + CSS.escape(section) + '"][data-key="' + CSS.escape(key) + '"]');
     if (line) {
       line.classList.remove("valid-line", "invalid-line");
