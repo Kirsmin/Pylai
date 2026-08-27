@@ -34,6 +34,19 @@ const logoFailed = ref(false)
 
 const altchaPayload = ref<string | null>(null)
 
+interface AltchaWidgetHandle {
+  ensureVerified: () => Promise<{ required: boolean; payload: string | null }>
+}
+
+const altchaRef = ref<AltchaWidgetHandle | null>(null)
+
+async function resolveAltchaPayload(): Promise<unknown | null | undefined> {
+  const verification = await altchaRef.value?.ensureVerified()
+  if (!verification) return undefined
+  if (verification.required && !verification.payload) return undefined
+  return verification.payload ? JSON.parse(verification.payload) : null
+}
+
 const scopesPerPage = 5
 
 const appName = computed(() => request.value?.displayName ?? '')
@@ -115,9 +128,15 @@ async function submitConsent(approved: boolean) {
   }
 
   try {
+    const altcha = await resolveAltchaPayload()
+    if (altcha === undefined) {
+      submitError.value = '人机验证未完成，请重试。'
+      return
+    }
+
     const data = await api<{ redirectUrl?: string }>('/api/auth/authorize-request/consent', {
       method: 'POST',
-      body: JSON.stringify({ requestId: id.value, approved, altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null })
+      body: JSON.stringify({ requestId: id.value, approved, altcha })
     })
 
     if (data.redirectUrl) {
@@ -296,7 +315,7 @@ onMounted(() => {
                   <p style="margin: 4px 0;">{{ submitError }}</p>
                 </NAlert>
 
-                <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
+                <AltchaWidget ref="altchaRef" v-model="altchaPayload" auto="off" hide-footer />
 
                 <div class="btn-group">
                   <NButton

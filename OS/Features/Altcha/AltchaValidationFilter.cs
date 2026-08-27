@@ -77,13 +77,16 @@ public class AltchaValidationFilter : IAsyncActionFilter
             catch { /* ignore */ }
         }
 
-        var form = ctx.HttpContext.Request.Form["altcha"].FirstOrDefault()
-            ?? ctx.HttpContext.Request.Query["altcha"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(form))
+        var formOrQuery = ctx.HttpContext.Request.Query["altcha"].FirstOrDefault();
+        if (ctx.HttpContext.Request.HasFormContentType)
+        {
+            formOrQuery = ctx.HttpContext.Request.Form["altcha"].FirstOrDefault() ?? formOrQuery;
+        }
+        if (!string.IsNullOrEmpty(formOrQuery))
         {
             try
             {
-                return JsonSerializer.Deserialize<AltchaPayload>(form, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                return JsonSerializer.Deserialize<AltchaPayload>(formOrQuery, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
             }
             catch { /* ignore */ }
         }

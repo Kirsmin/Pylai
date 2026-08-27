@@ -65,6 +65,19 @@ const inviteBanned = ref(false)
 
 const altchaPayload = ref<string | null>(null)
 
+interface AltchaWidgetHandle {
+  ensureVerified: () => Promise<{ required: boolean; payload: string | null }>
+}
+
+const altchaRef = ref<AltchaWidgetHandle | null>(null)
+
+async function resolveAltchaPayload(): Promise<unknown | null | undefined> {
+  const verification = await altchaRef.value?.ensureVerified()
+  if (!verification) return undefined
+  if (verification.required && !verification.payload) return undefined
+  return verification.payload ? JSON.parse(verification.payload) : null
+}
+
 const userGroup = ref('normal')
 
 const groupLabel = computed(() => {
@@ -101,7 +114,15 @@ async function handleInit() {
       requireInviteCode.value = false
     }
 
-    const data = await api('/api/auth/register/init', { method: 'POST', body: JSON.stringify({ altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null }) })
+    const altcha = await resolveAltchaPayload()
+    if (altcha === undefined) {
+      state.value = 'serviceError'
+      title.value = '× Pylai'
+      subtitle.value = '人机验证未完成，请重试。'
+      return
+    }
+
+    const data = await api('/api/auth/register/init', { method: 'POST', body: JSON.stringify({ altcha }) })
 
     if (!data.success) {
       if (data.errorCode === 'rate_limited') {
@@ -1014,7 +1035,7 @@ watch(state, (newState) => {
 
         
         <template v-else>
-          <AltchaWidget v-model="altchaPayload" auto="onload" hide-footer />
+          <AltchaWidget ref="altchaRef" v-model="altchaPayload" auto="off" hide-footer />
           <NButton v-if="!loading" :type="btnType" size="large" circle @click="handleInit()">
             {{ btnText }}
           </NButton>

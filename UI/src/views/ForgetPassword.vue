@@ -41,6 +41,19 @@ const flashingRuleKeys = ref<Set<string>>(new Set())
 
 const altchaPayload = ref<string | null>(null)
 
+interface AltchaWidgetHandle {
+  ensureVerified: () => Promise<{ required: boolean; payload: string | null }>
+}
+
+const altchaRef = ref<AltchaWidgetHandle | null>(null)
+
+async function resolveAltchaPayload(): Promise<unknown | null | undefined> {
+  const verification = await altchaRef.value?.ensureVerified()
+  if (!verification) return undefined
+  if (verification.required && !verification.payload) return undefined
+  return verification.payload ? JSON.parse(verification.payload) : null
+}
+
 function isValidEmail(str: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)
 }
@@ -64,10 +77,16 @@ async function handleEmailSubmit() {
   }
   loading.value = true
   try {
+    const altcha = await resolveAltchaPayload()
+    if (altcha === undefined) {
+      emailError.value = '人机验证未完成，请重试。'
+      return
+    }
+
     // 防枚举：无论邮箱是否注册都返回同形 transactionId。
     const data = await api('/api/auth/forgot-password', {
       method: 'POST',
-      body: JSON.stringify({ email: email.value, altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null })
+      body: JSON.stringify({ email: email.value, altcha })
     })
     transactionId.value = data.transactionId as string
     state.value = 'verifyCode'
@@ -146,13 +165,19 @@ async function handlePasswordSubmit() {
   loading.value = true
   passwordSubmitError.value = ''
   try {
+    const altcha = await resolveAltchaPayload()
+    if (altcha === undefined) {
+      passwordSubmitError.value = '人机验证未完成，请重试。'
+      return
+    }
+
     const data = await api('/api/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify({
-          transactionId: transactionId.value,
-          code: verificationCode.value.join(''),
+      method: 'POST',
+      body: JSON.stringify({
+        transactionId: transactionId.value,
+        code: verificationCode.value.join(''),
         newPassword: password.value,
-        altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null
+        altcha
       })
     })
     if (data.success) {
@@ -319,7 +344,7 @@ watch(state, (newState) => {
               @input="handleEmailInput"
             />
 
-            <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
+            <AltchaWidget ref="altchaRef" v-model="altchaPayload" auto="off" hide-footer />
 
             <NButton
               v-if="isValidEmail(email) && !loading"
@@ -402,7 +427,7 @@ watch(state, (newState) => {
 
             <p v-if="passwordSubmitError" class="error-msg">{{ passwordSubmitError }}</p>
 
-            <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
+            <AltchaWidget ref="altchaRef" v-model="altchaPayload" auto="off" hide-footer />
 
             <NButton
               v-if="passwordValid && !loading"

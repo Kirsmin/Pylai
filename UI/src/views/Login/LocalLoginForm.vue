@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { NAlert, NButton, NInput } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { api, ApiError } from '@/utils/api'
 import { getAssertion, createCredential } from '@/utils/webauthn'
-import { loadPublicConfig } from '@/utils/publicConfig'
+import { getPublicConfigSnapshot, loadPublicConfig } from '@/utils/publicConfig'
 import AltchaWidget from '@/components/AltchaWidget.vue'
 
 const props = defineProps<{ returnUrl?: string }>()
@@ -31,9 +31,21 @@ const mfaError = ref('')
 const mfaSetup = ref(false)
 
 const altchaPayload = ref<string | null>(null)
+const altchaEnabled = ref(getPublicConfigSnapshot()?.altchaEnabled ?? true)
+const cookieHttpOnly = ref(getPublicConfigSnapshot()?.cookieHttpOnly ?? true)
+
+const rememberMeLabel = computed(() => {
+  if (!rememberMe.value) return '本次会话登录'
+  return cookieHttpOnly.value ? '保持登录（仅 HttpOnly Cookie）' : '保持登录'
+})
 
 onMounted(async () => {
-  try { supportEmail.value = (await loadPublicConfig()).supportEmail } catch { /* support text has a safe fallback */ }
+  try {
+    const config = await loadPublicConfig()
+    supportEmail.value = config.supportEmail
+    altchaEnabled.value = config.altchaEnabled
+    cookieHttpOnly.value = config.cookieHttpOnly
+  } catch { /* 公共配置加载失败时保留安全的默认展示 */ }
   const params = new URLSearchParams(window.location.search)
   if (params.get('error') === 'mfa_required' && params.get('mfa_transaction')) {
     mfaTransactionId.value = String(params.get('mfa_transaction') || '')
@@ -170,9 +182,9 @@ function resetMfa() {
     <form class="login-form" autocomplete="on" @submit.prevent="handleLogin">
       <NInput v-model:value="usernameOrEmail" type="text" size="large" placeholder="用户名 / 邮箱" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'username', autocomplete: 'username' }" />
       <NInput v-model:value="password" type="password" size="large" placeholder="密码" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'password', autocomplete: 'current-password' }" />
-      <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
+      <AltchaWidget v-if="altchaEnabled" v-model="altchaPayload" auto="onsubmit" hide-footer />
       <NButton attr-type="button" :type="rememberMe ? 'success' : 'default'" dashed :disabled="lockedOut" @click="rememberMe = !rememberMe">
-        {{ rememberMe ? '保持登录（仅 HttpOnly Cookie）' : '本次会话登录' }}
+        {{ rememberMeLabel }}
       </NButton>
       <NButton attr-type="submit" type="success" size="large" circle class="submit-btn" :loading="loading" :disabled="!usernameOrEmail || !password || lockedOut">-&gt;</NButton>
     </form>
