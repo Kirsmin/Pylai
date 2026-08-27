@@ -39,6 +39,7 @@ public static class AppServices
         services.AddRegistrationFeature();
         services.AddAdminFeature();
         services.AddBackupFeature(config);
+        services.AddAltchaFeature(config);
         if (!cliOnly) services.AddApiFeature(config);
         return services;
     }
@@ -415,6 +416,17 @@ public static class AppServices
     public static IServiceCollection AddBackupFeature(this IServiceCollection services, MainConfig config)
     {
         services.AddSingleton(new BackupService(config));
+        return services;
+    }
+
+    public static IServiceCollection AddAltchaFeature(this IServiceCollection services, MainConfig config)
+    {
+        var envSecret = Environment.GetEnvironmentVariable("PYLAI_ALTCHA_SECRET");
+        if (!string.IsNullOrEmpty(envSecret))
+            config.Altcha.SecretKey = envSecret;
+
+        services.AddSingleton<IAltchaService, AltchaService>();
+        services.AddScoped<AltchaValidationFilter>();
         return services;
     }
 

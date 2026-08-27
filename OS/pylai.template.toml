@@ -275,3 +275,9 @@ Origins = ${mfa_origins}
 ChallengeLifetimeMinutes = 5
 RequireForAdmin = ${mfa_require_for_admin}
 RequireWebAuthnForMax = ${mfa_require_webauthn_for_max}
+
+[Altcha]
+Enabled = false
+SecretKey = ""
+MaxNumber = 500000
+ExpirySeconds = 300

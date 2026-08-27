@@ -1,5 +1,10 @@
 namespace Pylaios.Features.Registration;
 
+public class RegisterInitRequest
+{
+    public AltchaPayload? Altcha { get; set; }
+}
+
 public class RegisterInitResponse : ApiResponse
 {
     public string SessionToken { get; set; } = string.Empty;

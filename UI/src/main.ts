@@ -9,6 +9,7 @@ import { useThemeStore } from './stores/theme'
 import { loadPublicConfig } from './utils/publicConfig'
 import './assets/fonts.css'
 import './assets/theme.css'
+import 'altcha'
 
 async function bootstrap() {
   const app = createApp(App)

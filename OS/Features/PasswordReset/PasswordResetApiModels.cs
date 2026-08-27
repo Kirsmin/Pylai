@@ -6,6 +6,8 @@ public class ForgotPasswordRequest
 {
     [Required]
     public string Email { get; set; } = string.Empty;
+
+    public AltchaPayload? Altcha { get; set; }
 }
 
 public class ResetPasswordRequest
@@ -19,6 +21,8 @@ public class ResetPasswordRequest
     [Required]
     [StringLength(128, MinimumLength = 12)]
     public string NewPassword { get; set; } = string.Empty;
+
+    public AltchaPayload? Altcha { get; set; }
 }
 
 public class ForgotPasswordResponse : ApiResponse

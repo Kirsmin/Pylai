@@ -7,6 +7,7 @@ import { FileDoneOutlined } from '@vicons/antd'
 import { api, ApiError } from '@/utils/api'
 import type { PasswordPolicy } from '@/types/api'
 import Dock from '@/components/Dock.vue'
+import AltchaWidget from '@/components/AltchaWidget.vue'
 
 type PageState = 'email' | 'verifyCode' | 'password' | 'completed' | 'rateLimited'
 
@@ -38,6 +39,8 @@ const passwordSubmitError = ref('')
 const passwordNativeRef = ref<InstanceType<typeof NInput> | null>(null)
 const flashingRuleKeys = ref<Set<string>>(new Set())
 
+const altchaPayload = ref<string | null>(null)
+
 function isValidEmail(str: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)
 }
@@ -64,7 +67,7 @@ async function handleEmailSubmit() {
     // 防枚举：无论邮箱是否注册都返回同形 transactionId。
     const data = await api('/api/auth/forgot-password', {
       method: 'POST',
-      body: JSON.stringify({ email: email.value })
+      body: JSON.stringify({ email: email.value, altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null })
     })
     transactionId.value = data.transactionId as string
     state.value = 'verifyCode'
@@ -74,7 +77,10 @@ async function handleEmailSubmit() {
     emailError.value = ''
     await nextTick()
   } catch (e) {
-    if (e instanceof ApiError && e.status === 429) {
+    if (e instanceof ApiError && e.errorCode === 'altcha_invalid') {
+      emailError.value = e.message || '验证失败，请刷新页面重试。'
+      altchaPayload.value = null
+    } else if (e instanceof ApiError && e.status === 429) {
       state.value = 'rateLimited'
     } else {
       emailError.value = '网络错误，请重试'
@@ -122,6 +128,10 @@ function handleResetError(e: ApiError) {
     case 'rate_limited':
       passwordSubmitError.value = e.data?.error || '请求过于频繁，请稍后重试。'
       break
+    case 'altcha_invalid':
+      passwordSubmitError.value = e.data?.error || '验证失败，请刷新页面重试。'
+      altchaPayload.value = null
+      break
     default:
       passwordSubmitError.value = e.data?.error || '重置失败，请重试'
   }
@@ -141,7 +151,8 @@ async function handlePasswordSubmit() {
         body: JSON.stringify({
           transactionId: transactionId.value,
           code: verificationCode.value.join(''),
-        newPassword: password.value
+        newPassword: password.value,
+        altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null
       })
     })
     if (data.success) {
@@ -308,6 +319,8 @@ watch(state, (newState) => {
               @input="handleEmailInput"
             />
 
+            <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
+
             <NButton
               v-if="isValidEmail(email) && !loading"
               type="success"
@@ -388,6 +401,8 @@ watch(state, (newState) => {
             </div>
 
             <p v-if="passwordSubmitError" class="error-msg">{{ passwordSubmitError }}</p>
+
+            <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
 
             <NButton
               v-if="passwordValid && !loading"

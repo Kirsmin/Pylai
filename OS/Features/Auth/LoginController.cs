@@ -66,6 +66,7 @@ public class LoginController : ControllerBase
 
     [AllowAnonymous]
     [HttpPost("login")]
+    [RequireAltcha]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {
         _logger.LogDebug("登录请求");

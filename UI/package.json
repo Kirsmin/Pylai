@@ -16,6 +16,7 @@
     "@vicons/fluent": "0.13.0",
     "@vicons/material": "0.13.0",
     "@vicons/tabler": "0.13.0",
+    "altcha": "^3.2.2",
     "naive-ui": "2.44.1",
     "pinia": "3.0.4",
     "vue": "3.5.40",

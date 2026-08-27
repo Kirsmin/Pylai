@@ -6,6 +6,7 @@ import { api, ApiError } from '@/utils/api'
 import { SUPPORT_EMAIL, type PasswordPolicy } from '@/types/api'
 import Dock from '@/components/Dock.vue'
 import SessionExpiredAlert from '@/components/SessionExpiredAlert.vue'
+import AltchaWidget from '@/components/AltchaWidget.vue'
 
 type PageState = 'idle' | 'loading' | 'rateLimited' | 'serviceError' | 'email' | 'verifyCode' | 'username' | 'password' | 'invite' | 'inviteError' | 'completed'
 
@@ -62,6 +63,8 @@ const passwordSubmitError = ref('')
 const inviteBanned = ref(false)
 
 
+const altchaPayload = ref<string | null>(null)
+
 const userGroup = ref('normal')
 
 const groupLabel = computed(() => {
@@ -98,7 +101,7 @@ async function handleInit() {
       requireInviteCode.value = false
     }
 
-    const data = await api('/api/auth/register/init', { method: 'POST' })
+    const data = await api('/api/auth/register/init', { method: 'POST', body: JSON.stringify({ altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null }) })
 
     if (!data.success) {
       if (data.errorCode === 'rate_limited') {
@@ -127,6 +130,9 @@ async function handleInit() {
   } catch (e) {
     if (e instanceof ApiError && e.errorCode === 'rate_limited') {
       state.value = 'rateLimited'
+    } else if (e instanceof ApiError && e.errorCode === 'altcha_invalid') {
+      state.value = 'serviceError'
+      altchaPayload.value = null
     } else {
       state.value = 'serviceError'
     }
@@ -1008,6 +1014,7 @@ watch(state, (newState) => {
 
         
         <template v-else>
+          <AltchaWidget v-model="altchaPayload" auto="onload" hide-footer />
           <NButton v-if="!loading" :type="btnType" size="large" circle @click="handleInit()">
             {{ btnText }}
           </NButton>

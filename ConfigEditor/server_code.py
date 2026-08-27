@@ -297,6 +297,12 @@ EDITOR_RULES: dict[str, Json] = {
     "Mfa.ChallengeLifetimeMinutes": _num("MFA 挑战有效期（分钟）", 1, 60),
     "Mfa.RequireForAdmin": _bool("Admin 及以上角色是否强制 MFA"),
     "Mfa.RequireWebAuthnForMax": _bool("Max 角色是否强制使用 WebAuthn（需 HTTPS）"),
+
+    # ---- AltCHA ----
+    "Altcha.Enabled": _bool("是否启用 AltCHA 人机验证（PoW）"),
+    "Altcha.SecretKey": _str("AltCHA HMAC 密钥（启用时必填，建议 32+ 字节随机串，可用环境变量 PYLAI_ALTCHA_SECRET 覆盖）"),
+    "Altcha.MaxNumber": _num("AltCHA PoW 难度上限（越大计算越久，建议 50万~200万）", 1000, 10_000_000),
+    "Altcha.ExpirySeconds": _num("AltCHA Challenge 有效期（秒）", 30, 3600),
 }
 
 # 密码弱值（与 deploy/entrypoint.py WEAK_SECRETS 保持一致）

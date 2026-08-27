@@ -7,6 +7,7 @@ import { ShieldCheckmark24Regular, ShieldError24Regular } from '@vicons/fluent'
 import { api, ApiError } from '@/utils/api'
 import type { ScopeInfo } from '@/types/api'
 import Dock from '@/components/Dock.vue'
+import AltchaWidget from '@/components/AltchaWidget.vue'
 
 interface AuthorizeRequest {
   displayName: string
@@ -30,6 +31,8 @@ const rejectLoading = ref(false)
 const submitError = ref('')
 const currentPage = ref(0)
 const logoFailed = ref(false)
+
+const altchaPayload = ref<string | null>(null)
 
 const scopesPerPage = 5
 
@@ -114,7 +117,7 @@ async function submitConsent(approved: boolean) {
   try {
     const data = await api<{ redirectUrl?: string }>('/api/auth/authorize-request/consent', {
       method: 'POST',
-      body: JSON.stringify({ requestId: id.value, approved })
+      body: JSON.stringify({ requestId: id.value, approved, altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null })
     })
 
     if (data.redirectUrl) {
@@ -131,9 +134,14 @@ async function submitConsent(approved: boolean) {
       needsLogin.value = true
       return
     }
-    submitError.value = e instanceof ApiError
-      ? (e.data?.error || '提交失败，请重试')
-      : '网络错误，请重试'
+    if (e instanceof ApiError && e.errorCode === 'altcha_invalid') {
+      submitError.value = e.data?.error || '验证失败，请刷新页面重试。'
+      altchaPayload.value = null
+    } else {
+      submitError.value = e instanceof ApiError
+        ? (e.data?.error || '提交失败，请重试')
+        : '网络错误，请重试'
+    }
   } finally {
     agreeLoading.value = false
     rejectLoading.value = false
@@ -287,6 +295,8 @@ onMounted(() => {
                   </template>
                   <p style="margin: 4px 0;">{{ submitError }}</p>
                 </NAlert>
+
+                <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
 
                 <div class="btn-group">
                   <NButton

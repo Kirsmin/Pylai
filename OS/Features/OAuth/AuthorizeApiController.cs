@@ -91,6 +91,7 @@ public class AuthorizeApiController : ControllerBase
 
     [Authorize]
     [HttpPost("authorize-request/consent")]
+    [RequireAltcha]
     public async Task<IActionResult> Consent([FromBody] AuthorizeConsentRequest body)
     {
         if (string.IsNullOrEmpty(body.RequestId))

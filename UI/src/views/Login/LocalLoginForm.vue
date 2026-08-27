@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { api, ApiError } from '@/utils/api'
 import { getAssertion, createCredential } from '@/utils/webauthn'
 import { loadPublicConfig } from '@/utils/publicConfig'
+import AltchaWidget from '@/components/AltchaWidget.vue'
 
 const props = defineProps<{ returnUrl?: string }>()
 const router = useRouter()
@@ -29,6 +30,8 @@ const mfaOtpauthUri = ref('')
 const mfaError = ref('')
 const mfaSetup = ref(false)
 
+const altchaPayload = ref<string | null>(null)
+
 onMounted(async () => {
   try { supportEmail.value = (await loadPublicConfig()).supportEmail } catch { /* support text has a safe fallback */ }
   const params = new URLSearchParams(window.location.search)
@@ -47,7 +50,7 @@ async function handleLogin() {
   try {
     const data = await api<Record<string, unknown>>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ usernameOrEmail: usernameOrEmail.value, password: password.value, rememberMe: rememberMe.value })
+      body: JSON.stringify({ usernameOrEmail: usernameOrEmail.value, password: password.value, rememberMe: rememberMe.value, altcha: altchaPayload.value ? JSON.parse(altchaPayload.value) : null })
     })
     finishLogin(data)
   } catch (e) {
@@ -58,6 +61,10 @@ async function handleLogin() {
       loginError.value = `${e.message || ''}${e.data?.lockoutRemaining ? ` ${e.data.lockoutRemaining}` : ''}`
     } else if (e instanceof ApiError && e.errorCode === 'ip_banned') {
       lockedOut.value = true; loginErrorState.value = 'ip_banned'; loginBanId.value = String(e.data?.banId || ''); loginError.value = e.message
+    } else if (e instanceof ApiError && e.errorCode === 'altcha_invalid') {
+      loginError.value = e.message || '验证失败，请刷新页面重试。'
+      loginErrorState.value = 'none'
+      altchaPayload.value = null
     } else if (e instanceof ApiError && (e.errorCode === 'mfa_required' || e.errorCode === 'mfa_setup_required')) {
       mfaTransactionId.value = String(e.data?.mfaTransactionId || '')
       mfaMethods.value = (e.data?.mfaMethods as string[]) || []
@@ -163,6 +170,7 @@ function resetMfa() {
     <form class="login-form" autocomplete="on" @submit.prevent="handleLogin">
       <NInput v-model:value="usernameOrEmail" type="text" size="large" placeholder="用户名 / 邮箱" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'username', autocomplete: 'username' }" />
       <NInput v-model:value="password" type="password" size="large" placeholder="密码" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'password', autocomplete: 'current-password' }" />
+      <AltchaWidget v-model="altchaPayload" auto="onsubmit" hide-footer />
       <NButton attr-type="button" :type="rememberMe ? 'success' : 'default'" dashed :disabled="lockedOut" @click="rememberMe = !rememberMe">
         {{ rememberMe ? '保持登录（仅 HttpOnly Cookie）' : '本次会话登录' }}
       </NButton>

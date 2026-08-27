@@ -319,3 +319,9 @@ ChallengeLifetimeMinutes = 5
 RequireForAdmin = false
 # Max 角色是否强制使用 WebAuthn（需 HTTPS 环境；HTTP/局域网部署请关闭）
 RequireWebAuthnForMax = false
+
+[Altcha]
+Enabled = false
+SecretKey = ""
+MaxNumber = 500000
+ExpirySeconds = 300

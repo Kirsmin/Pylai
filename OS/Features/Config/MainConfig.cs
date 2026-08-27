@@ -26,6 +26,7 @@ public class MainConfig
     public DeploymentConfig Deployment { get; set; } = new();
     public BackupConfig Backup { get; set; } = new();
     public MailThemeConfig MailTheme { get; set; } = new();
+    public AltchaOptions Altcha { get; set; } = new();
 }
 
 [ConfigFile("pylai.toml")]

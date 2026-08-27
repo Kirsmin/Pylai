@@ -95,6 +95,7 @@ public static class AuthConstants
         public const string AdminIpUnbanned = "AdminIpUnbanned";
         public const string UserCreated = "UserCreated";
         public const string SettingsChanged = "SettingsChanged";
+        public const string AltchaFailure = "AltchaFailure";
     }
 
     public static class Scopes

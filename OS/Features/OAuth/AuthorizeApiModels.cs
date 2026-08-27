@@ -38,6 +38,7 @@ public class AuthorizeConsentRequest
 {
     public string RequestId { get; set; } = string.Empty;
     public bool Approved { get; set; }
+    public AltchaPayload? Altcha { get; set; }
 }
 
 public class AuthorizeConsentResponse : ApiResponse

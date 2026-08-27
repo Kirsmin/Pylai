@@ -17,3 +17,4 @@ global using Pylaios.Features.PasswordReset;
 global using Pylaios.Features.Registration;
 global using Pylaios.Features.Users;
 global using Pylaios.Features.Confirmation;
+global using Pylaios.Features.Altcha;

@@ -49,6 +49,7 @@ public class PasswordResetController : ControllerBase
 
     [AllowAnonymous]
     [HttpPost("forgot-password")]
+    [RequireAltcha]
     public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
     {
         var transactionId = AuthHelper.GenerateOpaqueToken();
@@ -102,6 +103,7 @@ public class PasswordResetController : ControllerBase
 
     [AllowAnonymous]
     [HttpPost("reset-password")]
+    [RequireAltcha]
     public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
     {
         if (!ModelState.IsValid)

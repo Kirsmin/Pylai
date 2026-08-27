@@ -55,7 +55,8 @@ public class RegisterController : ControllerBase
     }
 
     [HttpPost("init")]
-    public async Task<IActionResult> RegisterInit()
+    [RequireAltcha]
+    public async Task<IActionResult> RegisterInit([FromBody] RegisterInitRequest? request = null)
     {
         _logger.LogDebug("注册初始化请求");
 
