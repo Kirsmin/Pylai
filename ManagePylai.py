@@ -1197,7 +1197,7 @@ def generate_encryption_pfx() -> tuple[str, str]:
 
 @dataclass(slots=True, kw_only=True)
 class InstallAnswers:
-    public_url: str
+    public_url: str = "http://localhost:8080"
     public_port: int = 8080
     api_port: int = 5000
 
@@ -4860,7 +4860,7 @@ def validate_full_text(text: str) -> list[tuple[str, str, str]]:
 
     smtp_security = g("Email.Smtp.Security", "")
     smtp_port = g("Email.Smtp.Port", 587)
-    if smtp_port == 465 and str(smtp_security).lower() != "sslconnect":
+    if smtp_port == 465 and str(smtp_security).lower() != "sslonconnect":
         issues.append(("Email.Smtp", "Security", "[Email.Smtp].Security：端口 465 为隐式 TLS，必须使用 SslOnConnect"))
 
     allow_credentials = g("Cors.AllowCredentials", False)
