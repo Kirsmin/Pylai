@@ -18,6 +18,10 @@ public sealed class PublicConfigController : ControllerBase
     [AllowAnonymous]
     public IActionResult GetPublicConfig()
     {
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate, proxy-revalidate";
+        Response.Headers.Pragma = "no-cache";
+        Response.Headers.Expires = "0";
+
         var supportEmail = Environment.GetEnvironmentVariable("PYLAI_SUPPORT_EMAIL");
         if (string.IsNullOrWhiteSpace(supportEmail))
             supportEmail = _config.Email.FromAddress;

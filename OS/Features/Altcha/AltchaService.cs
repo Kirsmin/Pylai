@@ -30,17 +30,16 @@ public class AltchaService : IAltchaService
         var saltBytes = RandomNumberGenerator.GetBytes(16);
         var salt = Convert.ToBase64String(saltBytes);
         var number = Random.Shared.Next(1, _opts.MaxNumber);
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
-        var saltWithTime = $"{salt}?t={timestamp}";
+        var expiry = DateTimeOffset.UtcNow.AddSeconds(_opts.ExpirySeconds).ToUnixTimeSeconds();
 
-        var challenge = Hash(saltWithTime + number);
-        var signature = HmacSign(challenge);
+        var challenge = Hash(salt + number);
+        var signature = SignWithExpiry(challenge, expiry);
 
         return new AltchaChallenge
         {
             Algorithm = "SHA-256",
             Challenge = challenge,
-            Salt = saltWithTime,
+            Salt = salt,
             Signature = signature,
             MaxNumber = _opts.MaxNumber
         };
@@ -56,14 +55,14 @@ public class AltchaService : IAltchaService
             return false;
         }
 
-        if (!TryParseTimestamp(p.Salt, out var ts)
-            || DateTimeOffset.UtcNow.ToUnixTimeSeconds() - ts > _opts.ExpirySeconds)
+        if (!TryParseExpiry(p.Signature, out var expiry)
+            || DateTimeOffset.UtcNow.ToUnixTimeSeconds() > expiry)
         {
             error = "expired";
             return false;
         }
 
-        if (!HmacVerify(p.Challenge, p.Signature))
+        if (!VerifySignatureWithExpiry(p.Challenge, p.Signature))
         {
             error = "invalid_signature";
             return false;
@@ -79,14 +78,31 @@ public class AltchaService : IAltchaService
         return true;
     }
 
-    private static bool TryParseTimestamp(string salt, out long timestamp)
+    private static bool TryParseExpiry(string signature, out long expiry)
     {
-        timestamp = 0;
-        if (string.IsNullOrEmpty(salt)) return false;
-        var idx = salt.IndexOf("?t=", StringComparison.Ordinal);
+        expiry = 0;
+        if (string.IsNullOrEmpty(signature)) return false;
+        var idx = signature.IndexOf(':');
         if (idx < 0) return false;
-        var tsStr = salt[(idx + 3)..];
-        return long.TryParse(tsStr, out timestamp);
+        var expiryStr = signature[..idx];
+        return long.TryParse(expiryStr, out expiry);
+    }
+
+    private string SignWithExpiry(string challenge, long expiry)
+    {
+        var payload = $"{challenge}:{expiry}";
+        var hmac = HmacSign(payload);
+        return $"{expiry}:{hmac}";
+    }
+
+    private bool VerifySignatureWithExpiry(string challenge, string signature)
+    {
+        if (string.IsNullOrEmpty(_opts.SecretKey)) return false;
+        if (!TryParseExpiry(signature, out var expiry)) return false;
+        var expected = SignWithExpiry(challenge, expiry);
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(expected),
+            Encoding.UTF8.GetBytes(signature));
     }
 
     private string Hash(string input)
