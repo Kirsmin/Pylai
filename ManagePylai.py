@@ -552,8 +552,8 @@ class InstallWizard:
 T = TypeVar("T")
 
 
-def out(message: object = "") -> None:
-    print(message, flush=True)
+def out(message: object = "", end: str = "\n") -> None:
+    print(message, end=end, flush=True)
 
 
 def utc_now_iso() -> str:
