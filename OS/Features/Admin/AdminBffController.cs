@@ -36,7 +36,7 @@ public sealed class AdminBffController : ControllerBase
         Response.Cookies.Append(CsrfCookie, token, new CookieOptions
         {
             HttpOnly = false,
-            Secure = Request.IsHttps,
+            Secure = true,
             SameSite = SameSiteMode.Lax,
             Path = "/api/admin",
             IsEssential = true

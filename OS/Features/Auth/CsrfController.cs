@@ -19,7 +19,7 @@ public sealed class CsrfController : ControllerBase
         Response.Cookies.Append(CookieCsrfMiddleware.CsrfCookieName, token, new CookieOptions
         {
             HttpOnly = false,
-            Secure = Request.IsHttps,
+            Secure = true,
             SameSite = SameSiteMode.Lax,
             Path = "/api",
             IsEssential = true

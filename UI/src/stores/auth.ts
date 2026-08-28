@@ -52,8 +52,13 @@ export const useAuthStore = defineStore('auth', () => {
       await ensureCsrfToken()
       return true
     } catch (err) {
-      // Fail Closed: network errors, timeout, 401, and revoked cookies all become signed-out state.
-      console.warn('[Auth] 会话校验失败，按未登录处理', err)
+      if (err instanceof ApiError && err.status === 401) {
+        // 正常未登录，静默处理
+      } else if (err instanceof Error && err.name === 'AbortError') {
+        // 超时，静默处理
+      } else {
+        console.warn('[Auth] 会话校验异常', err)
+      }
       clearSession()
       return false
     } finally {

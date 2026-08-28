@@ -1,7 +1,7 @@
 /* Maple Mono NF (优先主字体) */
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Regular.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -12,7 +12,7 @@
    字体 —— MapleMono 不可用时拉丁回退系统字体栈，避免观感混用 */
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Regular.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -21,7 +21,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Bold.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -30,7 +30,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Bold.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -39,7 +39,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Thin.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Thin.woff2') format('woff2');
   font-weight: 100;
   font-style: normal;
   font-display: swap;
@@ -48,7 +48,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Thin.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Thin.woff2') format('woff2');
   font-weight: 100;
   font-style: normal;
   font-display: swap;
@@ -57,7 +57,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Italic.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Italic.woff2') format('woff2');
   font-weight: 400;
   font-style: italic;
   font-display: swap;
@@ -66,7 +66,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Regular.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: italic;
   font-display: swap;
@@ -75,7 +75,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Bold.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: italic;
   font-display: swap;
@@ -84,7 +84,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Bold.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: italic;
   font-display: swap;
@@ -93,7 +93,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/maple/MapleMono-NF-Thin.ttf') format('truetype');
+  src: url('/fonts/maple/MapleMono-NF-Thin.woff2') format('woff2');
   font-weight: 100;
   font-style: italic;
   font-display: swap;
@@ -102,7 +102,7 @@
 
 @font-face {
   font-family: 'AppFont';
-  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Thin.ttf') format('truetype');
+  src: url('/fonts/harmony/HarmonyOS_Sans_SC_Thin.woff2') format('woff2');
   font-weight: 100;
   font-style: italic;
   font-display: swap;
