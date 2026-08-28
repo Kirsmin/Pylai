@@ -69,10 +69,11 @@ class Client:
             hdrs.setdefault("Content-Type", "application/x-www-form-urlencoded")
         if csrf:
             if self._csrf is None:
-                st, _, body, _ = self.request("GET", "/api/auth/csrf")
+                st, resp_headers, body, _ = self.request("GET", "/api/auth/csrf")
                 if st != 200:
                     raise RuntimeError(f"CSRF 补签失败 status={st} body={body!r}")
                 self._csrf = json.loads(body)["token"]
+                self._ensure_csrf_cookie(resp_headers.get("Set-Cookie", ""), "Pylaios.Csrf", "/api")
             hdrs["X-CSRF-Token"] = self._csrf
         if extra_headers:
             hdrs.update(extra_headers)
@@ -82,6 +83,35 @@ class Client:
                 return resp.status, dict(resp.headers), resp.read().decode(errors="replace"), resp.geturl()
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers), exc.read().decode(errors="replace"), exc.url
+
+    def _ensure_csrf_cookie(self, set_cookie_header: str, cookie_name: str, path: str):
+        """从 Set-Cookie 头提取值并手动注入 CookieJar，绕过 http.cookiejar 策略限制。"""
+        match = re.search(rf'{re.escape(cookie_name)}=([^;]+)', set_cookie_header)
+        if not match:
+            return
+        value = match.group(1)
+        domain = urllib.parse.urlparse(self.base).hostname or "127.0.0.1"
+
+        cookie = http.cookiejar.Cookie(
+            version=0,
+            name=cookie_name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=domain,
+            domain_specified=True,
+            domain_initial_dot=False,
+            path=path,
+            path_specified=True,
+            secure=False,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={},
+            rfc2109=False,
+        )
+        self.jar.set_cookie(cookie)
 
     # 便捷封装：(status, parsed_json|None, raw_body)
     def get(self, path: str, **kw):
@@ -350,12 +380,13 @@ class Suite:
         self.check(st == 403 and body and body.get("errorCode") == "csrf_invalid",
                    f"MFA step-up 无 token 应 403 csrf_invalid，实际 {st} {raw}")
 
-        st, body, raw = c.get("/api/auth/csrf")
-        self.check(st == 200 and bool(body and body.get("token")),
+        st, resp_headers, body, raw = c.request("GET", "/api/auth/csrf")
+        self.check(st == 200 and bool(body and json.loads(body).get("token")),
                    f"CSRF 补签失败 {st} {raw}")
         if st != 200:
             return
-        c._csrf = body["token"]
+        c._csrf = json.loads(body)["token"]
+        c._ensure_csrf_cookie(resp_headers.get("Set-Cookie", ""), "Pylaios.Csrf", "/api")
 
         st, body, raw = c.post("/api/auth/logout", csrf=True)  # 附带 X-CSRF-Token
         self.check(st == 200, f"带 CSRF token 的 logout 应 200，实际 {st} {raw}")
@@ -433,12 +464,13 @@ class Suite:
         self.check(st == 403 and body and body.get("errorCode") == "csrf_invalid",
                    f"/api/admin 写请求无 token 应 403 csrf_invalid，实际 {st} {raw}")
 
-        st, body, raw = admin.get("/api/admin/bff/csrf")
-        self.check(st == 200 and bool(body and body.get("token")),
+        st, resp_headers, body, raw = admin.request("GET", "/api/admin/bff/csrf")
+        self.check(st == 200 and bool(body and json.loads(body).get("token")),
                    f"BFF CSRF 补签失败 {st} {raw}")
         if st != 200:
             return
-        admin._csrf = body["token"]
+        admin._csrf = json.loads(body)["token"]
+        admin._ensure_csrf_cookie(resp_headers.get("Set-Cookie", ""), "Pylaios.AdminCsrf", "/api/admin")
         st, body, raw = admin.delete(f"/api/admin/users/{random_uid}", csrf=True)
         self.check(st != 403 or (body or {}).get("errorCode") != "csrf_invalid",
                    f"带 BFF token 后不应再报 csrf_invalid，实际 {st} {raw}")
@@ -572,11 +604,12 @@ class Suite:
         if st != 200:
             return
         # MFA 端点属已认证写请求，受 Cookie-CSRF 双提交约束，先补签
-        st, body, raw = m.get("/api/auth/csrf")
-        if not self.check(st == 200 and bool(body and body.get("token")),
+        st, resp_headers, body, raw = m.request("GET", "/api/auth/csrf")
+        if not self.check(st == 200 and bool(body and json.loads(body).get("token")),
                           f"MFA 场景 CSRF 补签失败 {st} {raw}"):
             return
-        m._csrf = body["token"]
+        m._csrf = json.loads(body)["token"]
+        m._ensure_csrf_cookie(resp_headers.get("Set-Cookie", ""), "Pylaios.Csrf", "/api")
 
         # HTTPS 强制：经 nginx(HTTP) enroll 必须 400 invalid_request
         st, body, raw = m.post("/api/auth/mfa/totp/enroll", csrf=True)
