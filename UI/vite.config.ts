@@ -30,4 +30,7 @@ export default defineConfig(({ mode }) => ({
       '/health': 'http://localhost:5000',
     },
   },
+  build: {
+    chunkSizeWarningLimit: 600,
+  },
 }))

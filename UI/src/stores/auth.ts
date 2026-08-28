@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { api, ensureCsrfToken } from '@/utils/api'
+import { api, ensureCsrfToken, ApiError } from '@/utils/api'
 export { API_BASE, apiFetch } from '@/utils/api'
 
 export interface User {
