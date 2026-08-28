@@ -2,16 +2,16 @@
   <altcha-widget
     v-if="enabled"
     ref="widgetRef"
-    :challenge="challengeUrl"
+    :challenge="challengeData"
     :auto="auto"
-    :configuration="widgetConfiguration"
+    :hidefooter="hideFooter"
     @statechange="onStateChange"
     style="margin-top: 8px;"
   />
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { getPublicConfigSnapshot, loadPublicConfig } from '@/utils/publicConfig'
 
 interface AltchaStateChangeDetail {
@@ -49,14 +49,21 @@ const emit = defineEmits<{
   (e: 'error', message: string): void
 }>()
 
-const challengeUrl = `${import.meta.env.VITE_API_BASE || ''}/api/altcha/challenge`
+const challengeUrl = `${window.location.origin}${import.meta.env.VITE_API_BASE || ''}/api/altcha/challenge`
 const enabled = ref(getPublicConfigSnapshot()?.altchaEnabled ?? true)
 const internalPayload = ref<string | null>(props.modelValue ?? null)
 const widgetRef = ref<AltchaWidgetElement | null>(null)
+const challengeData = ref<object | null>(null)
 
-const widgetConfiguration = computed(() => JSON.stringify({
-  hideFooter: props.hideFooter,
-}))
+async function fetchChallenge() {
+  try {
+    const response = await fetch(challengeUrl, { credentials: 'include' })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    challengeData.value = await response.json()
+  } catch (err) {
+    emit('error', '无法加载验证挑战，请刷新页面重试。')
+  }
+}
 
 function decodePayload(payload: unknown): string | null {
   if (typeof payload !== 'string' || !payload.trim()) return null
@@ -64,13 +71,11 @@ function decodePayload(payload: unknown): string | null {
   const raw = payload.trim()
   if (raw.startsWith('{')) return raw
 
-  // altcha v3 通过 statechange 事件返回 base64(JSON)，
-  // 而服务端 DTO 期望普通 JSON 对象，因此这里解码为 JSON 字符串供页面解析。
   try {
     const decoded = atob(raw)
     if (decoded.trim().startsWith('{')) return decoded
   } catch {
-    // 保持兼容：如果组件未来直接返回 JSON 字符串或未知格式，原样返回。
+    // 保持兼容
   }
   return raw
 }
@@ -124,6 +129,7 @@ async function ensureVerified(): Promise<AltchaVerificationResult> {
 function reset() {
   commitPayload(null)
   widgetRef.value?.reset?.()
+  fetchChallenge()
 }
 
 watch(() => props.modelValue, (value) => {
@@ -141,8 +147,10 @@ onMounted(async () => {
   try {
     enabled.value = (await loadPublicConfig()).altchaEnabled
   } catch {
-    // 公共配置不可用时保持默认显示，后端会明确返回 altcha_invalid 提示配置状态。
     enabled.value = true
+  }
+  if (enabled.value) {
+    await fetchChallenge()
   }
 })
 
