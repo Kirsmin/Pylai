@@ -90,7 +90,6 @@ class Client:
         if not match:
             return
         value = match.group(1)
-        domain = urllib.parse.urlparse(self.base).hostname or "127.0.0.1"
 
         cookie = http.cookiejar.Cookie(
             version=0,
@@ -98,8 +97,8 @@ class Client:
             value=value,
             port=None,
             port_specified=False,
-            domain=domain,
-            domain_specified=True,
+            domain="",
+            domain_specified=False,
             domain_initial_dot=False,
             path=path,
             path_specified=True,
