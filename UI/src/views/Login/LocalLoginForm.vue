@@ -177,7 +177,7 @@ function resetMfa() {
       <NInput v-model:value="password" type="password" size="large" placeholder="密码" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'password', autocomplete: 'current-password' }" />
       <AltchaWidget v-if="altchaEnabled" v-model="altchaPayload" auto="onsubmit" hide-footer />
       <NButton attr-type="button" :type="rememberMe ? 'success' : 'default'" dashed :disabled="lockedOut" @click="rememberMe = !rememberMe">
-        {{ rememberMe ? '保持登录（仅 HttpOnly Cookie）' : '本次会话登录' }}
+        {{ rememberMe ? '保持登录' : '保持登录' }}
       </NButton>
       <NButton attr-type="submit" type="success" size="large" circle class="submit-btn" :loading="loading" :disabled="!usernameOrEmail || !password || lockedOut">-&gt;</NButton>
     </form>
