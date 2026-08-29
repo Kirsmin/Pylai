@@ -131,11 +131,12 @@ defineExpose({ open })
       <div v-if="secret" class="mfa-secret-box">
         <p>请使用手机认证器扫描下方二维码，或手动输入密钥：</p>
         <div class="qr-wrap">
-          <NQRCode
+          <n-qr-code
             :value="otpauthUri"
-            :size="160"
+            :size="180"
             :padding="4"
             type="svg"
+            error-correction-level="H"
           />
         </div>
         <div class="secret-manual">
