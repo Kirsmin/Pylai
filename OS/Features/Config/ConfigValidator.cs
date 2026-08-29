@@ -198,6 +198,24 @@ public static class ConfigValidator
                     $"CIDR 前缀长度无效: {cidr}"));
             }
         }
+
+        // Cloudflare 场景提示
+        var trustedHeaders = config.IpResolution.TrustedHeaders;
+        if (config.IpResolution.ForwardedHeadersEnabled && trustedHeaders.Length > 0)
+        {
+            var hasCfHeader = trustedHeaders.Any(h => h.Equals("CF-Connecting-IP", StringComparison.OrdinalIgnoreCase));
+            var hasXff = trustedHeaders.Any(h => h.Equals("X-Forwarded-For", StringComparison.OrdinalIgnoreCase));
+            if (hasCfHeader && !hasXff)
+            {
+                result.Warnings.Add("IpResolution.TrustedHeaders 包含 CF-Connecting-IP 但不包含 X-Forwarded-For；建议同时保留 X-Forwarded-For 作为 Fallback");
+            }
+        }
+
+        if (config.IpResolution.ForwardedHeadersEnabled && trustedHeaders.Length == 0)
+        {
+            result.Errors.Add(new ConfigIssue(FileOf<IpResolutionConfig>(), "IpResolution.TrustedHeaders", "E004",
+                "ForwardedHeadersEnabled=true 时 TrustedHeaders 不能为空"));
+        }
     }
 
     private static void ValidateCors(MainConfig config, ConfigLoadResult result)

@@ -3277,6 +3277,12 @@ def generate_host_nginx_template(state: State) -> Path:
 
     template = f"""# Pylai 主机 Nginx 配置模板
 # 安装前请替换证书路径和 server_name。
+#
+# Cloudflare 场景说明：
+#   若前端有 Cloudflare CDN，建议：
+#   1. 在 pylai.toml [IpResolution] 中填入 Cloudflare IP 范围到 TrustedNetworks
+#   2. 在 TrustedHeaders 中加入 CF-Connecting-IP（优先）或保留 X-Forwarded-For
+#   3. 如需 Nginx 层直接解析真实 IP，取消下方 real_ip 段注释并填入 Cloudflare CIDR
 
 server {{
     listen 80;
@@ -3299,12 +3305,21 @@ server {{
 
     client_max_body_size 2m;
 
+    # ---- Cloudflare 真实 IP 解析（可选，需 ngx_http_realip_module）----
+    # set_real_ip_from 173.245.48.0/20;
+    # set_real_ip_from 103.21.244.0/22;
+    # ... 更多 Cloudflare CIDR 见 https://www.cloudflare.com/ips/
+    # real_ip_header CF-Connecting-IP;
+    # real_ip_recursive on;
+
     location / {{
         proxy_pass http://127.0.0.1:{state.public_port};
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        # Cloudflare 场景：如需向后传递 CF-Connecting-IP，取消下方注释
+        # proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
     }}
 }}
 """
@@ -5522,6 +5537,20 @@ const MAIL_PLACEHOLDERS = [
   ["%%ExpireMinutes%%", "有效分钟数"],
 ];
 
+// 字段预设（点击自动填充）
+const FIELD_PRESETS = {
+  "IpResolution.TrustedNetworks": [
+    { label: "Cloudflare IPv4", values: ["173.245.48.0/20","103.21.244.0/22","103.22.200.0/22","103.31.4.0/22","141.101.64.0/18","108.162.192.0/18","190.93.240.0/20","188.114.96.0/20","197.234.240.0/22","198.41.128.0/17","162.158.0.0/15","104.16.0.0/13","104.24.0.0/14","172.64.0.0/13","131.0.72.0/22"] },
+    { label: "Cloudflare IPv6", values: ["2400:cb00::/32","2606:4700::/32","2803:f800::/32","2405:b500::/32","2405:8100::/32","2a06:98c0::/29","2c0f:f248::/32"] },
+    { label: "Cloudflare 全部", values: ["173.245.48.0/20","103.21.244.0/22","103.22.200.0/22","103.31.4.0/22","141.101.64.0/18","108.162.192.0/18","190.93.240.0/20","188.114.96.0/20","197.234.240.0/22","198.41.128.0/17","162.158.0.0/15","104.16.0.0/13","104.24.0.0/14","172.64.0.0/13","131.0.72.0/22","2400:cb00::/32","2606:4700::/32","2803:f800::/32","2405:b500::/32","2405:8100::/32","2a06:98c0::/29","2c0f:f248::/32"] },
+    { label: "Docker 网桥", values: ["172.16.0.0/12"] },
+  ],
+  "IpResolution.TrustedHeaders": [
+    { label: "Cloudflare 推荐", values: ["CF-Connecting-IP","X-Forwarded-For","X-Forwarded-Proto"] },
+    { label: "标准转发头", values: ["X-Forwarded-For","X-Forwarded-Proto","X-Forwarded-Host"] },
+  ],
+};
+
 /* ---------- 临时密码 ---------- */
 const boxes = [...document.querySelectorAll("#code-row input")];
 const gateBtn = $("#gate-btn");
@@ -5772,14 +5801,27 @@ function renderEditor() {
         '<button type="button" class="chip" data-text="' + p[0] + '" title="插入' + p[1] + '占位符">' + p[0] + "</button>"
       ).join("") + "</div>";
     }
+    // 字段预设：数组类型支持一键填充
+    const presetKey = sec.name + "." + entry.key;
+    if (FIELD_PRESETS[presetKey] && entry.type === "array") {
+      chips += '<div class="chips" style="margin-top:4px;">' + FIELD_PRESETS[presetKey].map(p =>
+        '<button type="button" class="chip preset-chip" data-preset="' + escapeHtml(JSON.stringify(p.values)) + '" title="填充 ' + escapeHtml(p.label) + '">' + escapeHtml(p.label) + "</button>"
+      ).join("") + "</div>";
+    }
     field.innerHTML = label + desc + chips + control + errLine;
     const input = field.querySelector("input,select,textarea");
     input.addEventListener("input", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("change", () => onEdit(sec.name, entry, input.value));
     input.addEventListener("focus", () => previewFocusLine(sec.name, entry.key));
     input.addEventListener("blur", () => previewBlurLine(sec.name, entry.key));
-    field.querySelectorAll(".chip").forEach(chip =>
+    field.querySelectorAll(".chip:not(.preset-chip)").forEach(chip =>
       chip.addEventListener("click", () => insertAtCursor(input, chip.dataset.text)));
+    field.querySelectorAll(".preset-chip").forEach(chip =>
+      chip.addEventListener("click", () => {
+        const values = JSON.parse(chip.dataset.preset);
+        input.value = values.join(", ");
+        input.dispatchEvent(new Event("input"));
+      }));
     box.appendChild(field);
   }
 }
