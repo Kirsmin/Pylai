@@ -228,8 +228,10 @@ export const useAuthStore = defineStore('admin-auth', () => {
     try {
       // 先调用后端登出，确保 session 被正确吊销
       await parseApiResponse(await userCsrfFetch('/api/auth/logout', { method: 'POST' }))
-    } catch {
-      // 即使后端失败也继续清理本地状态
+    } catch (err) {
+      console.warn('[Auth] 服务端登出失败', err)
+      // 登出失败时抛出错误，保持当前状态让用户看到错误，而非静默刷新
+      throw err
     }
     // 清理本地状态
     user.value = null

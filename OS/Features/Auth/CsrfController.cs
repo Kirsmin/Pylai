@@ -21,7 +21,7 @@ public sealed class CsrfController : ControllerBase
             HttpOnly = false,
             Secure = true,
             SameSite = SameSiteMode.Lax,
-            Path = "/api",
+            Path = "/",
             IsEssential = true
         });
         return Ok(new { success = true, token });

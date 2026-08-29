@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { NAlert, NButton, NCheckbox, NInput, NTooltip } from 'naive-ui'
+import { NAlert, NButton, NInput } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { api, ApiError } from '@/utils/api'
 import { getAssertion, createCredential } from '@/utils/webauthn'
@@ -32,7 +32,6 @@ const mfaSetup = ref(false)
 
 const altchaPayload = ref<string | null>(null)
 const altchaEnabled = ref(getPublicConfigSnapshot()?.altchaEnabled ?? true)
-const cookieHttpOnly = ref(getPublicConfigSnapshot()?.cookieHttpOnly ?? true)
 
 onMounted(async () => {
   try {
@@ -177,15 +176,14 @@ function resetMfa() {
       <NInput v-model:value="usernameOrEmail" type="text" size="large" placeholder="用户名 / 邮箱" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'username', autocomplete: 'username' }" />
       <NInput v-model:value="password" type="password" size="large" placeholder="密码" class="underline-input" :disabled="lockedOut" :input-props="{ name: 'password', autocomplete: 'current-password' }" />
       <AltchaWidget v-if="altchaEnabled" v-model="altchaPayload" auto="onsubmit" hide-footer />
-      <div style="display:flex;align-items:center;gap:8px;">
-        <NCheckbox v-model:checked="rememberMe">保持登录</NCheckbox>
-        <NTooltip v-if="cookieHttpOnly" trigger="hover">
-          <template #trigger>
-            <span style="cursor:help;color:var(--text-secondary);">(?)</span>
-          </template>
-          使用 HttpOnly Cookie 存储登录状态，安全性更高
-        </NTooltip>
-      </div>
+      <NButton
+        type="success"
+        :dashed="!rememberMe"
+        size="small"
+        @click="rememberMe = !rememberMe"
+      >
+        {{ rememberMe ? '保持登录：开' : '保持登录：关' }}
+      </NButton>
       <NButton attr-type="submit" type="success" size="large" circle class="submit-btn" :loading="loading" :disabled="!usernameOrEmail || !password || lockedOut">-&gt;</NButton>
     </form>
     <NButton v-if="!loading && !lockedOut" quaternary type="success" size="small" @click="router.push('/ForgetPassword')">忘记密码？</NButton>

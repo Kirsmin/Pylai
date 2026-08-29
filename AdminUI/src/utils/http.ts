@@ -44,7 +44,8 @@ export async function parseApiResponse<T>(res: Response): Promise<T | undefined>
 const USER_CSRF_COOKIE_PATTERN = /(?:^|;\s*)Pylaios\.Csrf=([^;]*)/
 
 export function readUserCsrfToken(): string | null {
-  return document.cookie.match(USER_CSRF_COOKIE_PATTERN)?.[1] ?? null
+  const match = document.cookie.match(USER_CSRF_COOKIE_PATTERN)?.[1]
+  return match ? decodeURIComponent(match) : null
 }
 
 export async function ensureUserCsrfToken(): Promise<void> {
