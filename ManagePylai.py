@@ -4149,7 +4149,7 @@ class UserService:
             *args,
             "--config",
             PYLAI_CONFIG_ARG,
-            input_text=input_text,
+            stdin=input_text,
             timeout=120,
             check=False,
         )
