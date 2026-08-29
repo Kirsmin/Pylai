@@ -2,8 +2,10 @@
 import { ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { createCredential } from '@/utils/webauthn'
+import { useMessage } from 'naive-ui'
 
 const authStore = useAuthStore()
+const message = useMessage()
 const visible = ref(false)
 const busy = ref(false)
 const error = ref('')
@@ -70,6 +72,15 @@ async function confirmTotp() {
   }
 }
 
+async function copySecret() {
+  try {
+    await navigator.clipboard.writeText(secret.value)
+    message.success('密钥已复制')
+  } catch {
+    message.error('复制失败，请手动复制')
+  }
+}
+
 async function registerPasskey() {
   busy.value = true
   error.value = ''
@@ -118,10 +129,22 @@ defineExpose({ open })
       </div>
 
       <div v-if="secret" class="mfa-secret-box">
-        <p>请立即在认证器中添加此密钥：</p>
-        <code class="mono">{{ secret }}</code>
+        <p>请使用手机认证器扫描下方二维码，或手动输入密钥：</p>
+        <div class="qr-wrap">
+          <NQRCode
+            :value="otpauthUri"
+            :size="160"
+            :padding="4"
+            type="svg"
+          />
+        </div>
+        <div class="secret-manual">
+          <span class="muted">密钥</span>
+          <code class="mono">{{ secret }}</code>
+          <NButton size="tiny" quaternary @click="copySecret">复制</NButton>
+        </div>
         <small class="muted">{{ otpauthUri }}</small>
-        <input v-model="code" class="admin-input mono" maxlength="6" placeholder="认证器验证码" />
+        <input v-model="code" class="admin-input mono" maxlength="6" placeholder="输入认证器显示的6位验证码" />
         <NButton type="success" ghost :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
       </div>
 
@@ -144,6 +167,29 @@ defineExpose({ open })
 }
 
 .mfa-secret-box code {
+  overflow-wrap: anywhere;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  background: #fff;
+  border-radius: 8px;
+  align-self: center;
+}
+
+.secret-manual {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.secret-manual code {
+  flex: 1 1 auto;
   overflow-wrap: anywhere;
   font-size: 16px;
   color: var(--text-primary);
