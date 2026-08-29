@@ -198,7 +198,7 @@ def setup_redis() -> None:
     redis_pass = os.environ["PYLAI_REDIS_PASSWORD"]
     redis_conf = Path("/var/lib/pylai/redis.conf")
     redis_conf.write_text(
-        f"bind 127.0.0.1\nport 6379\nsave \"\"\nappendonly no\nrequirepass {redis_pass}\n",
+        f"bind 127.0.0.1\nport 6379\nsave \"\"\nappendonly no\nrequirepass {redis_pass}\nloglevel warning\n",
         encoding="utf-8"
     )
     run(["chown", "redis:redis", str(redis_conf)])

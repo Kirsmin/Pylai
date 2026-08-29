@@ -37,6 +37,11 @@ services:
       - ./config:/etc/pylai:ro
       - appdata:/var/lib/pylai
       - appdata-pg:/var/lib/postgresql
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   appdata:

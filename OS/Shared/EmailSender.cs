@@ -61,7 +61,13 @@ public class EmailSender
             .Replace("%%IPAddress%%", ip)
             .Replace("%%ExpireMinutes%%", _config.Identity.EmailCodeExpireMinutes.ToString());
 
-        await SendAsync(email, theme.Title, body);
+        var subject = theme.Title
+            .Replace("%%CaptchaCode%%", code)
+            .Replace("%%Browser%%", browser)
+            .Replace("%%IPAddress%%", ip)
+            .Replace("%%ExpireMinutes%%", _config.Identity.EmailCodeExpireMinutes.ToString());
+
+        await SendAsync(email, subject, body);
     }
 
     private async Task SendAsync(string to, string subject, string body)

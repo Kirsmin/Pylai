@@ -81,6 +81,7 @@ public sealed class MfaController : ControllerBase
     }
 
     [AllowAnonymous]
+    [IgnoreAntiforgeryToken]
     [HttpPost("totp/enroll")]
     public async Task<IActionResult> BeginTotp([FromBody] MfaEnrollmentRequest request)
     {
@@ -104,6 +105,7 @@ public sealed class MfaController : ControllerBase
     }
 
     [AllowAnonymous]
+    [IgnoreAntiforgeryToken]
     [HttpPost("totp/confirm")]
     public async Task<IActionResult> ConfirmTotp([FromBody] MfaEnrollmentConfirmRequest request)
     {
@@ -212,6 +214,7 @@ public sealed class MfaController : ControllerBase
     }
 
     [AllowAnonymous]
+    [IgnoreAntiforgeryToken]
     [HttpPost("webauthn/registration-options")]
     public async Task<IActionResult> RegistrationOptions([FromBody] MfaEnrollmentRequest request)
     {
@@ -226,6 +229,7 @@ public sealed class MfaController : ControllerBase
     }
 
     [AllowAnonymous]
+    [IgnoreAntiforgeryToken]
     [HttpPost("webauthn/registration")]
     public async Task<IActionResult> CompleteRegistration([FromBody] MfaWebAuthnRegistrationRequest request)
     {

@@ -638,6 +638,10 @@ function renderEditor() {
     }
     // 字段预设：数组类型支持一键填充
     const presetKey = sec.name + "." + entry.key;
+    if (presetKey === "Altcha.SecretKey") {
+      chips += '<div class="chips" style="margin-top:4px;">' +
+        '<button type="button" class="chip" onclick="generateAltchaKey()">自动生成密钥</button></div>';
+    }
     if (FIELD_PRESETS[presetKey] && entry.type === "array") {
       chips += '<div class="chips" style="margin-top:4px;">' + FIELD_PRESETS[presetKey].map(p =>
         '<button type="button" class="chip preset-chip" data-preset="' + escapeHtml(JSON.stringify(p.values)) + '" title="填充 ' + escapeHtml(p.label) + '">' + escapeHtml(p.label) + "</button>"
@@ -889,7 +893,22 @@ function previewBlurLine(section, key) {
   refreshPreviewHighlights();
 }
 
-/* ---------- 提交 ---------- */
+function generateAltchaKey() {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  const hex = Array.from(array)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+  const sec = configData.sections.find(s => s.name === "Altcha");
+  if (!sec) return;
+  const entry = sec.entries.find(e => e.key === "SecretKey");
+  if (!entry) return;
+  const input = document.querySelector('.field[data-id="Altcha.SecretKey"] input');
+  if (!input) return;
+  input.value = hex;
+  input.dispatchEvent(new Event("input"));
+}
+
 function refreshDirty() {
   // 有未提交变更 且 全部通过实时校验 时才允许提交
   const dirty = edits.size > 0;

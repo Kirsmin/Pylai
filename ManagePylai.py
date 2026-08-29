@@ -2331,9 +2331,10 @@ class DockerCompose:
         tail: int | str = 200,
         *,
         follow: bool = False,
-        service: ServiceName | Literal["all"] = "all",
+        service: ServiceName | Literal["all"] = "backend",
     ) -> None:
         # 安装失败路径由 dump_diagnostics 输出更详细的诊断，此处仅面向菜单「查看日志」
+        # 默认只看 backend，避免 redis/nginx 日志淹没关键信息
         if not self.compose_file.is_file():
             out("尚未安装（docker-compose.yml 不存在）。")
             return
@@ -2558,6 +2559,12 @@ services:
       --requirepass ${{PYLAI_REDIS_PASSWORD:?}}
       --appendonly yes
       --save ""
+      --loglevel warning
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD --raw incr ping | grep -qE '^[0-9]+$'"]
       interval: 5s
@@ -2592,6 +2599,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,nosuid,size=64m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
     # 镜像自带 HEALTHCHECK 探测容器内 nginx(:80)，拆分模式下后端只监听 :5000，需覆盖
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health/live', timeout=3).status == 200 else 1)"]
@@ -2611,6 +2623,11 @@ services:
     volumes:
       - {config_dir}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - pylai_www:/var/lib/pylai/www:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pylai_pgdata:
@@ -5803,6 +5820,10 @@ function renderEditor() {
     }
     // 字段预设：数组类型支持一键填充
     const presetKey = sec.name + "." + entry.key;
+    if (presetKey === "Altcha.SecretKey") {
+      chips += '<div class="chips" style="margin-top:4px;">' +
+        '<button type="button" class="chip" onclick="generateAltchaKey()">自动生成密钥</button></div>';
+    }
     if (FIELD_PRESETS[presetKey] && entry.type === "array") {
       chips += '<div class="chips" style="margin-top:4px;">' + FIELD_PRESETS[presetKey].map(p =>
         '<button type="button" class="chip preset-chip" data-preset="' + escapeHtml(JSON.stringify(p.values)) + '" title="填充 ' + escapeHtml(p.label) + '">' + escapeHtml(p.label) + "</button>"
@@ -6054,7 +6075,22 @@ function previewBlurLine(section, key) {
   refreshPreviewHighlights();
 }
 
-/* ---------- 提交 ---------- */
+function generateAltchaKey() {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  const hex = Array.from(array)
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+  const sec = configData.sections.find(s => s.name === "Altcha");
+  if (!sec) return;
+  const entry = sec.entries.find(e => e.key === "SecretKey");
+  if (!entry) return;
+  const input = document.querySelector('.field[data-id="Altcha.SecretKey"] input');
+  if (!input) return;
+  input.value = hex;
+  input.dispatchEvent(new Event("input"));
+}
+
 function refreshDirty() {
   // 有未提交变更 且 全部通过实时校验 时才允许提交
   const dirty = edits.size > 0;

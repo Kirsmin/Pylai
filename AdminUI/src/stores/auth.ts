@@ -226,16 +226,20 @@ export const useAuthStore = defineStore('admin-auth', () => {
 
   async function logout() {
     try {
+      // 先调用后端登出，确保 session 被正确吊销
       await parseApiResponse(await userCsrfFetch('/api/auth/logout', { method: 'POST' }))
     } catch {
+      // 即使后端失败也继续清理本地状态
     }
+    // 清理本地状态
     user.value = null
     capabilities.value = []
     inviteCodeRequired.value = false
     csrfToken.value = ''
     stepUpTicket.value = null
     stepUpVisible.value = false
-    window.location.assign(`${API_BASE}/admin/`)
+    // 硬跳转到登录页，防止 Vue Router 守卫拦截
+    window.location.href = `${API_BASE}/admin/login`
   }
 
   async function init() {
