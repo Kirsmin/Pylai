@@ -2787,6 +2787,8 @@ server {
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Real-IP $remote_addr;
     }
     location /connect/ {
         proxy_pass http://backend:5000;
@@ -2794,6 +2796,8 @@ server {
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Real-IP $remote_addr;
     }
     location /health {
         proxy_pass http://backend:5000;
@@ -2804,6 +2808,8 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Real-IP $remote_addr;
     }
     location / { try_files $uri $uri/ /index.html; }
 }
@@ -3406,8 +3412,8 @@ server {{
         proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
-        # Cloudflare 场景：如需向后传递 CF-Connecting-IP，取消下方注释
-        # proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header X-Real-IP $remote_addr;
     }}
 }}
 """
