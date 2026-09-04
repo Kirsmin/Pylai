@@ -2359,14 +2359,17 @@ class DockerCompose:
         service: ServiceName | Literal["all"] = "all",
         verbose: bool = False,
     ) -> None:
-        """直接流式输出 docker compose logs -f 到终端，支持 Ctrl+C 优雅退出。"""
+        """直接流式输出 docker compose logs -f 到终端，支持 Ctrl+C 优雅退出。
+
+        详细诊断模式(verbose=True)下会自动屏蔽 Nginx 访问日志，避免其淹没后端输出。
+        """
         cmd: list[str | Path] = ["logs", "--timestamps"]
 
         if verbose:
             service = "all"
             tail = "all"
             out("\n▶ 实时日志跟踪 — 详细诊断模式")
-            out("  服务: 全部 | 时间戳: 启用 | 历史: 全部")
+            out("  服务: 全部(已屏蔽 Nginx) | 时间戳: 启用 | 历史: 全部")
             self._print_service_status()
         else:
             out(f"\n▶ 正在实时跟踪 {service if service != 'all' else '所有服务'} 日志（按 Ctrl+C 退出）")
@@ -2385,6 +2388,36 @@ class DockerCompose:
             "-f", self.compose_file,
             *cmd,
         ]
+
+        # 详细诊断模式下通过管道读取并过滤 Nginx 日志，避免访问日志淹没后端输出
+        if verbose:
+            import re
+            # docker compose logs 格式: "service-name  |  [timestamp] log content"
+            # 服务名可能是 pylai-nginx-1、nginx 等形式
+            nginx_pattern = re.compile(r"^[\w-]*nginx[\w-]*\s+\|")
+
+            try:
+                process = subprocess.Popen(
+                    [str(x) for x in full_cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                assert process.stdout is not None
+                for line in process.stdout:
+                    if not nginx_pattern.match(line):
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                process.wait()
+            except KeyboardInterrupt:
+                out("\n[正在停止日志跟踪...]")
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                out("[日志跟踪已退出]")
+            return
 
         try:
             process = subprocess.Popen(
