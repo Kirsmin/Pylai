@@ -120,21 +120,23 @@ def main() -> int:
         for future in as_completed(futures):
             results.append(future.result())
 
-    # 新 API：成功返回 200 + { uid, ... }，冲突返回 409
+    # 新 API：成功返回 200 + { uid, ... }，冲突返回 409，数据库繁忙返回 503 server_busy
     success = [r for r in results if r[0] == 200 and r[1] and r[1].get("uid")]
     conflicts = [r for r in results if r[0] == 409]
-    others = [r for r in results if r[0] not in (200, 409)]
+    busy = [r for r in results if r[0] == 503 and r[1] and r[1].get("errorCode") == "server_busy"]
+    others = [r for r in results if r[0] not in (200, 409, 503)]
 
     winner_uid = success[0][1].get("uid") if success else None
     leaked = bool(winner_uid) and any(winner_uid in r[2] for r in conflicts)
 
-    ok = len(success) == 1 and len(conflicts) == workers - 1 and not others and not leaked
+    ok = len(success) == 1 and len(conflicts) + len(busy) == workers - 1 and not others and not leaked
 
     print(json.dumps({
         "success": ok,
         "workers": workers,
         "successCount": len(success),
         "conflictCount": len(conflicts),
+        "busyCount": len(busy),
         "otherStatuses": sorted({r[0] for r in others}),
         "failures": [{"status": r[0], "body": r[2][:300]} for r in others],
         "winnerUidLeakedInFailure": leaked,
