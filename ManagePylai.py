@@ -2331,16 +2331,14 @@ class DockerCompose:
         tail: int | str = 200,
         *,
         follow: bool = False,
-        service: ServiceName | Literal["all"] = "backend",
+        service: ServiceName | Literal["all"] = "all",
+        verbose: bool = False,
     ) -> None:
-        # 安装失败路径由 dump_diagnostics 输出更详细的诊断，此处仅面向菜单「查看日志」
-        # 默认只看 backend，避免 redis/nginx 日志淹没关键信息
         if not self.compose_file.is_file():
             out("尚未安装（docker-compose.yml 不存在）。")
             return
         if not self.service_exists("backend"):
-            # 容器已退出时仍有日志可查，不直接返回误导信息
-            text = self.logs_text(tail, follow=follow, service=service)
+            text = self.logs_text(tail, follow=False, service=service)
             if text.strip():
                 out(text.strip())
                 out("\n[提示] 后端容器未运行，以上为最近日志。")
@@ -2348,8 +2346,81 @@ class DockerCompose:
             out("尚未安装或服务不存在。")
             return
 
-        text = self.logs_text(tail, follow=follow, service=service)
-        out(text.strip() or "（暂无日志输出）")
+        if follow:
+            self._stream_logs(tail=tail, service=service, verbose=verbose)
+        else:
+            text = self.logs_text(tail, follow=False, service=service)
+            out(text.strip() or "（暂无日志输出）")
+
+    def _stream_logs(
+        self,
+        tail: int | str = 200,
+        *,
+        service: ServiceName | Literal["all"] = "all",
+        verbose: bool = False,
+    ) -> None:
+        """直接流式输出 docker compose logs -f 到终端，支持 Ctrl+C 优雅退出。"""
+        cmd: list[str | Path] = ["logs", "--timestamps"]
+
+        if verbose:
+            service = "all"
+            tail = "all"
+            out("\n▶ 实时日志跟踪 — 详细诊断模式")
+            out("  服务: 全部 | 时间戳: 启用 | 历史: 全部")
+            self._print_service_status()
+        else:
+            out(f"\n▶ 正在实时跟踪 {service if service != 'all' else '所有服务'} 日志（按 Ctrl+C 退出）")
+
+        out("-" * 60)
+
+        cmd.extend(["--tail", str(tail)])
+        cmd.append("-f")
+        if service != "all":
+            cmd.append(service)
+
+        full_cmd = [
+            "docker", "compose",
+            "-p", self.project,
+            "--env-file", str(self.env_file),
+            "-f", self.compose_file,
+            *cmd,
+        ]
+
+        try:
+            process = subprocess.Popen(
+                [str(x) for x in full_cmd],
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
+            process.wait()
+        except KeyboardInterrupt:
+            out("\n[正在停止日志跟踪...]")
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            out("[日志跟踪已退出]")
+
+    def _print_service_status(self) -> None:
+        """打印当前各服务状态（用于诊断）。"""
+        result = self.compose("ps", "-a", "--format", "json", check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            return
+        try:
+            entries = json.loads(result.stdout)
+            if isinstance(entries, dict):
+                entries = [entries]
+            out("  当前服务状态:")
+            for e in entries:
+                name = e.get("Name", e.get("Service", "unknown"))
+                state = e.get("State", "unknown")
+                status = e.get("Status", "unknown")
+                health = e.get("Health", "")
+                health_str = f" [{health}]" if health else ""
+                out(f"    • {name}: {state} ({status}){health_str}")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     def dump_diagnostics(self, *, tail: int = 200) -> None:
         """安装/更新失败时输出分服务诊断，不依赖 service_exists 误导。"""
@@ -6716,6 +6787,8 @@ class InteractiveMenu:
                 ("最近 500 行", lambda: self.ctx.docker.view_logs(500)),
                 ("最近 2000 行", lambda: self.ctx.docker.view_logs(2000)),
                 ("全部日志", lambda: self.ctx.docker.view_logs("all")),
+                ("实时跟踪日志 (tail -f)", lambda: self.ctx.docker.view_logs(200, follow=True)),
+                ("实时跟踪日志 — 详细诊断模式", lambda: self.ctx.docker.view_logs("all", follow=True, verbose=True)),
             ],
         )
 
@@ -6878,10 +6951,11 @@ def cmd_self_update(ctx: AppContext, args: argparse.Namespace) -> None:
 def cmd_logs(ctx: AppContext, args: argparse.Namespace) -> None:
     ctx.require_installed()
 
+    tail = getattr(args, "tail", 200)
     if args.follow:
-        ctx.docker.view_logs(tail=200, follow=True, service=args.service)
+        ctx.docker.view_logs(tail=tail, follow=True, service=args.service, verbose=args.verbose)
     else:
-        text = ctx.docker.logs_text(tail=200, service=args.service)
+        text = ctx.docker.logs_text(tail=tail, service=args.service)
         out(text.strip() or "（暂无日志输出）")
 
 
@@ -7048,7 +7122,17 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["backend", "nginx", "postgres", "redis", "all"],
         help="服务名",
     )
-    logs_p.add_argument("-f", "--follow", action="store_true", help="持续跟踪")
+    logs_p.add_argument(
+        "-f", "--follow",
+        action="store_true",
+        help="持续跟踪（实时流式输出，按 Ctrl+C 退出）",
+    )
+    logs_p.add_argument(
+        "--tail",
+        type=str,
+        default="200",
+        help="显示最后 N 行（默认 200，all 表示全部）",
+    )
 
     config_p = subparsers.add_parser("config", help="配置管理")
     config_sub = config_p.add_subparsers(dest="config_cmd")
