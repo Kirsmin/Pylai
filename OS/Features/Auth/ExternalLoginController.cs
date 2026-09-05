@@ -56,7 +56,7 @@ public class ExternalLoginController : ControllerBase
     public async Task<IActionResult> ExternalLogin([FromBody] ExternalLoginRequest request)
     {
         if (string.IsNullOrEmpty(request.Provider))
-            return BadRequest(new { Success = false, Error = "Provider is required.", ErrorCode = "invalid_request" });
+            return BadRequest(new { Success = false, Error = "缺少登录提供商参数。", ErrorCode = "invalid_request" });
 
         var provider = request.Provider.ToLowerInvariant() switch
         {
@@ -67,7 +67,7 @@ public class ExternalLoginController : ControllerBase
         };
 
         if (provider is null)
-            return BadRequest(new { Success = false, Error = "Unsupported provider.", ErrorCode = "invalid_request" });
+            return BadRequest(new { Success = false, Error = "暂不支持此登录提供商。", ErrorCode = "invalid_request" });
 
         var configured = provider switch
         {
@@ -77,7 +77,7 @@ public class ExternalLoginController : ControllerBase
             _ => false
         };
         if (!configured)
-            return BadRequest(new { Success = false, Error = "Provider is not configured.", ErrorCode = "invalid_request" });
+            return BadRequest(new { Success = false, Error = "该登录方式尚未启用。", ErrorCode = "invalid_request" });
 
         string? initiatorUid = null;
         string? sessionStepUpKey = null;

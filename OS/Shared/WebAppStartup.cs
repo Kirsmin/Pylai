@@ -235,6 +235,9 @@ public static class WebAppStartup
         });
         logging.SetMinimumLevel(Enum.Parse<LogLevel>(config.Logging.DefaultLevel));
         logging.AddFilter("Microsoft.AspNetCore", Enum.Parse<LogLevel>(config.Logging.MicrosoftAspNetCoreLevel));
+        logging.AddFilter("Microsoft.EntityFrameworkCore", Enum.Parse<LogLevel>(config.Logging.MicrosoftEntityFrameworkCoreLevel));
+        logging.AddFilter("OpenIddict", Enum.Parse<LogLevel>(config.Logging.OpenIddictLevel));
+        logging.AddFilter("System.Net.Http", Enum.Parse<LogLevel>(config.Logging.SystemNetHttpLevel));
         logging.AddFilter("Pylaios", Enum.Parse<LogLevel>(config.Logging.PylaiosLevel));
 
         // 数据库操作信息只在出错时显示（避免健康检查 SELECT 1 / 日常查询刷屏）——

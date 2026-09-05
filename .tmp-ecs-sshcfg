@@ -1,0 +1,5 @@
+Host ecs
+    HostName 47.238.144.228
+    User root
+    IdentityFile /home/kirsmin/.ssh/id_ed25519
+    IdentitiesOnly yes

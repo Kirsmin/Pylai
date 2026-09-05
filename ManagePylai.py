@@ -3949,12 +3949,40 @@ class UpdateService:
         )
 
     def update_interactive(self) -> None:
-        source = choose_install_source("请选择更新包的来源")
-        self.update_app(
-            yes=False,
-            source=source,
-            version=None,
-        )
+        # 交互式更新：先检查并更新 ManagePylai.py，避免旧版管理逻辑与新版产物不匹配。
+        self.ensure_manager_up_to_date(yes=False)
+
+        ctx = self.ctx
+        client = ReleaseClient(ctx.manager)
+        releases = client.list_releases(
+            include_prerelease=ctx.manager.include_prerelease, limit=12)
+        # 云端过滤后为空（如只发布过预发布）时回退列出全部
+        if not releases and not ctx.manager.include_prerelease:
+            releases = client.list_releases(include_prerelease=True, limit=12)
+
+        # 自定义镜像源 / 列表失败时无法枚举版本，退回“本地 tar 或云端最新”二选一
+        if not releases:
+            source = choose_install_source("请选择更新包的来源") or "remote"
+            self.update_app(yes=False, source=source, version=None)
+            return
+
+        out("云端可用的版本：")
+        for index, release in enumerate(releases, 1):
+            label = "预发布" if release["prerelease"] else "正式版"
+            out(f"  [{index}] v{release['version']}（{label}）")
+        out("（输入 + 可从本地磁盘安装 Pylai-<version>-Linux-<arch>.tar）")
+
+        raw = ask("请选择要更新到的版本", default="1").strip()
+        if raw == "+":
+            self.update_app(yes=False, source="local", version=None)
+            return
+
+        try:
+            chosen = releases[int(raw) - 1]["version"]
+        except (ValueError, IndexError):
+            raise ManageError("未选择版本。")
+
+        self.update_app(yes=False, source="remote", version=chosen)
 
     def check_manager_update(self) -> None:
         client = ReleaseClient(self.ctx.manager)

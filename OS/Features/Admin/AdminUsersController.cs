@@ -56,7 +56,7 @@ public class AdminUsersController : ControllerBase
     {
         var current = await this.GetCurrentUserAsync(_context);
         if (current is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var query = _context.Users.AsNoTracking();
         if (current.Group == AuthConstants.Roles.Admin)
@@ -101,7 +101,7 @@ public class AdminUsersController : ControllerBase
         var (current, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (current is null || target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var logins = await _context.UserLogins
             .Where(l => l.UserUid == target.Uid)
@@ -170,13 +170,13 @@ public class AdminUsersController : ControllerBase
         var (current, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (current is null || target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var isMax = current.Group == AuthConstants.Roles.Max;
         var accessChanged = false;
 
         if (!isMax && (request.Group is not null || request.Status is not null))
-            return StatusCode(403, new ApiResponse { Success = false, Error = "Forbidden.", ErrorCode = "forbidden" });
+            return StatusCode(403, new ApiResponse { Success = false, Error = "没有权限执行此操作。", ErrorCode = "forbidden" });
 
         if (request.Group is not null)
         {
@@ -259,7 +259,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
         if (stepUp is not null) return stepUp;
@@ -288,7 +288,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var revokedHashes = await _context.UserSessions.AsNoTracking()
             .Where(s => s.UserUid == target.Uid && s.RevokedAt == null)
@@ -310,7 +310,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var now = DateTimeOffset.UtcNow;
         var sessions = await _context.UserSessions
@@ -336,7 +336,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var session = await _context.UserSessions.FirstOrDefaultAsync(s => s.Id == sessionId && s.UserUid == uid);
         if (session is null || session.RevokedAt is not null)
@@ -355,7 +355,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var status = await _userTokenService.GetStatusAsync(target.Uid);
         if (status is null)
@@ -392,7 +392,7 @@ public class AdminUsersController : ControllerBase
         var (_, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var revoked = await _userTokenService.RevokeAsync(target.Uid);
 
@@ -408,7 +408,7 @@ public class AdminUsersController : ControllerBase
         var (current, target, error) = await ResolveTargetAsync(uid);
         if (error is not null) return error;
         if (current is null || target is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         if (target.Uid == current.Uid)
             return StatusCode(403, new ApiResponse { Success = false, Error = "不能删除自己。", ErrorCode = "forbidden" });
@@ -434,14 +434,14 @@ public class AdminUsersController : ControllerBase
     {
         var current = await this.GetCurrentUserAsync(_context);
         if (current is null)
-            return (null, null, Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" }));
+            return (null, null, Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" }));
 
         var target = await _context.Users.FindAsync(uid);
         if (target is null)
             return (current, null, NotFound(new ApiResponse { Success = false, Error = "用户不存在。", ErrorCode = "not_found" }));
 
         if (current.Group == AuthConstants.Roles.Admin && target.Group != AuthConstants.Roles.Normal)
-            return (current, target, StatusCode(403, new ApiResponse { Success = false, Error = "Forbidden.", ErrorCode = "forbidden" }));
+            return (current, target, StatusCode(403, new ApiResponse { Success = false, Error = "没有权限执行此操作。", ErrorCode = "forbidden" }));
 
         return (current, target, null);
     }

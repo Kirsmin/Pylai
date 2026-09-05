@@ -115,7 +115,7 @@ public static class ControllerExtensions
     {
         var user = await controller.GetCurrentUserAsync(context);
         if (user is null)
-            return new UnauthorizedObjectResult(new { success = false, error = "Unauthorized.", errorCode = "unauthorized" });
+            return new UnauthorizedObjectResult(new { success = false, error = "未登录或登录已失效。", errorCode = "unauthorized" });
 
         if (AuthConstants.Groups.Rank(user.Group) < AuthConstants.Groups.Rank(AuthConstants.Roles.Admin))
             return null;

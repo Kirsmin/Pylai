@@ -218,8 +218,11 @@ Poeat Team.
 '''
 
 [Logging]
-DefaultLevel = "Information"
+DefaultLevel = "Warning"
 MicrosoftAspNetCoreLevel = "Warning"
+MicrosoftEntityFrameworkCoreLevel = "Warning"
+OpenIddictLevel = "Warning"
+SystemNetHttpLevel = "Warning"
 PylaiosLevel = "Information"
 
 [TokenCleanup]

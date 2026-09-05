@@ -30,21 +30,21 @@ public class UserTokenAuthHandler : AuthenticationHandler<UserTokenOptions>
     {
         var authHeader = Request.Headers.Authorization.ToString();
         if (string.IsNullOrEmpty(authHeader))
-            return AuthenticateResult.Fail("Unauthorized");
+            return AuthenticateResult.Fail("未登录或登录已失效。");
 
         var parts = authHeader.Split(' ', 2);
         if (parts.Length != 2 || !parts[0].Equals("Bearer", StringComparison.OrdinalIgnoreCase))
-            return AuthenticateResult.Fail("Unauthorized");
+            return AuthenticateResult.Fail("未登录或登录已失效。");
 
         var token = parts[1];
         if (!token.StartsWith(AuthHelper.UserTokenPrefix, StringComparison.Ordinal)
             || token.Length != AuthHelper.UserTokenPrefix.Length + AuthHelper.UserTokenKeyLength)
-            return AuthenticateResult.Fail("Unauthorized");
+            return AuthenticateResult.Fail("未登录或登录已失效。");
 
         var ip = _ipResolver.GetClientIp(Context);
         var result = await _tokenService.ValidateAsync(token, ip, Request.Headers.UserAgent.ToString(), Request.Method, Request.Path.Value ?? "/");
         if (!result.Valid || result.Token is null || result.User is null)
-            return AuthenticateResult.Fail("Unauthorized");
+            return AuthenticateResult.Fail("未登录或登录已失效。");
 
         var claims = new[]
         {
@@ -68,13 +68,13 @@ public class UserTokenAuthHandler : AuthenticationHandler<UserTokenOptions>
     {
         Response.StatusCode = 401;
         Response.ContentType = "application/json";
-        await Response.WriteAsync("""{"success":false,"error":"Unauthorized","errorCode":"unauthorized"}""");
+        await Response.WriteAsync("""{"success":false,"error":"未登录或登录已失效。","errorCode":"unauthorized"}""");
     }
 
     protected override async Task HandleForbiddenAsync(AuthenticationProperties properties)
     {
         Response.StatusCode = 403;
         Response.ContentType = "application/json";
-        await Response.WriteAsync("""{"success":false,"error":"Forbidden","errorCode":"forbidden"}""");
+        await Response.WriteAsync("""{"success":false,"error":"没有权限执行此操作。","errorCode":"forbidden"}""");
     }
 }

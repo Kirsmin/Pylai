@@ -99,6 +99,6 @@ public class SessionValidationMiddleware
 
         context.Response.StatusCode = 401;
         context.Response.ContentType = "application/json";
-        await context.Response.WriteAsync("""{"success":false,"error":"Session expired or revoked.","errorCode":"session_invalid"}""");
+        await context.Response.WriteAsync("""{"success":false,"error":"会话已失效，请重新登录。","errorCode":"session_invalid"}""");
     }
 }

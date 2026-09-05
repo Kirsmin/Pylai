@@ -36,7 +36,7 @@ public sealed class CookieCsrfMiddleware
             await context.Response.WriteAsync(JsonSerializer.Serialize(new
             {
                 success = false,
-                error = "CSRF token missing or invalid.",
+                error = "安全校验未通过，请刷新页面后重试。",
                 errorCode = "csrf_invalid"
             }));
             return;

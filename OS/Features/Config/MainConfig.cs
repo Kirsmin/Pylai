@@ -241,8 +241,11 @@ public class ExternalProviderConfig
 [ConfigFile("pylai.toml")]
 public class LoggingConfig
 {
-    public string DefaultLevel { get; set; } = "Information";
+    public string DefaultLevel { get; set; } = "Warning";
     public string MicrosoftAspNetCoreLevel { get; set; } = "Warning";
+    public string MicrosoftEntityFrameworkCoreLevel { get; set; } = "Warning";
+    public string OpenIddictLevel { get; set; } = "Warning";
+    public string SystemNetHttpLevel { get; set; } = "Warning";
     public string PylaiosLevel { get; set; } = "Information";
 }
 

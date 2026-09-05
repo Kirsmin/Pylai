@@ -53,7 +53,7 @@ public class AccountEmailController : ControllerBase
         if (!ModelState.IsValid)
         {
             _logger.LogWarning("请求参数无效");
-            return BadRequest(new EmailCodeResponse { Success = false, Error = "Invalid request.", ErrorCode = "invalid_format" });
+            return BadRequest(new EmailCodeResponse { Success = false, Error = "请求参数无效。", ErrorCode = "invalid_format" });
         }
 
         if (!AuthHelper.IsValidEmail(request.Email))
@@ -134,7 +134,7 @@ public class AccountEmailController : ControllerBase
         if (!ModelState.IsValid)
         {
             _logger.LogWarning("请求参数无效");
-            return BadRequest(new EmailCodeResponse { Success = false, Error = "Invalid request.", ErrorCode = "invalid_format" });
+            return BadRequest(new EmailCodeResponse { Success = false, Error = "请求参数无效。", ErrorCode = "invalid_format" });
         }
 
         if (!AuthHelper.IsValidEmail(request.NewEmail))

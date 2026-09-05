@@ -38,7 +38,7 @@ public static class CliAppStartup
         cocona.Services.AddPylaios(config, env: null, cliOnly: true);
 
         // CLI 输出规范：stdout=JSON、stderr=日志。日志显式走 stderr，避免与 JSON 混流；
-        // 与 web 共用 emoji formatter（统一格式 + 框架英文日志自动翻译为中文）
+        // 与 web 共用 emoji formatter（统一格式；业务日志按中文输出，框架日志不强制翻译）
         cocona.Services.AddLogging(logging =>
         {
             logging.ClearProviders();

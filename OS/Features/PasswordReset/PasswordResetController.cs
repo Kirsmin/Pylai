@@ -95,7 +95,10 @@ public class PasswordResetController : ControllerBase
         }
         else
         {
-            // 邮箱不存在：不创建验证码条目、不发送邮件，响应耗时与存在分支对齐（防时序侧信道）。
+            // 邮箱不存在：不创建验证码条目、不发送邮件，响应耗时与存在分支对齐（防时序侧信道）
+            // 但在服务端记录日志，便于管理员排查收不到重置邮件等反馈。
+            _logger.LogWarning("密码重置请求：邮箱不存在或未绑定账号 | IP:{Ip} | 邮箱:{Email}",
+                ip, request.Email);
         }
 
         return Ok(new ForgotPasswordResponse { Success = true, TransactionId = transactionId });

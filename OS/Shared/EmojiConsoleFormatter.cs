@@ -34,14 +34,11 @@ public sealed class EmojiConsoleFormatter : ConsoleFormatter, IDisposable
             message = logEntry.Exception.ToString();
         if (message is null) return;
 
-        // 框架英文日志模板统一翻译为中文（EF Core / ASP.NET Core Hosting 等）
-        message = ChineseLogTranslator.Translate(logEntry.Category, message);
-
         var (emoji, color) = GetEmojiAndColor(logEntry.LogLevel);
         var timestamp = _options.TimestampFormat is not null
             ? DateTimeOffset.Now.ToString(_options.TimestampFormat)
             : null;
-        var shortName = ChineseLogTranslator.TranslateCategoryName(GetShortName(logEntry.Category));
+        var shortName = GetShortName(logEntry.Category);
 
         const string reset = "\x1b[0m";
 
