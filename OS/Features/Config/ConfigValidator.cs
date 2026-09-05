@@ -109,6 +109,9 @@ public static class ConfigValidator
     {
         ValidateLogLevel(config.Logging.DefaultLevel, "Logging.DefaultLevel", FileOf<LoggingConfig>(), result);
         ValidateLogLevel(config.Logging.MicrosoftAspNetCoreLevel, "Logging.MicrosoftAspNetCoreLevel", FileOf<LoggingConfig>(), result);
+        ValidateLogLevel(config.Logging.MicrosoftEntityFrameworkCoreLevel, "Logging.MicrosoftEntityFrameworkCoreLevel", FileOf<LoggingConfig>(), result);
+        ValidateLogLevel(config.Logging.OpenIddictLevel, "Logging.OpenIddictLevel", FileOf<LoggingConfig>(), result);
+        ValidateLogLevel(config.Logging.SystemNetHttpLevel, "Logging.SystemNetHttpLevel", FileOf<LoggingConfig>(), result);
         ValidateLogLevel(config.Logging.PylaiosLevel, "Logging.PylaiosLevel", FileOf<LoggingConfig>(), result);
     }
 

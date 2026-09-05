@@ -129,7 +129,7 @@ public sealed class MfaController : ControllerBase
     {
         var user = await ResolveUserAsync(null);
         if (user is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var rank = AuthConstants.Groups.Rank(user.Group);
         var required = (rank >= AuthConstants.Groups.Rank(AuthConstants.Roles.Admin) && _config.Mfa.RequireForAdmin)
@@ -153,7 +153,7 @@ public sealed class MfaController : ControllerBase
     {
         var user = await ResolveUserAsync(null);
         if (user is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var requirement = await _mfa.BeginStepUpAsync(user);
         return Ok(new

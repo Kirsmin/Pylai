@@ -31,7 +31,7 @@ public class AdminApiIpBanMiddleware
             context.Response.StatusCode = 403;
             context.Response.ContentType = "application/json";
             var banIdJson = banId is null ? "null" : $"\"{banId}\"";
-            await context.Response.WriteAsync($$"""{"success":false,"error":"Forbidden","errorCode":"forbidden","banId":{{banIdJson}}}""");
+            await context.Response.WriteAsync($$"""{"success":false,"error":"IP 已被封禁，请稍后重试。","errorCode":"forbidden","banId":{{banIdJson}}}""");
             return;
         }
 

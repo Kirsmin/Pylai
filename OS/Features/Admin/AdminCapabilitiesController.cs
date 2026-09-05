@@ -22,7 +22,7 @@ public class AdminCapabilitiesController : ControllerBase
     {
         var user = await this.GetCurrentUserAsync(_context);
         if (user is null)
-            return Unauthorized(new ApiResponse { Success = false, Error = "Unauthorized.", ErrorCode = "unauthorized" });
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var isMax = user.Group == AuthConstants.Roles.Max;
         var isAdmin = user.Group == AuthConstants.Roles.Admin;

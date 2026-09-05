@@ -58,7 +58,7 @@ public class AdminAuthorizationMiddlewareResultHandler : IAuthorizationMiddlewar
 
             context.Response.StatusCode = 401;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync("""{"success":false,"error":"Unauthorized","errorCode":"unauthorized"}""");
+            await context.Response.WriteAsync("""{"success":false,"error":"未登录或登录已失效。","errorCode":"unauthorized"}""");
             return;
         }
 
@@ -66,7 +66,7 @@ public class AdminAuthorizationMiddlewareResultHandler : IAuthorizationMiddlewar
         {
             context.Response.StatusCode = 403;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync("""{"success":false,"error":"Forbidden","errorCode":"forbidden"}""");
+            await context.Response.WriteAsync("""{"success":false,"error":"没有权限执行此操作。","errorCode":"forbidden"}""");
             return;
         }
 

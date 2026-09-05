@@ -74,7 +74,7 @@ public class UserInfoController : Controller
     {
         Response.StatusCode = 401;
         Response.ContentType = "application/json";
-        await Response.WriteAsync("""{"success":false,"error":"Unauthorized","errorCode":"unauthorized"}""");
+        await Response.WriteAsync("""{"success":false,"error":"未登录或登录已失效。","errorCode":"unauthorized"}""");
         return new EmptyResult();
     }
 }

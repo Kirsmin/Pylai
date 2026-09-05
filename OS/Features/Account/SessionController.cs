@@ -68,7 +68,7 @@ public class SessionController : ControllerBase
     {
         var user = await this.GetCurrentUserAsync(_context);
         if (user is null)
-            return Unauthorized(new { Success = false, Error = "Not authenticated.", ErrorCode = "unauthorized" });
+            return Unauthorized(new { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var sessions = await _context.UserSessions
             .Where(s => s.UserUid == user.Uid && s.RevokedAt == null && s.ExpiresAt > DateTimeOffset.UtcNow)
@@ -91,13 +91,13 @@ public class SessionController : ControllerBase
     {
         var user = await this.GetCurrentUserAsync(_context);
         if (user is null)
-            return Unauthorized(new { Success = false, Error = "Not authenticated.", ErrorCode = "unauthorized" });
+            return Unauthorized(new { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var session = await _context.UserSessions
             .FirstOrDefaultAsync(s => s.Id == id && s.UserUid == user.Uid && s.RevokedAt == null);
 
         if (session is null)
-            return NotFound(new { Success = false, Error = "Session not found.", ErrorCode = "not_found" });
+            return NotFound(new { Success = false, Error = "会话不存在或已失效。", ErrorCode = "not_found" });
 
         session.RevokedAt = DateTimeOffset.UtcNow;
         await _context.SaveChangesAsync();
@@ -113,7 +113,7 @@ public class SessionController : ControllerBase
     {
         var user = await this.GetCurrentUserAsync(_context);
         if (user is null)
-            return Unauthorized(new { Success = false, Error = "Not authenticated.", ErrorCode = "unauthorized" });
+            return Unauthorized(new { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
 
         var affected = await _context.RevokeAllSessionsAsync(user.Uid);
         await SessionCacheInvalidator.InvalidateUserSessionsAsync(_stateCache, _context, user.Uid);
