@@ -28,10 +28,10 @@ const canEditStatus = computed(() => cap.value?.canEditStatus ?? false)
 
 const groupOptions = computed(() => targetGroups.value.map(g => ({ label: g, value: g })))
 const statusOptions = [
-  { label: 'Active', value: 'Active' },
-  { label: 'Banned', value: 'Banned' },
-  { label: 'Locked', value: 'Locked' },
-  { label: 'Deleted', value: 'Deleted' }
+  { label: '正常 · Active', value: 'Active' },
+  { label: '封禁 · Banned', value: 'Banned' },
+  { label: '锁定 · Locked', value: 'Locked' },
+  { label: '已删除 · Deleted', value: 'Deleted' }
 ]
 
 function groupTone(g: string) {
@@ -246,12 +246,30 @@ function handleMore(key: string | number, user: AdminUserListItem) {
       </template>
     </PageHeader>
 
-    <div class="admin-toolbar">
-      <NInput v-model:value="search" placeholder="搜索用户名 / 邮箱 / 显示名" clearable style="width:260px" @keyup.enter="searchUsers" />
-      <NSelect v-if="targetGroups.length" v-model:value="group" placeholder="用户组" clearable :options="groupOptions" style="width:130px" @update:value="searchUsers" />
-      <NSelect v-if="canEditStatus" v-model:value="status" placeholder="状态" clearable :options="statusOptions" style="width:130px" @update:value="searchUsers" />
-      <NButton type="primary" @click="searchUsers">查询</NButton>
-      <NButton quaternary @click="resetFilters">重置</NButton>
+    <div class="admin-filter-panel">
+      <div class="user-filter-grid">
+        <div class="admin-filter-field user-search-filter">
+          <label>用户</label>
+          <NInput v-model:value="search" placeholder="用户名、邮箱或显示名" clearable @keyup.enter="searchUsers" />
+        </div>
+        <div v-if="targetGroups.length" class="admin-filter-field">
+          <label>用户组</label>
+          <NSelect v-model:value="group" placeholder="全部用户组" clearable :options="groupOptions" />
+        </div>
+        <div v-if="canEditStatus" class="admin-filter-field">
+          <label>状态</label>
+          <NSelect v-model:value="status" placeholder="全部状态" clearable :options="statusOptions" />
+        </div>
+      </div>
+      <div class="admin-filter-actions">
+        <NButton quaternary @click="resetFilters">清空筛选</NButton>
+        <NButton type="primary" :loading="loading" @click="searchUsers">查询</NButton>
+      </div>
+    </div>
+
+    <div class="admin-context-strip">
+      <span>当前条件下共 <strong>{{ total }}</strong> 个用户</span>
+      <span class="muted">可操作用户组与字段以服务端 capability 为准。</span>
     </div>
 
     <div class="admin-table-wrap">
@@ -266,8 +284,8 @@ function handleMore(key: string | number, user: AdminUserListItem) {
           <tbody>
             <tr v-for="u in users" :key="u.uid">
               <td>
-                <div style="display:flex;flex-direction:column;gap:2px;">
-                  <span class="truncate" style="font-weight:600;">{{ u.displayName || u.name }}</span>
+                <div class="user-cell">
+                  <span class="truncate cell-primary">{{ u.displayName || u.name }}</span>
                   <span class="mono small muted">{{ u.name }}</span>
                 </div>
               </td>
@@ -276,7 +294,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
               <td><AppBadge :tone="statusTone(u.status)">{{ u.status }}</AppBadge></td>
               <td><DateTimeText :value="u.lastLoginAt" /></td>
               <td style="text-align:right">
-                <div style="display:inline-flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">
+                <div class="user-actions">
                   <NButton v-if="endpointAllowed('GET','/api/admin/users/{uid}')" size="tiny" quaternary @click="openDetail(u.uid)">详情</NButton>
                   <NButton v-if="endpointAllowed('PATCH','/api/admin/users/{uid}')" size="tiny" quaternary @click="openEdit(u)">编辑</NButton>
                   <template v-if="canEditStatus && endpointAllowed('PATCH','/api/admin/users/{uid}')">
@@ -330,7 +348,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
             </dd>
           </div>
         </dl>
-        <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap;">
+        <div class="modal-action-row">
           <NButton v-if="endpointAllowed('POST','/api/admin/users/{uid}/revoke-sessions')" quaternary type="warning" @click="revokeAllSessions(detail.uid)">吊销全部会话</NButton>
           <NButton v-if="endpointAllowed('DELETE','/api/admin/users/{uid}/token')" quaternary type="error" @click="revokeToken(detail.uid)">吊销 UserToken</NButton>
         </div>
@@ -338,43 +356,41 @@ function handleMore(key: string | number, user: AdminUserListItem) {
     </NModal>
 
     <!-- Edit -->
-    <NModal v-model:show="editVisible" preset="card" style="width:min(92%,480px)" title="编辑用户">
-      <div style="display:flex;flex-direction:column;gap:14px;">
+    <NModal v-model:show="editVisible" preset="card" style="width:min(calc(100vw - 24px),500px)" title="编辑用户">
+      <div class="admin-form-stack">
         <label class="admin-field">
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">显示名</span>
-          <input v-model="editForm.displayName" class="admin-input" placeholder="显示名称" />
+          <span class="admin-field-label">显示名</span>
+          <NInput v-model:value="editForm.displayName" placeholder="显示名称" />
         </label>
         <label class="admin-field">
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">邮箱</span>
-          <input v-model="editForm.email" class="admin-input" placeholder="user@example.com" />
+          <span class="admin-field-label">邮箱</span>
+          <NInput v-model:value="editForm.email" placeholder="user@example.com" />
         </label>
-        <div v-if="canEditStatus">
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;display:block;">状态</span>
-          <div class="segmented">
-            <button v-for="opt in statusOptions" :key="opt.value" type="button" :class="{active:editForm.status===opt.value}" @click="editForm.status=opt.value">{{ opt.label }}</button>
-          </div>
-        </div>
-        <div v-if="canEditGroup">
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;display:block;">用户组</span>
-          <div class="segmented">
-            <button v-for="opt in groupOptions" :key="opt.value" type="button" :class="{active:editForm.group===opt.value}" @click="editForm.group=opt.value">{{ opt.label }}</button>
-          </div>
-        </div>
-        <div style="display:flex;justify-content:flex-end;margin-top:4px;">
+        <label v-if="canEditStatus" class="admin-field">
+          <span class="admin-field-label">状态</span>
+          <NSelect v-model:value="editForm.status" :options="statusOptions" />
+        </label>
+        <label v-if="canEditGroup" class="admin-field">
+          <span class="admin-field-label">用户组</span>
+          <NSelect v-model:value="editForm.group" :options="groupOptions" />
+        </label>
+        <div class="modal-actions">
+          <NButton quaternary @click="editVisible = false">取消</NButton>
           <NButton type="primary" :loading="editSaving" @click="saveEdit">保存</NButton>
         </div>
       </div>
     </NModal>
 
     <!-- Password -->
-    <NModal v-model:show="passwordVisible" preset="card" style="width:min(92%,400px)" title="重置密码">
-      <div style="display:flex;flex-direction:column;gap:12px;">
-        <label>
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">新密码</span>
-          <input v-model="newPassword" type="password" class="admin-input" placeholder="输入新密码" />
+    <NModal v-model:show="passwordVisible" preset="card" style="width:min(calc(100vw - 24px),420px)" title="重置密码">
+      <div class="admin-form-stack">
+        <label class="admin-field">
+          <span class="admin-field-label">新密码</span>
+          <NInput v-model:value="newPassword" type="password" show-password-on="click" placeholder="输入新密码" />
         </label>
-        <p class="muted small">重置后该用户全部会话将被吊销。</p>
-        <div style="display:flex;justify-content:flex-end;">
+        <p class="muted small modal-note">重置成功后，该用户全部会话将被吊销。</p>
+        <div class="modal-actions">
+          <NButton quaternary @click="passwordVisible = false">取消</NButton>
           <NButton type="primary" :loading="passwordSaving" :disabled="!newPassword" @click="savePassword">重置密码</NButton>
         </div>
       </div>
@@ -438,4 +454,12 @@ function handleMore(key: string | number, user: AdminUserListItem) {
 </template>
 
 <style scoped>
+.user-filter-grid { display: grid; grid-template-columns: minmax(260px, 2fr) minmax(150px, .7fr) minmax(170px, .8fr); gap: 10px 12px; align-items: end; }
+.user-cell { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.user-actions { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.modal-action-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.modal-note { margin: 0; }
+@media (max-width: 780px) { .user-filter-grid { grid-template-columns: 1fr 1fr; } .user-search-filter { grid-column: 1 / -1; } }
+@media (max-width: 520px) { .user-filter-grid { grid-template-columns: 1fr; } .user-search-filter { grid-column: auto; } }
 </style>

@@ -185,10 +185,22 @@ async function revoke(id: string) {
       </div>
     </div>
 
-    <div class="admin-toolbar">
-      <NSelect v-model:value="group" placeholder="按用户组筛选" clearable :options="groupOptions" style="width:170px" @update:value="search" />
-      <NButton @click="search">查询</NButton>
-      <NButton quaternary @click="resetFilters">重置</NButton>
+    <div class="admin-filter-panel">
+      <div class="invite-filter-grid">
+        <div class="admin-filter-field">
+          <label>目标用户组</label>
+          <NSelect v-model:value="group" placeholder="全部用户组" clearable :options="groupOptions" />
+        </div>
+      </div>
+      <div class="admin-filter-actions">
+        <NButton quaternary @click="resetFilters">清空筛选</NButton>
+        <NButton type="primary" :loading="loading" @click="search">查询</NButton>
+      </div>
+    </div>
+
+    <div class="admin-context-strip">
+      <span>当前条件下共 <strong>{{ total }}</strong> 个邀请码</span>
+      <span class="muted">完整邀请码只在创建成功时展示一次。</span>
     </div>
 
     <div class="admin-table-wrap">
@@ -203,21 +215,21 @@ async function revoke(id: string) {
               <td><span class="mono cell-primary">{{ c.prefix }}...</span></td>
               <td><AppBadge :tone="groupTone(c.group)">{{ c.group }}</AppBadge></td>
               <td>
-                <div style="display:flex;flex-direction:column;gap:2px;">
+                <div class="invite-status-cell">
                   <AppBadge :tone="statusTone(c.status)">{{ c.status }}</AppBadge>
                   <span class="mono small muted">{{ formatDate(c.expiresAt) }}</span>
                 </div>
               </td>
               <td>
-                <div style="display:flex;align-items:center;gap:8px;">
+                <div class="invite-usage-cell">
                   <span class="mono small muted">{{ c.usedCount }} / {{ c.maxRedemptions }}</span>
-                  <div style="flex:1;height:6px;background:var(--surface-active);border-radius:999px;overflow:hidden;">
-                    <div :style="{width:`${progressPercent(c)}%`,height:'100%',background:'var(--success)',borderRadius:'inherit'}" />
+                  <div class="invite-progress-track">
+                    <div class="invite-progress-value" :style="{ width: `${progressPercent(c)}%` }" />
                   </div>
                 </div>
               </td>
               <td style="text-align:right">
-                <div style="display:inline-flex;gap:4px;">
+                <div class="invite-row-actions">
                   <NButton v-if="endpointAllowed('GET','/api/admin/invite-codes/{id}')" size="tiny" quaternary @click="openDetail(c.id)">详情</NButton>
                   <NButton v-if="endpointAllowed('PATCH','/api/admin/invite-codes/{id}')" size="tiny" quaternary @click="openEdit(c)">编辑</NButton>
                   <NPopconfirm v-if="endpointAllowed('PATCH','/api/admin/invite-codes/{id}') && c.status==='Active'" @positive-click="revoke(c.id)">
@@ -234,34 +246,35 @@ async function revoke(id: string) {
       <NEmpty v-else description="没有邀请码" class="admin-empty" />
     </div>
 
-    <NModal v-model:show="editorVisible" preset="card" style="width:min(92%,440px)" :title="editingId===null?'创建邀请码':'编辑邀请码'">
-      <div style="display:flex;flex-direction:column;gap:14px;">
-        <label>
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">用户组</span>
-          <NSelect v-model:value="form.group" :options="groupOptions" />
+    <NModal v-model:show="editorVisible" preset="card" style="width:min(calc(100vw - 24px),460px)" :title="editingId===null?'创建邀请码':'编辑邀请码'">
+      <div class="admin-form-stack">
+        <label class="admin-field">
+          <span class="admin-field-label">用户组</span>
+          <NSelect v-model:value="form.group" :options="groupOptions" :disabled="editingId !== null" />
+          <span v-if="editingId !== null" class="field-hint">编辑时只修改核销上限，用户组保持不变。</span>
         </label>
-        <label>
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">最大核销次数</span>
-          <input v-model.number="form.maxRedemptions" type="number" min="1" class="admin-input" />
+        <label class="admin-field">
+          <span class="admin-field-label">最大核销次数</span>
+          <NInputNumber v-model:value="form.maxRedemptions" :min="1" :precision="0" style="width:100%" />
         </label>
-        <label v-if="editingId===null">
-          <span style="font-size:12px;color:var(--text-tertiary);margin-bottom:4px;display:block;">有效期（小时）</span>
-          <input v-model.number="form.lifetimeHours" type="number" min="1" class="admin-input" />
+        <label v-if="editingId===null" class="admin-field">
+          <span class="admin-field-label">有效期（小时）</span>
+          <NInputNumber v-model:value="form.lifetimeHours" :min="1" :precision="0" style="width:100%" />
+          <span class="field-hint">例如 168 小时为 7 天。</span>
         </label>
-        <div style="display:flex;justify-content:flex-end;">
+        <div class="modal-actions">
+          <NButton quaternary @click="editorVisible = false">取消</NButton>
           <NButton type="primary" :loading="saving" @click="save">保存</NButton>
         </div>
       </div>
     </NModal>
 
     <NModal v-model:show="createdVisible" preset="card" style="width:min(92%,520px)" title="邀请码已创建">
-      <div v-if="createdCode" style="display:flex;flex-direction:column;gap:12px;">
-        <p class="muted small">请立即保存，此后无法再次查看完整邀请码。</p>
-        <div class="mono" style="font-size:18px;word-break:break-all;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-active);">
-          {{ createdCode.code }}
-        </div>
+      <div v-if="createdCode" class="created-code-box">
+        <NAlert type="warning" :show-icon="false">完整邀请码只展示这一次，请立即安全保存。</NAlert>
+        <code class="mono created-code-value">{{ createdCode.code }}</code>
         <div class="muted small">{{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
-        <NButton type="primary" @click="createdVisible = false">我已保存</NButton>
+        <div class="modal-actions"><NButton type="primary" @click="createdVisible = false">我已保存</NButton></div>
       </div>
     </NModal>
 
@@ -305,6 +318,15 @@ async function revoke(id: string) {
 .policy-control { flex-shrink: 0; display: flex; align-items: center; gap: 10px; }
 .policy-state { font-size: 12px; color: var(--text-tertiary); }
 .policy-state.enabled { color: var(--accent); font-weight: 600; }
+.invite-filter-grid { display: grid; grid-template-columns: minmax(180px, 260px); }
+.invite-status-cell { display: flex; flex-direction: column; gap: 2px; }
+.invite-usage-cell { display: flex; align-items: center; gap: 8px; min-width: 170px; }
+.invite-progress-track { flex: 1; height: 5px; overflow: hidden; border-radius: 999px; background: var(--surface-active); }
+.invite-progress-value { height: 100%; border-radius: inherit; background: var(--success); }
+.invite-row-actions { display: inline-flex; gap: 4px; }
+.created-code-box { display: flex; flex-direction: column; gap: 12px; }
+.created-code-value { display: block; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 16px; word-break: break-all; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 @media (max-width: 680px) {
   .registration-policy { align-items: flex-start; flex-direction: column; }
   .policy-control { width: 100%; justify-content: space-between; }

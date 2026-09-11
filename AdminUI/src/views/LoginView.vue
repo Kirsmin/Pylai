@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '@/stores/auth'
 const authStore = useAuthStore()
+const appVersion = __APP_VERSION__
 </script>
 
 <template>
@@ -9,8 +10,8 @@ const authStore = useAuthStore()
       <div class="login-brand">
         <span class="brand-mark">P</span>
         <div>
-          <h1 class="login-title">Pylai 控制台</h1>
-          <p class="login-subtitle">管理员登录 · 用户、OAuth2、邀请与安全策略</p>
+          <h1 class="login-title">Pylai Admin</h1>
+          <p class="login-subtitle">管理控制台</p>
         </div>
       </div>
 
@@ -28,7 +29,7 @@ const authStore = useAuthStore()
         登录
       </NButton>
 
-      <p class="login-foot">受多因素认证（MFA）保护</p>
+      <div class="login-foot"><span>管理员会话受 MFA 与 CSRF 保护</span><span class="mono">v{{ appVersion }}</span></div>
     </div>
   </div>
 </template>
@@ -49,7 +50,7 @@ const authStore = useAuthStore()
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-md);
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -97,9 +98,11 @@ const authStore = useAuthStore()
   line-height: 1.5;
 }
 .login-foot {
-  margin: 0;
-  text-align: center;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
   color: var(--text-tertiary);
 }
 </style>

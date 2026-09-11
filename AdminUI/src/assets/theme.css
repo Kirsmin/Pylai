@@ -1,12 +1,12 @@
 /* Pylai Admin — practical, neutral administration surface */
 :root {
-  --page-bg: #f7f8fa;
+  --page-bg: #f5f6f7;
   --surface: #ffffff;
-  --surface-hover: #f7f8f9;
-  --surface-active: #eff1f3;
-  --surface-sunken: #fafafa;
-  --border: #e2e5e8;
-  --border-strong: #cbd0d5;
+  --surface-hover: #f3f5f6;
+  --surface-active: #e9edef;
+  --surface-sunken: #f8f9fa;
+  --border: #dde1e4;
+  --border-strong: #c4cbd0;
   --divider: #eceef0;
 
   --text-primary: #1d2129;
@@ -14,15 +14,15 @@
   --text-tertiary: #8a9199;
   --text-danger: #bd3f43;
 
-  --accent: #18a058;
-  --accent-hover: #0e7a3d;
-  --accent-pressed: #096b34;
-  --accent-soft: #f0faf4;
-  --accent-ring: rgba(24, 160, 88, 0.16);
+  --accent: #19734a;
+  --accent-hover: #125f3d;
+  --accent-pressed: #0d5033;
+  --accent-soft: #edf6f1;
+  --accent-ring: rgba(25, 115, 74, 0.17);
 
-  --success: #18a058;
-  --success-soft: #f0faf4;
-  --success-hover: #0e7a3d;
+  --success: #19734a;
+  --success-soft: #edf6f1;
+  --success-hover: #125f3d;
   --info: #416fae;
   --info-soft: #eef3fa;
   --warning: #a96d12;
@@ -34,16 +34,16 @@
   --neutral: #66707a;
   --neutral-soft: #f0f2f4;
 
-  --shadow-sm: 0 1px 2px rgba(18, 24, 30, 0.04);
-  --shadow-md: 0 6px 18px rgba(18, 24, 30, 0.08);
-  --shadow-lg: 0 18px 48px rgba(18, 24, 30, 0.16);
+  --shadow-sm: none;
+  --shadow-md: 0 8px 24px rgba(18, 24, 30, 0.10);
+  --shadow-lg: 0 18px 44px rgba(18, 24, 30, 0.16);
 
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 10px;
-  --sidebar-width: 224px;
+  --radius-sm: 5px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --sidebar-width: 236px;
   --header-height: 56px;
-  --gap: 20px;
+  --gap: 18px;
   --transition-fast: 0.1s ease;
   --transition-base: 0.14s ease;
   --transition-slow: 0.2s ease;
@@ -65,15 +65,15 @@
   --text-tertiary: #818a93;
   --text-danger: #ef7474;
 
-  --accent: #36ad6a;
-  --accent-hover: #4fb87d;
-  --accent-pressed: #2b9258;
-  --accent-soft: rgba(54, 173, 106, 0.14);
-  --accent-ring: rgba(54, 173, 106, 0.2);
+  --accent: #43a56f;
+  --accent-hover: #55b27f;
+  --accent-pressed: #378c5f;
+  --accent-soft: rgba(67, 165, 111, 0.14);
+  --accent-ring: rgba(67, 165, 111, 0.22);
 
-  --success: #36ad6a;
-  --success-soft: rgba(54, 173, 106, 0.14);
-  --success-hover: #4fb87d;
+  --success: #43a56f;
+  --success-soft: rgba(67, 165, 111, 0.14);
+  --success-hover: #55b27f;
   --info: #7ba5e7;
   --info-soft: rgba(123, 165, 231, 0.12);
   --warning: #e0b15a;
@@ -85,7 +85,7 @@
   --neutral: #a2aab2;
   --neutral-soft: rgba(162, 170, 178, 0.12);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --shadow-sm: none;
   --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.24);
   --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.36);
 }
@@ -292,6 +292,67 @@ textarea.admin-input { min-height: 68px; resize: vertical; }
 .admin-input:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: 2px;
+}
+
+
+.admin-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.admin-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 10px 12px;
+  align-items: end;
+}
+.admin-filter-field { min-width: 0; }
+.admin-filter-field > label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 650;
+}
+.admin-filter-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.admin-context-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* 管理台以效率为先：移除 Naive UI Modal/Drawer/Popover/Dropdown 的缩放、弹跳和淡入淡出。 */
+.n-modal,
+.n-modal-mask,
+.n-dialog,
+.n-drawer,
+.n-drawer-mask,
+.n-popover,
+.n-dropdown-menu,
+.n-base-select-menu,
+[class*="fade-in-scale-up-transition"],
+[class*="fade-in-transition"],
+[class*="slide-in-from-"] {
+  transition: none !important;
+  animation: none !important;
+}
+.fade-in-scale-up-transition-enter-from,
+.fade-in-scale-up-transition-leave-to,
+.fade-in-transition-enter-from,
+.fade-in-transition-leave-to {
+  opacity: 1 !important;
+  transform: none !important;
 }
 
 @media (max-width: 768px) {

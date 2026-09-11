@@ -12,39 +12,36 @@ const themeStore = useThemeStore()
 
 const themeOverrides = computed<GlobalThemeOverrides>(() => {
   const dark = themeStore.isDark
-  const primary = dark ? '#36ad6a' : '#18a058'
-  const primaryHover = dark ? '#4fb87d' : '#0e7a3d'
-  const primaryPressed = dark ? '#2b9258' : '#096b34'
+  const primary = dark ? '#43a56f' : '#19734a'
+  const primaryHover = dark ? '#55b27f' : '#125f3d'
+  const primaryPressed = dark ? '#378c5f' : '#0d5033'
 
   return {
     common: {
       fontFamily: 'var(--font-family)',
       fontFamilyMono: 'var(--font-family-mono)',
-      borderRadius: '6px',
-      borderRadiusSmall: '5px',
+      borderRadius: '5px',
+      borderRadiusSmall: '4px',
       primaryColor: primary,
       primaryColorHover: primaryHover,
       primaryColorPressed: primaryPressed,
       primaryColorSuppl: primary,
-      successColor: primary,
-      successColorHover: primaryHover,
-      successColorPressed: primaryPressed,
-      successColorSuppl: primary,
-      errorColor: dark ? '#ef7474' : '#c94b4b',
-      warningColor: dark ? '#e0b15a' : '#a96d12',
-      infoColor: dark ? '#7ba5e7' : '#416fae',
+      successColor: dark ? '#43a56f' : '#19734a',
+      errorColor: dark ? '#e47171' : '#b83f43',
+      warningColor: dark ? '#d9a74d' : '#99620e',
+      infoColor: dark ? '#729cda' : '#3d69a3',
     },
-    Card: { borderRadius: '8px' },
-    Modal: { borderRadius: '8px' },
-    Dialog: { borderRadius: '8px' },
+    Card: { borderRadius: '6px' },
+    Modal: { borderRadius: '6px' },
+    Dialog: { borderRadius: '6px' },
     Button: {
-      borderRadiusMedium: '6px',
-      borderRadiusSmall: '5px',
+      borderRadiusMedium: '5px',
+      borderRadiusSmall: '4px',
       borderRadiusTiny: '4px',
       fontWeight: '500',
     },
-    Input: { borderRadius: '6px' },
-    Select: { borderRadius: '6px' },
+    Input: { borderRadius: '5px' },
+    Select: { borderRadius: '5px' },
     Tag: { borderRadius: '4px' },
   }
 })
@@ -64,11 +61,7 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
         </template>
         <template v-else>
           <AdminLayout>
-            <router-view v-slot="{ Component }">
-              <transition name="page" mode="out-in">
-                <component :is="Component" />
-              </transition>
-            </router-view>
+            <router-view />
           </AdminLayout>
         </template>
       </NDialogProvider>
@@ -84,13 +77,5 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
   align-items: center;
   justify-content: center;
   background: var(--page-bg);
-}
-.page-enter-active,
-.page-leave-active {
-  transition: opacity 0.12s ease;
-}
-.page-enter-from,
-.page-leave-to {
-  opacity: 0;
 }
 </style>

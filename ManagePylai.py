@@ -6,6 +6,8 @@ Release 页面同时提供 Pylai-<version>-Linux-<arch>.tar 与本脚本，
 下载后放在同一目录运行即可。
 """
 
+from __future__ import annotations
+
 import argparse
 import getpass
 import hashlib
@@ -101,7 +103,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.0.34"
+__version__ = "0.1.23"
 
 
 class ManageError(Exception):
@@ -1862,7 +1864,7 @@ class State:
 
     @property
     def version(self) -> str:
-        return str(self._data.get("version", "0.0.1"))
+        return str(self._data.get("version", __version__))
 
     @property
     def architecture(self) -> str:
@@ -2536,7 +2538,7 @@ class DockerCompose:
                 return last
 
         # 期望名兜底（兼容旧 tar 命名）
-        version, arch = meta or ("0.0.1", host_arch())
+        version, arch = meta or (__version__, host_arch())
         expected = f"pylaios:{version}-{arch}"
         if self.docker("image", "inspect", expected, check=False).returncode == 0:
             out(f"  已加载（按命名推断）: {expected}")
@@ -3114,25 +3116,37 @@ class SelfUpdater:
         force: bool = False,
         dry_run: bool = False,
         skip_prompt: bool = False,
+        target_version: str | None = None,
+        reexec_args: Sequence[str] | None = None,
     ) -> bool:
-        result = self.client.check_latest()
-        if not result:
-            out("无法获取最新版本信息。")
-            return False
+        """更新管理工具。
 
-        version, _, info = result
+        target_version 用于云端应用更新：管理工具会先更新到与目标 Release
+        一致的版本，再通过 os.execv 在同一终端中继续原更新命令。
+        """
+        if target_version:
+            version = normalize_release_version(target_version)
+            info = self.client.fetch_release_json(version) or {}
+        else:
+            result = self.client.check_latest()
+            if not result:
+                out("无法获取最新版本信息。")
+                return False
+            version, _, info = result
 
         if not force and not self.version_gt(version, __version__):
-            out(f"当前已是最新版本 {__version__}。")
+            if target_version:
+                out(f"ManagePylai.py v{__version__} 已满足目标版本 v{version}。")
+            else:
+                out(f"当前已是最新版本 {__version__}。")
             return False
 
         out(f"==> 更新 ManagePylai.py: {__version__} -> {version}")
 
         if not self._check_schema_compat(info):
             if skip_prompt:
-                out("Schema 不兼容且非交互模式，跳过更新。")
+                out("Schema 不兼容且非交互模式，拒绝更新管理工具。")
                 return False
-
             if not ask_bool("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
                 return False
 
@@ -3146,12 +3160,11 @@ class SelfUpdater:
             new_script.unlink(missing_ok=True)
             return False
 
-        # Fail Closed：校验和文件缺失/不可读即终止更新（防供应链投毒），绝不静默降级为无校验安装
-        sha256_expected: str | None = None
+        # Fail Closed：校验和文件缺失/不可读即终止更新（防供应链投毒）。
         try:
             self.client.download(version, "ManagePylai.py.sha256", sha256_file)
             sha256_content = sha256_file.read_text(encoding="ascii").strip()
-            sha256_expected = sha256_content.split()[0]
+            sha256_expected = sha256_content.split()[0] if sha256_content else ""
         except (ManageError, OSError) as exc:
             new_script.unlink(missing_ok=True)
             sha256_file.unlink(missing_ok=True)
@@ -3169,8 +3182,26 @@ class SelfUpdater:
             raise ManageError(f"SHA256 校验失败，拒绝更新: 期望 {sha256_expected}, 实际 {actual}")
         out("SHA256 校验通过。")
 
+        # Release 中的 ManagePylai.py 必须声明同一版本，防止应用包与管理工具串版。
+        try:
+            script_text = new_script.read_text(encoding="utf-8")
+        except OSError as exc:
+            new_script.unlink(missing_ok=True)
+            sha256_file.unlink(missing_ok=True)
+            raise ManageError(f"无法读取新 ManagePylai.py，拒绝更新: {exc}") from exc
+        declared = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', script_text, re.MULTILINE)
+        if not declared or normalize_release_version(declared.group(1)) != version:
+            new_script.unlink(missing_ok=True)
+            sha256_file.unlink(missing_ok=True)
+            actual_version = declared.group(1) if declared else "<missing>"
+            raise ManageError(
+                f"Release v{version} 的 ManagePylai.py 版本声明为 {actual_version}，版本不一致，拒绝更新。"
+            )
+
         if dry_run:
             out(f"[dry-run] 将替换 {self.script_path} 为版本 {version}")
+            if reexec_args:
+                out(f"[dry-run] 随后将继续执行: {self.script_path.name} {' '.join(reexec_args)}")
             new_script.unlink(missing_ok=True)
             sha256_file.unlink(missing_ok=True)
             return True
@@ -3180,10 +3211,17 @@ class SelfUpdater:
             shutil.copy2(self.script_path, backup)
             os.replace(new_script, self.script_path)
             self.manager.set_skip_version(None)
-            out(f"ManagePylai.py 已更新至 {version}，请重新运行脚本。")
+            if reexec_args is None:
+                out(f"ManagePylai.py 已更新至 {version}，请重新运行脚本。")
+            else:
+                out(f"ManagePylai.py 已更新至 {version}，正在继续更新 Pylai 后端...")
+                os.execv(
+                    sys.executable,
+                    [sys.executable, str(self.script_path), *reexec_args],
+                )
             return True
         except OSError as exc:
-            out(f"替换失败: {exc}")
+            out(f"替换或重新执行失败: {exc}")
             return False
         finally:
             sha256_file.unlink(missing_ok=True)
@@ -3893,7 +3931,7 @@ class InstallService:
             )
 
     def save_state(self, tar_path: Path, image: str, answers: InstallAnswers) -> None:
-        version, arch = parse_tar(tar_path) or ("0.0.1", host_arch())
+        version, arch = parse_tar(tar_path) or (__version__, host_arch())
         state = self.ctx.state
 
         state.set("version", version)
@@ -3931,39 +3969,138 @@ class UpdateService:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
 
+    def _remote_reexec_args(
+        self,
+        target_version: str,
+        *,
+        yes: bool = False,
+        dry_run: bool = False,
+        verbose: bool = False,
+        force_pg_upgrade: bool = False,
+        force: bool = False,
+    ) -> list[str]:
+        """构造自更新后继续云端后端更新的等价命令行。"""
+        argv = ["--config", str(self.ctx.manager.path)]
+        if yes:
+            argv.append("--yes")
+        if dry_run:
+            argv.append("--dry-run")
+        if verbose:
+            argv.append("--verbose")
+        argv.extend(["update", "--from-remote", "--version", target_version])
+        if force_pg_upgrade:
+            argv.append("--force-pg-upgrade")
+        if force:
+            argv.append("--force")
+        return argv
+
+    def ensure_manager_for_remote_release(
+        self,
+        target_version: str,
+        *,
+        reexec_args: Sequence[str],
+        yes: bool = False,
+        dry_run: bool = False,
+    ) -> None:
+        """云端更新的强制前置步骤：先把 ManagePylai.py 更新到目标 Release。
+
+        目标版本高于当前管理工具时，成功替换后会 os.execv 重新执行新版脚本，
+        并携带同一后端更新参数继续执行；失败则 Fail Closed，不触碰后端。
+        """
+        target_version = normalize_release_version(target_version)
+        if not SelfUpdater.version_gt(target_version, __version__):
+            return
+
+        out(
+            f"==> 云端更新前置：目标 Pylai v{target_version} 高于管理工具 v{__version__}，"
+            "先更新 ManagePylai.py。"
+        )
+        client = ReleaseClient(self.ctx.manager)
+        updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
+        updated = updater.update(
+            target_version=target_version,
+            skip_prompt=yes,
+            dry_run=dry_run,
+            reexec_args=reexec_args,
+        )
+        if dry_run and updated:
+            return
+        # 正常成功路径会在 updater.update 内 os.execv，不会走到这里。
+        raise ManageError(
+            "云端更新要求先更新 ManagePylai.py；管理工具未能更新，后端保持不变。"
+        )
+
     def update_cli(self, args: argparse.Namespace) -> None:
         if args.check_only:
             self.check_manager_update()
             self.check_app_update()
             return
 
-        self.ensure_manager_up_to_date(args.yes)
-
         from_remote = bool(getattr(args, "from_remote", False))
+        if from_remote:
+            client = ReleaseClient(self.ctx.manager)
+            target_version = resolve_remote_version(
+                client,
+                self.ctx.manager,
+                requested=getattr(args, "version", None),
+                yes=args.yes,
+                prompt="请选择要更新到的版本",
+            )
+            reexec_args = self._remote_reexec_args(
+                target_version,
+                yes=args.yes,
+                dry_run=getattr(args, "dry_run", False),
+                verbose=getattr(args, "verbose", False),
+                force_pg_upgrade=args.force_pg_upgrade,
+                force=getattr(args, "force", False),
+            )
+            self.ensure_manager_for_remote_release(
+                target_version,
+                reexec_args=reexec_args,
+                yes=args.yes,
+                dry_run=getattr(args, "dry_run", False),
+            )
+            self.update_app(
+                yes=args.yes,
+                force_pg_upgrade=args.force_pg_upgrade,
+                source="remote",
+                version=target_version,
+                force=getattr(args, "force", False),
+            )
+            return
+
+        # 本地 tar 更新保留原有“先检查管理工具最新版本”的行为。
+        self.ensure_manager_up_to_date(args.yes)
         self.update_app(
             yes=args.yes,
             force_pg_upgrade=args.force_pg_upgrade,
-            source="remote" if from_remote else "local",
+            source="local",
             version=getattr(args, "version", None),
             force=getattr(args, "force", False),
         )
 
     def update_interactive(self) -> None:
-        # 交互式更新：先检查并更新 ManagePylai.py，避免旧版管理逻辑与新版产物不匹配。
-        self.ensure_manager_up_to_date(yes=False)
-
         ctx = self.ctx
         client = ReleaseClient(ctx.manager)
         releases = client.list_releases(
             include_prerelease=ctx.manager.include_prerelease, limit=12)
-        # 云端过滤后为空（如只发布过预发布）时回退列出全部
         if not releases and not ctx.manager.include_prerelease:
             releases = client.list_releases(include_prerelease=True, limit=12)
 
-        # 自定义镜像源 / 列表失败时无法枚举版本，退回“本地 tar 或云端最新”二选一
         if not releases:
             source = choose_install_source("请选择更新包的来源") or "remote"
-            self.update_app(yes=False, source=source, version=None)
+            if source == "local":
+                self.ensure_manager_up_to_date(yes=False)
+                self.update_app(yes=False, source="local", version=None)
+                return
+
+            target_version = resolve_remote_version(
+                client, ctx.manager, requested=None, yes=False, prompt="请选择要更新到的版本")
+            self.ensure_manager_for_remote_release(
+                target_version,
+                reexec_args=self._remote_reexec_args(target_version),
+            )
+            self.update_app(yes=False, source="remote", version=target_version)
             return
 
         out("云端可用的版本：")
@@ -3974,14 +4111,19 @@ class UpdateService:
 
         raw = ask("请选择要更新到的版本", default="1").strip()
         if raw == "+":
+            self.ensure_manager_up_to_date(yes=False)
             self.update_app(yes=False, source="local", version=None)
             return
 
         try:
-            chosen = releases[int(raw) - 1]["version"]
+            chosen = normalize_release_version(releases[int(raw) - 1]["version"])
         except (ValueError, IndexError):
             raise ManageError("未选择版本。")
 
+        self.ensure_manager_for_remote_release(
+            chosen,
+            reexec_args=self._remote_reexec_args(chosen),
+        )
         self.update_app(yes=False, source="remote", version=chosen)
 
     def check_manager_update(self) -> None:

@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Component } from 'vue'
-import { Apps, FileSearch, ShieldCheck, Ticket, Users } from '@vicons/tabler'
+import { Apps, FileSearch, ShieldCheck, ShieldLock, Ticket, Users } from '@vicons/tabler'
 import { useAuthStore } from '@/stores/auth'
 import AppBadge from '@/components/AppBadge.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -59,11 +59,19 @@ function groupTone(g: string) {
     <div class="admin-panel">
       <div class="admin-panel-header">
         <div>
-          <h3 class="admin-panel-title">管理模块</h3>
-          <p class="admin-panel-subtitle">入口来自后端 capability 返回值；未授权功能不会展示。</p>
+          <h3 class="admin-panel-title">常用入口</h3>
+          <p class="admin-panel-subtitle">管理能力来自后端 capability；账户安全属于当前管理员的个人安全设置。</p>
         </div>
       </div>
-      <div v-if="cards.length" class="module-list">
+      <div class="module-list">
+        <button type="button" class="module-row" @click="router.push('/security')">
+          <span class="module-icon"><NIcon :component="ShieldLock" /></span>
+          <span class="module-copy">
+            <strong>账户安全</strong>
+            <span>管理当前管理员的 TOTP 与 Passkey，用于敏感操作 Step-up。</span>
+          </span>
+          <span class="module-enter">进入</span>
+        </button>
         <button
           v-for="item in cards"
           :key="item.key"
@@ -71,16 +79,13 @@ function groupTone(g: string) {
           class="module-row"
           @click="router.push(item.route)"
         >
-          <span class="module-icon"><NIcon :component="icons[item.key]" /></span>
+          <span class="module-icon"><NIcon :component="icons[item.key] || ShieldCheck" /></span>
           <span class="module-copy">
             <strong>{{ item.name }}</strong>
             <span>{{ item.description }}</span>
           </span>
           <span class="module-enter">进入</span>
         </button>
-      </div>
-      <div v-else class="admin-empty">
-        <NEmpty description="当前用户组没有可用的管理功能" />
       </div>
     </div>
   </section>

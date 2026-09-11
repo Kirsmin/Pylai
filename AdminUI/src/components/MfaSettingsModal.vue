@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+/*
+ * 兼容旧调用点的 MFA 弹窗。主入口已迁移到 /security 独立页面，
+ * 此组件保留供可能的外部引用使用，并统一采用 Naive UI NInputOtp。
+ */
+import { computed, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { createCredential } from '@/utils/webauthn'
 import { useMessage } from 'naive-ui'
@@ -12,18 +16,17 @@ const error = ref('')
 const enrollmentId = ref('')
 const secret = ref('')
 const otpauthUri = ref('')
-const code = ref('')
+const code = ref<string[]>([])
 const passkeyMessage = ref('')
-// 浏览器安全上下文限制：HTTP 部署下 TOTP 注册被后端拒绝、Passkey API 不可用
 const insecureContext = !window.isSecureContext
+const otpCode = computed(() => code.value.join(''))
 
-async function load() {
-  await authStore.loadMfaStatus()
-}
+function allowOtpDigit(value: string) { return /^\d$/.test(value) }
+async function load() { await authStore.loadMfaStatus() }
 
 async function open() {
   error.value = ''
-  code.value = ''
+  code.value = []
   secret.value = ''
   enrollmentId.value = ''
   visible.value = true
@@ -42,7 +45,7 @@ async function beginTotp() {
     enrollmentId.value = data.enrollmentId
     secret.value = data.secret
     otpauthUri.value = data.otpauthUri
-    code.value = ''
+    code.value = []
   } catch (err) {
     error.value = err instanceof Error ? err.message : '无法开始 TOTP 设置'
   } finally {
@@ -51,19 +54,19 @@ async function beginTotp() {
 }
 
 async function confirmTotp() {
-  if (code.value.length !== 6 || !enrollmentId.value) return
+  if (otpCode.value.length !== 6 || !enrollmentId.value) return
   busy.value = true
   error.value = ''
   try {
     await authStore.request('/api/auth/mfa/totp/confirm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enrollmentId: enrollmentId.value, code: code.value })
+      body: JSON.stringify({ enrollmentId: enrollmentId.value, code: otpCode.value })
     })
     secret.value = ''
     otpauthUri.value = ''
     enrollmentId.value = ''
-    code.value = ''
+    code.value = []
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'TOTP 验证失败'
@@ -93,8 +96,7 @@ async function registerPasskey() {
     if (!data?.registrationId) throw new Error(data?.error || '无法开始 Passkey 注册')
     const response = await createCredential(data.options)
     await authStore.request('/api/auth/mfa/webauthn/registration', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ registrationId: data.registrationId, response })
     })
     passkeyMessage.value = 'Passkey 已注册。'
@@ -110,7 +112,7 @@ defineExpose({ open })
 </script>
 
 <template>
-  <NModal v-model:show="visible" preset="card" style="width: min(92%, 480px);" title="账户安全与 MFA">
+  <NModal v-model:show="visible" preset="card" style="width: min(calc(100vw - 24px), 520px);" title="账户安全与 MFA">
     <div class="admin-form-stack">
       <div class="admin-line-card">
         <div class="admin-line-main">
@@ -125,28 +127,21 @@ defineExpose({ open })
           <strong>Passkey / WebAuthn</strong>
           <span class="muted">已注册 {{ authStore.mfaWebAuthnCount }} 个</span>
         </div>
-        <NButton size="tiny" type="primary" secondary :loading="busy" @click="registerPasskey">注册 Passkey</NButton>
+        <NButton size="tiny" type="primary" secondary :loading="busy" :disabled="insecureContext" @click="registerPasskey">注册 Passkey</NButton>
       </div>
 
       <div v-if="secret" class="mfa-secret-box">
         <p>请使用手机认证器扫描下方二维码，或手动输入密钥：</p>
         <div class="qr-wrap">
-          <n-qr-code
-            :value="otpauthUri"
-            :size="180"
-            :padding="4"
-            type="svg"
-            error-correction-level="H"
-          />
+          <NQrCode :value="otpauthUri" :size="180" :padding="4" type="svg" error-correction-level="H" />
         </div>
         <div class="secret-manual">
           <span class="muted">密钥</span>
           <code class="mono">{{ secret }}</code>
           <NButton size="tiny" quaternary @click="copySecret">复制</NButton>
         </div>
-        <small class="muted">{{ otpauthUri }}</small>
-        <input v-model="code" class="admin-input mono" maxlength="6" placeholder="输入认证器显示的6位验证码" />
-        <NButton type="primary" :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
+        <NInputOtp v-model:value="code" :length="6" :allow-input="allowOtpDigit" size="large" block />
+        <NButton type="primary" :loading="busy" :disabled="otpCode.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
       </div>
 
       <p v-if="passkeyMessage" class="success-msg">{{ passkeyMessage }}</p>
@@ -157,47 +152,10 @@ defineExpose({ open })
 </template>
 
 <style scoped>
-.mfa-secret-box {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-}
-
-.mfa-secret-box code {
-  overflow-wrap: anywhere;
-  font-size: 16px;
-  color: var(--text-primary);
-}
-
-.qr-wrap {
-  display: flex;
-  justify-content: center;
-  padding: 8px;
-  background: #fff;
-  border-radius: var(--radius-sm);
-  align-self: center;
-}
-
-.secret-manual {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.secret-manual code {
-  flex: 1 1 auto;
-  overflow-wrap: anywhere;
-  font-size: 16px;
-  color: var(--text-primary);
-}
-
-.success-msg {
-  margin: 0;
-  color: var(--success);
-}
+.mfa-secret-box { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.mfa-secret-box p { margin: 0; }
+.qr-wrap { display: flex; justify-content: center; padding: 8px; background: #fff; border-radius: var(--radius-sm); align-self: center; }
+.secret-manual { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.secret-manual code { flex: 1 1 auto; overflow-wrap: anywhere; font-size: 14px; color: var(--text-primary); }
+.success-msg { margin: 0; color: var(--success); }
 </style>

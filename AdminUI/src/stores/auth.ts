@@ -53,6 +53,23 @@ export const useAuthStore = defineStore('admin-auth', () => {
     window.location.assign(url.toString())
   }
 
+  async function loadInviteCodeRequirement(fallback?: boolean): Promise<boolean> {
+    // 注册页与管理页应读取同一个公开配置快照，避免 capabilities 缓存/映射差异造成刷新后开关回退。
+    try {
+      const data = await parseApiResponse<{ requireInviteCode?: boolean }>(
+        await rawFetch('/api/config/public', { cache: 'no-store' })
+      )
+      if (typeof data?.requireInviteCode === 'boolean') {
+        inviteCodeRequired.value = data.requireInviteCode
+        return data.requireInviteCode
+      }
+    } catch {
+      // public config 暂时不可用时保留 capabilities 中的值，不能把已开启的设置误显示为关闭。
+    }
+    if (typeof fallback === 'boolean') inviteCodeRequired.value = fallback
+    return inviteCodeRequired.value
+  }
+
   async function loadCapabilities(): Promise<boolean> {
     const response = await rawFetch('/api/admin/capabilities', { cache: 'no-store' })
     if (response.status === 401) {
@@ -65,7 +82,9 @@ export const useAuthStore = defineStore('admin-auth', () => {
     if (!data) throw new Error('无法获取管理能力')
     user.value = data.user ?? null
     capabilities.value = data.capabilities ?? []
-    inviteCodeRequired.value = data.inviteCodeRequired ?? false
+    const capabilityValue = data.inviteCodeRequired ?? false
+    inviteCodeRequired.value = capabilityValue
+    if (user.value) await loadInviteCodeRequirement(capabilityValue)
     return user.value !== null
   }
 
