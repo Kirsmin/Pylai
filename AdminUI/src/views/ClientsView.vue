@@ -560,7 +560,7 @@ onMounted(load)
     </div>
 
     <NModal v-model:show="editorVisible" :mask-closable="!saving" :close-on-esc="!saving">
-      <section class="client-editor-dialog" role="dialog" aria-modal="true" :aria-label="editorTitle">
+      <div class="client-editor-dialog" role="dialog" aria-modal="true" :aria-label="editorTitle">
         <header class="client-editor-header">
           <div>
             <h2>{{ editorTitle }}</h2>
@@ -770,7 +770,7 @@ onMounted(load)
             <NButton v-else type="primary" :loading="saving" @click="save">{{ isEditing ? '保存修改' : '创建客户端' }}</NButton>
           </div>
         </footer>
-      </section>
+      </div>
     </NModal>
 
     <NModal v-model:show="detailVisible" preset="card" style="width:min(calc(100vw - 24px),720px)" title="客户端详情">
