@@ -242,7 +242,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
   <section class="admin-page">
     <PageHeader title="用户管理" :subtitle="cap?.description">
       <template #actions>
-        <NButton quaternary type="success" @click="load">刷新</NButton>
+        <NButton quaternary @click="load">刷新</NButton>
       </template>
     </PageHeader>
 
@@ -250,7 +250,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
       <NInput v-model:value="search" placeholder="搜索用户名 / 邮箱 / 显示名" clearable style="width:260px" @keyup.enter="searchUsers" />
       <NSelect v-if="targetGroups.length" v-model:value="group" placeholder="用户组" clearable :options="groupOptions" style="width:130px" @update:value="searchUsers" />
       <NSelect v-if="canEditStatus" v-model:value="status" placeholder="状态" clearable :options="statusOptions" style="width:130px" @update:value="searchUsers" />
-      <NButton type="success" ghost @click="searchUsers">查询</NButton>
+      <NButton type="primary" @click="searchUsers">查询</NButton>
       <NButton quaternary @click="resetFilters">重置</NButton>
     </div>
 
@@ -277,8 +277,8 @@ function handleMore(key: string | number, user: AdminUserListItem) {
               <td><DateTimeText :value="u.lastLoginAt" /></td>
               <td style="text-align:right">
                 <div style="display:inline-flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;">
-                  <NButton v-if="endpointAllowed('GET','/api/admin/users/{uid}')" size="tiny" quaternary type="success" @click="openDetail(u.uid)">详情</NButton>
-                  <NButton v-if="endpointAllowed('PATCH','/api/admin/users/{uid}')" size="tiny" quaternary type="success" @click="openEdit(u)">编辑</NButton>
+                  <NButton v-if="endpointAllowed('GET','/api/admin/users/{uid}')" size="tiny" quaternary @click="openDetail(u.uid)">详情</NButton>
+                  <NButton v-if="endpointAllowed('PATCH','/api/admin/users/{uid}')" size="tiny" quaternary @click="openEdit(u)">编辑</NButton>
                   <template v-if="canEditStatus && endpointAllowed('PATCH','/api/admin/users/{uid}')">
                     <NPopconfirm v-if="u.status.toLowerCase()==='active'" @positive-click="setStatus(u,'Banned')">
                       <template #trigger><NButton size="tiny" quaternary type="warning" :loading="statusSavingUid===u.uid">封禁</NButton></template>
@@ -289,7 +289,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
                       <span style="white-space:nowrap">锁定 {{ u.name }}？</span>
                     </NPopconfirm>
                     <NPopconfirm v-if="u.status.toLowerCase()!=='active'" @positive-click="setStatus(u,'Active')">
-                      <template #trigger><NButton size="tiny" quaternary type="success" :loading="statusSavingUid===u.uid">启用</NButton></template>
+                      <template #trigger><NButton size="tiny" quaternary type="primary" :loading="statusSavingUid===u.uid">启用</NButton></template>
                       <span style="white-space:nowrap">启用 {{ u.name }}？</span>
                     </NPopconfirm>
                   </template>
@@ -361,7 +361,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:4px;">
-          <NButton type="success" ghost :loading="editSaving" @click="saveEdit">保存</NButton>
+          <NButton type="primary" :loading="editSaving" @click="saveEdit">保存</NButton>
         </div>
       </div>
     </NModal>
@@ -375,7 +375,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
         </label>
         <p class="muted small">重置后该用户全部会话将被吊销。</p>
         <div style="display:flex;justify-content:flex-end;">
-          <NButton type="success" ghost :loading="passwordSaving" :disabled="!newPassword" @click="savePassword">重置密码</NButton>
+          <NButton type="primary" :loading="passwordSaving" :disabled="!newPassword" @click="savePassword">重置密码</NButton>
         </div>
       </div>
     </NModal>

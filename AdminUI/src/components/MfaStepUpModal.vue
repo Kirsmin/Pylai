@@ -22,12 +22,12 @@ const methods = computed(() => authStore.stepUpTicket?.methods ?? [])
           <span class="admin-field-label">TOTP 验证码</span>
           <input v-model="authStore.stepUpCode" class="admin-input mono" maxlength="6" placeholder="6 位验证码" />
         </label>
-        <NButton type="success" ghost :loading="authStore.stepUpBusy" :disabled="authStore.stepUpCode.length !== 6" @click="authStore.verifyStepUpTotp()">
+        <NButton type="primary" :loading="authStore.stepUpBusy" :disabled="authStore.stepUpCode.length !== 6" @click="authStore.verifyStepUpTotp()">
           验证 TOTP
         </NButton>
       </template>
 
-      <NButton v-if="methods.includes('webauthn')" type="success" dashed :loading="authStore.stepUpBusy" @click="authStore.verifyStepUpWebAuthn()">
+      <NButton v-if="methods.includes('webauthn')" type="primary" secondary :loading="authStore.stepUpBusy" @click="authStore.verifyStepUpWebAuthn()">
         使用 Passkey 验证
       </NButton>
 

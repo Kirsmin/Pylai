@@ -54,10 +54,11 @@ export const useAuthStore = defineStore('admin-auth', () => {
   }
 
   async function loadCapabilities(): Promise<boolean> {
-    const response = await rawFetch('/api/admin/capabilities')
+    const response = await rawFetch('/api/admin/capabilities', { cache: 'no-store' })
     if (response.status === 401) {
       user.value = null
       capabilities.value = []
+      inviteCodeRequired.value = false
       return false
     }
     const data = await parseApiResponse<AdminCapabilitiesResponse>(response)
@@ -66,6 +67,10 @@ export const useAuthStore = defineStore('admin-auth', () => {
     capabilities.value = data.capabilities ?? []
     inviteCodeRequired.value = data.inviteCodeRequired ?? false
     return user.value !== null
+  }
+
+  async function refreshCapabilities(): Promise<boolean> {
+    return loadCapabilities()
   }
 
   async function ensureCsrf() {
@@ -285,6 +290,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     inviteCodeRequired,
     hasCapability,
     capability,
+    refreshCapabilities,
     startLogin,
     request,
     logout,

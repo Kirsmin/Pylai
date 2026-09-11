@@ -14,28 +14,18 @@ defineProps<{
 .app-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 99px;
+  padding: 2px 7px;
+  border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.5;
   background: var(--surface-active);
   color: var(--text-secondary);
-  border: 1px solid transparent;
-  transition: all var(--transition-base);
+  border: 1px solid var(--border);
 }
-.app-badge::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.7;
-}
-.tone-success { background: var(--success-soft); color: var(--success); }
-.tone-info    { background: var(--info-soft);    color: var(--info); }
-.tone-warning { background: var(--warning-soft); color: var(--warning); }
-.tone-danger  { background: var(--danger-soft);  color: var(--danger); }
-.tone-purple  { background: var(--purple-soft);  color: var(--purple); }
+.tone-success { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 22%, transparent); }
+.tone-info    { background: var(--info-soft);    color: var(--info);    border-color: color-mix(in srgb, var(--info) 22%, transparent); }
+.tone-warning { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 22%, transparent); }
+.tone-danger  { background: var(--danger-soft);  color: var(--danger);  border-color: color-mix(in srgb, var(--danger) 22%, transparent); }
+.tone-purple  { background: var(--purple-soft);  color: var(--purple);  border-color: color-mix(in srgb, var(--purple) 22%, transparent); }
 </style>

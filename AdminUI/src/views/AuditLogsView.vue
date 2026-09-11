@@ -62,7 +62,7 @@ function eventTone(t: string): 'success' | 'info' | 'warning' | 'danger' | 'purp
   <section class="admin-page">
     <PageHeader title="审计日志" :subtitle="cap?.description">
       <template #actions>
-        <NButton quaternary type="success" @click="load">刷新</NButton>
+        <NButton quaternary @click="load">刷新</NButton>
       </template>
     </PageHeader>
 
@@ -71,7 +71,7 @@ function eventTone(t: string): 'success' | 'info' | 'warning' | 'danger' | 'purp
       <input v-model="userId" class="admin-input" placeholder="用户ID" style="width:160px" @keyup.enter="search" />
       <input v-model="ip" class="admin-input" placeholder="IP" style="width:140px" @keyup.enter="search" />
       <NSelect v-model:value="success" placeholder="结果" clearable :options="[{label:'成功',value:true},{label:'失败',value:false}]" style="width:110px" @update:value="search" />
-      <NButton type="success" ghost @click="search">查询</NButton>
+      <NButton type="primary" @click="search">查询</NButton>
       <NButton quaternary @click="resetFilters">重置</NButton>
     </div>
 

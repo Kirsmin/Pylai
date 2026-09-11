@@ -27,7 +27,6 @@ const icons: Record<string, Component> = {
 }
 
 const themeIcon = computed(() => themeStore.isDark ? MoonStars : Sun)
-
 const avatarLetter = computed(() => {
   const name = authStore.displayName || authStore.group || '?'
   return name.trim().charAt(0) || '?'
@@ -40,14 +39,7 @@ function isActive(path: string): boolean {
 
 function navTo(path: string) {
   sidebarOpen.value = false
-  router.push(path)
-}
-
-function groupTone(group: string): string {
-  if (group === 'normal') return 'success'
-  if (group === 'admin') return 'info'
-  if (group === 'max') return 'purple'
-  return 'neutral'
+  void router.push(path)
 }
 </script>
 
@@ -55,19 +47,24 @@ function groupTone(group: string): string {
   <div class="admin-shell">
     <aside :class="['admin-sidebar', { open: sidebarOpen }]">
       <div class="sidebar-brand" @click="navTo('/')">
-        <span class="brand-mark">#</span>
-        <span class="brand-name">Pylai</span>
+        <span class="brand-mark">P</span>
+        <span class="brand-name">Pylai Console</span>
         <span class="brand-tag">ADMIN</span>
       </div>
 
-      <nav class="sidebar-nav">
-        <span class="nav-section-label">管理功能</span>
+      <nav class="sidebar-nav" aria-label="管理导航">
+        <span class="nav-section-label">工作台</span>
+        <button type="button" :class="['nav-item', { active: isActive('/') }]" @click="navTo('/')">
+          <span class="nav-icon nav-dot" aria-hidden="true">•</span>
+          <span>概览</span>
+        </button>
+
+        <span class="nav-section-label" style="margin-top:8px;">管理</span>
         <button
           v-for="item in authStore.capabilities"
           :key="item.key"
           type="button"
-          :class="['nav-item', 'animate-slide', { active: isActive(item.route) }]"
-          :style="{ animationDelay: `${Math.min(authStore.capabilities.indexOf(item) * 40, 300)}ms` }"
+          :class="['nav-item', { active: isActive(item.route) }]"
           @click="navTo(item.route)"
         >
           <span class="nav-icon"><NIcon :component="icons[item.key]" /></span>
@@ -80,9 +77,7 @@ function groupTone(group: string): string {
           <span class="user-avatar">{{ avatarLetter }}</span>
           <div class="user-meta">
             <span class="user-name truncate">{{ authStore.displayName }}</span>
-            <span class="user-group" :style="{ color: `var(--${groupTone(authStore.group)})` }">
-              {{ authStore.group }}
-            </span>
+            <span class="user-group">{{ authStore.group }}</span>
           </div>
         </div>
         <div class="footer-actions">
@@ -102,10 +97,10 @@ function groupTone(group: string): string {
     <div class="admin-main">
       <header class="admin-header">
         <div class="header-left">
-          <button class="icon-btn mobile-menu-btn" @click="sidebarOpen = !sidebarOpen">
+          <button class="icon-btn mobile-menu-btn" title="打开导航" @click="sidebarOpen = !sidebarOpen">
             <NIcon :component="sidebarOpen ? X : Menu2" />
           </button>
-          <h1 class="header-title">{{ route.meta.title as string || 'Pylai' }}</h1>
+          <h1 class="header-title">{{ route.meta.title as string || 'Pylai Admin' }}</h1>
         </div>
         <div class="header-actions">
           <slot name="actions" />
@@ -117,8 +112,16 @@ function groupTone(group: string): string {
     </div>
 
     <div v-if="sidebarOpen" class="mobile-overlay" @click="sidebarOpen = false" />
-
     <MfaSettingsModal ref="mfaSettingsRef" />
     <MfaStepUpModal />
   </div>
 </template>
+
+<style scoped>
+.nav-dot {
+  width: 17px;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+}
+</style>

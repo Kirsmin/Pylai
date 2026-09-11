@@ -5,24 +5,21 @@ import type { Component } from 'vue'
 import { Apps, FileSearch, ShieldCheck, Ticket, Users } from '@vicons/tabler'
 import { useAuthStore } from '@/stores/auth'
 import AppBadge from '@/components/AppBadge.vue'
+import PageHeader from '@/components/PageHeader.vue'
 
 const authStore = useAuthStore()
 const router = useRouter()
 
 const icons: Record<string, Component> = {
-  users: Users, inviteCodes: Ticket,
-  bans: ShieldCheck, auditLogs: FileSearch, clients: Apps
+  users: Users,
+  inviteCodes: Ticket,
+  bans: ShieldCheck,
+  auditLogs: FileSearch,
+  clients: Apps
 }
 
 const cards = computed(() => authStore.capabilities)
-
-const greeting = computed(() => {
-  const h = new Date().getHours()
-  if (h < 6) return '夜深了'
-  if (h < 12) return '早上好'
-  if (h < 18) return '下午好'
-  return '晚上好'
-})
+const inviteCapability = computed(() => authStore.hasCapability('inviteCodes'))
 
 function groupTone(g: string) {
   if (g === 'normal') return 'success'
@@ -34,186 +31,132 @@ function groupTone(g: string) {
 
 <template>
   <section class="admin-page">
-    <div class="hero">
-      <div class="hero-text">
-        <h1 class="hero-title">{{ greeting }}，{{ authStore.displayName }}</h1>
-        <p class="hero-subtitle">这里是 Pylai 管理控制台，选择一个功能开始工作。</p>
+    <PageHeader title="管理概览" subtitle="集中查看当前权限和常用管理入口。">
+      <template #actions>
+        <AppBadge :tone="groupTone(authStore.group)">{{ authStore.group }}</AppBadge>
+      </template>
+    </PageHeader>
+
+    <div class="overview-grid">
+      <div class="overview-cell">
+        <span class="overview-label">当前管理员</span>
+        <strong class="overview-value truncate">{{ authStore.displayName }}</strong>
       </div>
-      <AppBadge :tone="groupTone(authStore.group)">{{ authStore.group }}</AppBadge>
+      <div class="overview-cell">
+        <span class="overview-label">权限组</span>
+        <strong class="overview-value mono">{{ authStore.group }}</strong>
+      </div>
+      <div class="overview-cell">
+        <span class="overview-label">可用模块</span>
+        <strong class="overview-value">{{ cards.length }}</strong>
+      </div>
+      <div v-if="inviteCapability" class="overview-cell">
+        <span class="overview-label">注册策略</span>
+        <strong class="overview-value">{{ authStore.inviteCodeRequired ? '必须邀请码' : '邀请码可选' }}</strong>
+      </div>
     </div>
 
-    <div class="stat-row">
-      <div class="stat-card">
-        <span class="stat-label">当前用户</span>
-        <span class="stat-value truncate">{{ authStore.displayName }}</span>
+    <div class="admin-panel">
+      <div class="admin-panel-header">
+        <div>
+          <h3 class="admin-panel-title">管理模块</h3>
+          <p class="admin-panel-subtitle">入口来自后端 capability 返回值；未授权功能不会展示。</p>
+        </div>
       </div>
-      <div class="stat-card">
-        <span class="stat-label">用户组</span>
-        <span class="stat-value mono">{{ authStore.group }}</span>
+      <div v-if="cards.length" class="module-list">
+        <button
+          v-for="item in cards"
+          :key="item.key"
+          type="button"
+          class="module-row"
+          @click="router.push(item.route)"
+        >
+          <span class="module-icon"><NIcon :component="icons[item.key]" /></span>
+          <span class="module-copy">
+            <strong>{{ item.name }}</strong>
+            <span>{{ item.description }}</span>
+          </span>
+          <span class="module-enter">进入</span>
+        </button>
       </div>
-      <div class="stat-card">
-        <span class="stat-label">可用功能</span>
-        <span class="stat-value">{{ cards.length }} 项</span>
+      <div v-else class="admin-empty">
+        <NEmpty description="当前用户组没有可用的管理功能" />
       </div>
-    </div>
-
-    <div v-if="cards.length > 0" class="capability-grid">
-      <button
-        v-for="item in cards"
-        :key="item.key"
-        type="button"
-        class="capability-card"
-        @click="router.push(item.route)"
-      >
-        <span class="capability-icon"><NIcon :component="icons[item.key]" /></span>
-        <span class="capability-body">
-          <span class="capability-name">{{ item.name }}</span>
-          <span class="capability-desc">{{ item.description }}</span>
-        </span>
-        <span class="capability-arrow">→</span>
-      </button>
-    </div>
-
-    <div v-else class="admin-empty">
-      <NEmpty description="当前用户组没有可用的管理功能">
-        <template #extra>
-          <NButton type="primary" ghost @click="authStore.logout()">退出登录</NButton>
-        </template>
-      </NEmpty>
     </div>
   </section>
 </template>
 
 <style scoped>
-.hero {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 4px 2px 0;
-}
-.hero-text { min-width: 0; }
-.hero-title {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text-primary);
-}
-.hero-subtitle {
-  margin: 6px 0 0;
-  font-size: 14px;
-  color: var(--text-tertiary);
-}
-
-.stat-row {
+.overview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 14px;
-}
-.stat-card {
-  padding: 16px 18px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-sm);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  transition: border-color var(--transition-base);
+  overflow: hidden;
 }
-.stat-card:hover { border-color: var(--border-strong); }
-.stat-label {
+.overview-cell {
+  min-width: 0;
+  padding: 15px 17px;
+  border-right: 1px solid var(--border);
+}
+.overview-cell:last-child { border-right: 0; }
+.overview-label {
+  display: block;
+  margin-bottom: 5px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
-.stat-value {
-  font-size: 17px;
-  font-weight: 600;
+.overview-value {
+  display: block;
+  font-size: 15px;
+  font-weight: 650;
   color: var(--text-primary);
 }
-
-.capability-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 14px;
-}
-.capability-card {
+.module-list { display: flex; flex-direction: column; }
+.module-row {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  cursor: pointer;
+  gap: 12px;
+  padding: 13px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--divider);
+  background: transparent;
+  color: inherit;
   text-align: left;
-  font: inherit;
-  transition: border-color var(--transition-base), box-shadow var(--transition-base), transform var(--transition-base);
+  cursor: pointer;
 }
-.capability-card:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
-}
-.capability-icon {
-  width: 42px;
-  height: 42px;
-  border-radius: 10px;
+.module-row:last-child { border-bottom: 0; }
+.module-row:hover { background: var(--surface-hover); }
+.module-icon {
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 20px;
   flex-shrink: 0;
-  transition: background var(--transition-base), color var(--transition-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 17px;
+  background: var(--surface-sunken);
 }
-.capability-card:hover .capability-icon {
-  background: var(--accent);
-  color: #fff;
+.module-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.module-copy strong { font-size: 13px; font-weight: 650; color: var(--text-primary); }
+.module-copy span { font-size: 12px; color: var(--text-tertiary); }
+.module-enter { flex-shrink: 0; font-size: 12px; color: var(--accent); }
+@media (max-width: 720px) {
+  .overview-grid { grid-template-columns: 1fr 1fr; }
+  .overview-cell:nth-child(2n) { border-right: 0; }
+  .overview-cell { border-bottom: 1px solid var(--border); }
+  .overview-cell:nth-last-child(-n + 2) { border-bottom: 0; }
 }
-.capability-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.capability-name {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.capability-desc {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.capability-arrow {
-  margin-left: auto;
-  color: var(--text-tertiary);
-  font-size: 15px;
-  opacity: 0;
-  transform: translateX(-4px);
-  transition: opacity var(--transition-base), transform var(--transition-base), color var(--transition-base);
-  flex-shrink: 0;
-}
-.capability-card:hover .capability-arrow {
-  opacity: 1;
-  transform: translateX(0);
-  color: var(--accent);
-}
-
-@media (max-width: 768px) {
-  .hero { flex-direction: column; }
-  .capability-arrow { display: none; }
+@media (max-width: 480px) {
+  .overview-grid { grid-template-columns: 1fr; }
+  .overview-cell { border-right: 0; border-bottom: 1px solid var(--border); }
+  .overview-cell:last-child { border-bottom: 0; }
 }
 </style>

@@ -82,8 +82,8 @@ async function unbanById(banId: string) {
   <section class="admin-page">
     <PageHeader title="封禁管理" :subtitle="cap?.description">
       <template #actions>
-        <NButton quaternary type="success" @click="load">刷新</NButton>
-        <NButton v-if="endpointAllowed('DELETE','/api/admin/bans/ip/{ip}')" type="success" ghost @click="openUnbanByIp">按 IP 解封</NButton>
+        <NButton quaternary @click="load">刷新</NButton>
+        <NButton v-if="endpointAllowed('DELETE','/api/admin/bans/ip/{ip}')" type="primary" @click="openUnbanByIp">按 IP 解封</NButton>
       </template>
     </PageHeader>
 
@@ -93,7 +93,7 @@ async function unbanById(banId: string) {
         <button type="button" :class="{active:tab==='history'}" @click="switchTab('history')">封禁历史</button>
       </div>
       <NSelect v-model:value="type" placeholder="类型" clearable :options="tab==='active'?typeOptions:historyTypeOptions" style="width:150px" @update:value="search" />
-      <NButton type="success" ghost @click="search">查询</NButton>
+      <NButton type="primary" @click="search">查询</NButton>
       <NButton quaternary @click="resetFilters">重置</NButton>
     </div>
 
@@ -153,7 +153,7 @@ async function unbanById(banId: string) {
           <NSelect v-model:value="unbanIpType" :options="typeOptions.filter(o=>o.value!=='confirm')" clearable />
         </label>
         <div style="display:flex;justify-content:flex-end;">
-          <NButton type="success" ghost :loading="unbanning" :disabled="!unbanIp.trim()" @click="unbanByIp">执行解封</NButton>
+          <NButton type="primary" :loading="unbanning" :disabled="!unbanIp.trim()" @click="unbanByIp">执行解封</NButton>
         </div>
       </div>
     </NModal>

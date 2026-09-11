@@ -64,17 +64,38 @@ function search() { page.value = 1; load() }
 function resetFilters() { group.value = null; page.value = 1; load() }
 onMounted(load)
 
+const settingSaving = ref(false)
+
+async function refreshPage() {
+  try {
+    await Promise.all([load(), authStore.refreshCapabilities()])
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '刷新失败')
+  }
+}
+
 async function toggleRequireInviteCode(value: boolean) {
+  if (settingSaving.value) return
+  settingSaving.value = true
   try {
     await authStore.request('/api/admin/settings/require-invite-code', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ requireInviteCode: value })
     })
-    authStore.inviteCodeRequired = value
+
+    // 不只更新本地状态：立即重新读取后端 capability，确保刷新后仍显示服务端真实值。
+    await authStore.refreshCapabilities()
+    if (authStore.inviteCodeRequired !== value) {
+      message.warning('设置请求已完成，但后端返回的当前值不同，请检查服务端运行时配置')
+      return
+    }
     message.success(value ? '已开启：注册必须使用邀请码' : '已关闭：注册可跳过邀请码')
   } catch (err) {
+    await authStore.refreshCapabilities().catch(() => false)
     message.error(err instanceof Error ? err.message : '设置失败')
+  } finally {
+    settingSaving.value = false
   }
 }
 
@@ -140,19 +161,34 @@ async function revoke(id: string) {
   <section class="admin-page">
     <PageHeader title="邀请码" :subtitle="cap?.description">
       <template #actions>
-        <NButton quaternary type="success" @click="load">刷新</NButton>
-        <NButton v-if="endpointAllowed('POST','/api/admin/invite-codes')" type="success" ghost @click="openCreate">创建邀请码</NButton>
+        <NButton quaternary @click="refreshPage">刷新</NButton>
+        <NButton v-if="endpointAllowed('POST','/api/admin/invite-codes')" type="primary" @click="openCreate">创建邀请码</NButton>
       </template>
     </PageHeader>
 
-    <div class="admin-toolbar" style="align-items:center;">
-      <NSelect v-model:value="group" placeholder="用户组" clearable :options="groupOptions" style="width:150px" @update:value="search" />
-      <NButton type="success" ghost @click="search">查询</NButton>
-      <NButton quaternary @click="resetFilters">重置</NButton>
-      <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
-        <span style="font-size:13px;color:var(--text-secondary);">注册必须使用邀请码</span>
-        <NSwitch :value="authStore.inviteCodeRequired" @update:value="toggleRequireInviteCode" />
+    <div class="admin-panel registration-policy">
+      <div class="policy-copy">
+        <strong>注册访问策略</strong>
+        <span>开启后，新用户注册流程必须提供有效邀请码。该值直接读取后端当前运行时配置。</span>
+        <small>服务重启后的初始值仍由服务端配置文件决定；AdminUI 不写入后端配置文件。</small>
       </div>
+      <div class="policy-control">
+        <span :class="['policy-state', { enabled: authStore.inviteCodeRequired }]">
+          {{ authStore.inviteCodeRequired ? '必须邀请码' : '邀请码可选' }}
+        </span>
+        <NSwitch
+          :value="authStore.inviteCodeRequired"
+          :loading="settingSaving"
+          :disabled="settingSaving"
+          @update:value="toggleRequireInviteCode"
+        />
+      </div>
+    </div>
+
+    <div class="admin-toolbar">
+      <NSelect v-model:value="group" placeholder="按用户组筛选" clearable :options="groupOptions" style="width:170px" @update:value="search" />
+      <NButton @click="search">查询</NButton>
+      <NButton quaternary @click="resetFilters">重置</NButton>
     </div>
 
     <div class="admin-table-wrap">
@@ -176,14 +212,14 @@ async function revoke(id: string) {
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span class="mono small muted">{{ c.usedCount }} / {{ c.maxRedemptions }}</span>
                   <div style="flex:1;height:6px;background:var(--surface-active);border-radius:999px;overflow:hidden;">
-                    <div :style="{width:`${progressPercent(c)}%`,height:'100%',background:'var(--success)',borderRadius:'inherit',transition:'width 0.3s ease'}" />
+                    <div :style="{width:`${progressPercent(c)}%`,height:'100%',background:'var(--success)',borderRadius:'inherit'}" />
                   </div>
                 </div>
               </td>
               <td style="text-align:right">
                 <div style="display:inline-flex;gap:4px;">
-                  <NButton v-if="endpointAllowed('GET','/api/admin/invite-codes/{id}')" size="tiny" quaternary type="success" @click="openDetail(c.id)">详情</NButton>
-                  <NButton v-if="endpointAllowed('PATCH','/api/admin/invite-codes/{id}')" size="tiny" quaternary type="success" @click="openEdit(c)">编辑</NButton>
+                  <NButton v-if="endpointAllowed('GET','/api/admin/invite-codes/{id}')" size="tiny" quaternary @click="openDetail(c.id)">详情</NButton>
+                  <NButton v-if="endpointAllowed('PATCH','/api/admin/invite-codes/{id}')" size="tiny" quaternary @click="openEdit(c)">编辑</NButton>
                   <NPopconfirm v-if="endpointAllowed('PATCH','/api/admin/invite-codes/{id}') && c.status==='Active'" @positive-click="revoke(c.id)">
                     <template #trigger><NButton size="tiny" quaternary type="error">撤销</NButton></template>
                     <span style="white-space:nowrap">撤销 {{ c.prefix }}...？</span>
@@ -213,7 +249,7 @@ async function revoke(id: string) {
           <input v-model.number="form.lifetimeHours" type="number" min="1" class="admin-input" />
         </label>
         <div style="display:flex;justify-content:flex-end;">
-          <NButton type="success" ghost :loading="saving" @click="save">保存</NButton>
+          <NButton type="primary" :loading="saving" @click="save">保存</NButton>
         </div>
       </div>
     </NModal>
@@ -225,7 +261,7 @@ async function revoke(id: string) {
           {{ createdCode.code }}
         </div>
         <div class="muted small">{{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
-        <NButton type="success" ghost @click="createdVisible = false">我已保存</NButton>
+        <NButton type="primary" @click="createdVisible = false">我已保存</NButton>
       </div>
     </NModal>
 
@@ -253,3 +289,24 @@ async function revoke(id: string) {
     </NModal>
   </section>
 </template>
+
+<style scoped>
+.registration-policy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 18px;
+}
+.policy-copy { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.policy-copy strong { font-size: 13px; font-weight: 650; color: var(--text-primary); }
+.policy-copy span { font-size: 12px; color: var(--text-secondary); }
+.policy-copy small { font-size: 11px; color: var(--text-tertiary); }
+.policy-control { flex-shrink: 0; display: flex; align-items: center; gap: 10px; }
+.policy-state { font-size: 12px; color: var(--text-tertiary); }
+.policy-state.enabled { color: var(--accent); font-weight: 600; }
+@media (max-width: 680px) {
+  .registration-policy { align-items: flex-start; flex-direction: column; }
+  .policy-control { width: 100%; justify-content: space-between; }
+}
+</style>

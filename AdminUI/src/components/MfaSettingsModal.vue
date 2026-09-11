@@ -117,7 +117,7 @@ defineExpose({ open })
           <strong>TOTP 认证器</strong>
           <span class="muted">{{ authStore.mfaTotpEnabled ? '已启用' : insecureContext ? '未启用（需 HTTPS 部署才能设置）' : '未启用' }}</span>
         </div>
-        <NButton v-if="!authStore.mfaTotpEnabled && !secret" size="tiny" type="success" ghost :loading="busy" :disabled="insecureContext" @click="beginTotp">设置</NButton>
+        <NButton v-if="!authStore.mfaTotpEnabled && !secret" size="tiny" type="primary" :loading="busy" :disabled="insecureContext" @click="beginTotp">设置</NButton>
       </div>
 
       <div class="admin-line-card">
@@ -125,7 +125,7 @@ defineExpose({ open })
           <strong>Passkey / WebAuthn</strong>
           <span class="muted">已注册 {{ authStore.mfaWebAuthnCount }} 个</span>
         </div>
-        <NButton size="tiny" type="success" dashed :loading="busy" @click="registerPasskey">注册 Passkey</NButton>
+        <NButton size="tiny" type="primary" secondary :loading="busy" @click="registerPasskey">注册 Passkey</NButton>
       </div>
 
       <div v-if="secret" class="mfa-secret-box">
@@ -146,7 +146,7 @@ defineExpose({ open })
         </div>
         <small class="muted">{{ otpauthUri }}</small>
         <input v-model="code" class="admin-input mono" maxlength="6" placeholder="输入认证器显示的6位验证码" />
-        <NButton type="success" ghost :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
+        <NButton type="primary" :loading="busy" :disabled="code.length !== 6" @click="confirmTotp">确认 TOTP</NButton>
       </div>
 
       <p v-if="passkeyMessage" class="success-msg">{{ passkeyMessage }}</p>
@@ -162,9 +162,9 @@ defineExpose({ open })
   flex-direction: column;
   gap: 10px;
   padding: 12px;
-  border: 1px solid var(--success-color);
-  border-radius: 12px;
-  background: var(--badge-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
 }
 
 .mfa-secret-box code {
@@ -178,7 +178,7 @@ defineExpose({ open })
   justify-content: center;
   padding: 8px;
   background: #fff;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   align-self: center;
 }
 
@@ -198,6 +198,6 @@ defineExpose({ open })
 
 .success-msg {
   margin: 0;
-  color: var(--success-color);
+  color: var(--success);
 }
 </style>

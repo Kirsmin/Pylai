@@ -7,10 +7,10 @@ const authStore = useAuthStore()
   <div class="login-shell">
     <div class="login-card animate-fade">
       <div class="login-brand">
-        <span class="brand-mark">#</span>
+        <span class="brand-mark">P</span>
         <div>
           <h1 class="login-title">Pylai 控制台</h1>
-          <p class="login-subtitle">登录以管理用户、邀请码与系统安全</p>
+          <p class="login-subtitle">管理员登录 · 用户、OAuth2、邀请与安全策略</p>
         </div>
       </div>
 
@@ -41,10 +41,7 @@ const authStore = useAuthStore()
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background:
-    radial-gradient(600px 320px at 15% 0%, var(--accent-soft) 0%, transparent 60%),
-    radial-gradient(600px 320px at 85% 100%, var(--accent-soft) 0%, transparent 60%),
-    var(--page-bg);
+  background: var(--page-bg);
 }
 .login-card {
   width: min(100%, 380px);
@@ -64,18 +61,18 @@ const authStore = useAuthStore()
   margin-bottom: 2px;
 }
 .brand-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-pressed) 100%);
-  color: #fff;
+  background: var(--surface-sunken);
+  color: var(--text-primary);
   font-family: var(--font-family-mono);
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 700;
-  box-shadow: 0 4px 12px -2px var(--accent-ring);
   flex-shrink: 0;
 }
 .login-title {
