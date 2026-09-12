@@ -232,10 +232,86 @@ jobs:
           if-no-files-found: error
 
   # ═════════════════════════════════════════════════════════════════
-  # Job 2: 汇总产物 + 生成清单 + 创建 GitHub Release
+  # Job 2: 构建 ManagePylai 单文件发布物
+  #   源码保持多文件；Release 同时产出：
+  #   - ManagePylai.pyz：标准 zipapp
+  #   - ManagePylai.py：UTF-8 兼容启动器，内嵌同一 pyz（v0.1.24 自更新器可直接升级）
+  # ═════════════════════════════════════════════════════════════════
+  manager:
+    name: Build ManagePylai bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14.0"
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION#V}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: ${VERSION}" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build manager artifacts
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_config_editor.py --check
+          python3 build_managepylai.py --check --version "${{ steps.version.outputs.version }}"
+          python3 build_managepylai.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --output-dir dist
+
+      - name: Verify manager artifacts and legacy updater compatibility
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          test "$(python3 dist/ManagePylai.py --version)" = "ManagePylai.py ${VERSION}"
+          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.py ${VERSION}"
+          python3 dist/ManagePylai.py --help >/dev/null
+          python3 dist/ManagePylai.pyz --help >/dev/null
+          (cd dist && sha256sum -c ManagePylai.py.sha256 && sha256sum -c ManagePylai.pyz.sha256)
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('dist/ManagePylai.py').read_text(encoding='utf-8')
+          match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+          assert match, 'v0.1.24 legacy self-updater cannot parse bundled ManagePylai.py'
+          PY
+
+      - name: Upload manager artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pylai-manager
+          path: |
+            dist/ManagePylai.py
+            dist/ManagePylai.py.sha256
+            dist/ManagePylai.pyz
+            dist/ManagePylai.pyz.sha256
+          retention-days: 3
+          if-no-files-found: error
+
+  # ═════════════════════════════════════════════════════════════════
+  # Job 3: 汇总产物 + 生成清单 + 创建 GitHub Release
   # ═════════════════════════════════════════════════════════════════
   release:
-    needs: [build, ci]
+    needs: [build, ci, manager]
     runs-on: ubuntu-latest
 
     steps:
@@ -270,19 +346,34 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
 
-      - name: Download artifacts
+      - name: Download image artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: pylai-*
+          pattern: pylai-linux-*
           path: dist
           merge-multiple: true
 
-      - name: Finalize release assets（ManagePylai.py + release.json）
+      - name: Download manager artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: pylai-manager
+          path: dist
+
+      - name: Finalize and verify release manifest
         run: |
           python scripts/release.py \
             --version "${{ steps.version.outputs.version }}" \
             --target all \
             --finalize
+
+      - name: Verify final release assets
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          (cd dist && sha256sum -c ManagePylai.py.sha256 && sha256sum -c ManagePylai.pyz.sha256)
+          test "$(python3 dist/ManagePylai.py --version)" = "ManagePylai.py ${VERSION}"
+          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.py ${VERSION}"
+          test -s dist/release.json
 
       - name: Create GitHub Release and upload assets
         env:
@@ -302,6 +393,8 @@ jobs:
               dist/*.tar.sha256 \
               dist/ManagePylai.py \
               dist/ManagePylai.py.sha256 \
+              dist/ManagePylai.pyz \
+              dist/ManagePylai.pyz.sha256 \
               dist/release.json \
               --title "Pylai v${RELEASE_VERSION}" \
               --generate-notes
@@ -311,6 +404,8 @@ jobs:
               dist/*.tar.sha256 \
               dist/ManagePylai.py \
               dist/ManagePylai.py.sha256 \
+              dist/ManagePylai.pyz \
+              dist/ManagePylai.pyz.sha256 \
               dist/release.json \
               --title "Pylai v${RELEASE_VERSION}" \
               --generate-notes \

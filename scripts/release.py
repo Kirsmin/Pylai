@@ -13,9 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = ROOT / "dist"
-MANAGE_PY = ROOT / "ManagePylai.py"
+MANAGER_BUILDER = ROOT / "build_managepylai.py"
 MIGRATIONS_DIR = ROOT / "OS" / "Features" / "Database" / "Migrations"
-
 TARGETS = {
     "linux-amd64": {"platform": "linux/amd64", "os": "Linux", "arch": "AMD64"},
     "linux-arm64": {"platform": "linux/arm64", "os": "Linux", "arch": "ARM64"},
@@ -28,7 +27,6 @@ def run(command: list[str], cwd: Path | None = None, check: bool = True) -> subp
     if check and result.returncode != 0:
         raise SystemExit(result.returncode)
     return result
-
 
 def require_tool(name: str) -> None:
     if shutil.which(name) is None:
@@ -43,7 +41,6 @@ def normalize_version(raw: str) -> str:
         raise SystemExit(f"非法版本号: {raw!r}")
     return version
 
-
 def read_db_schema_version() -> str:
     names = sorted(
         p.name for p in MIGRATIONS_DIR.glob("*.cs")
@@ -53,14 +50,12 @@ def read_db_schema_version() -> str:
         raise SystemExit("未找到 EF 迁移文件")
     return names[-1].replace(".cs", "")
 
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
 
 def verify_tar_templates(tar_path: Path) -> None:
     """Fail Closed: 直接检查 tar 产物内是否包含两份模板（不依赖 docker daemon 与架构）。"""
@@ -90,7 +85,6 @@ def verify_tar_templates(tar_path: Path) -> None:
         raise SystemExit(f"tar {tar_path} 内未找到 pylai.example.toml")
     print(f"==> tar 模板校验通过: {tar_path.name}")
 
-
 def verify_image_templates(image: str) -> None:
     """Fail Closed: 校验镜像内两份配置模板齐全且模板含必需占位（需镜像已 load）。"""
     for fname, needle in [
@@ -107,7 +101,6 @@ def verify_image_templates(image: str) -> None:
             raise SystemExit(f"镜像 {image} 的 {fname} 内容异常（缺少 {needle}）")
     print(f"==> 镜像模板校验通过: {image}")
 
-
 def build_target(version: str, target_name: str, target: dict[str, str]) -> Path:
     package_name = f"Pylai-{version}-Linux-{target['arch']}"
     tar_path = DIST_DIR / f"{package_name}.tar"
@@ -117,7 +110,6 @@ def build_target(version: str, target_name: str, target: dict[str, str]) -> Path
     require_tool("docker")
     if shutil.which("buildx") is None and run(["docker", "buildx", "version"], check=False).returncode != 0:
         raise SystemExit("缺少 docker buildx")
-
     print(f"==> 构建 Docker 镜像: {package_name}")
     schema = read_db_schema_version()
     run(
@@ -133,10 +125,8 @@ def build_target(version: str, target_name: str, target: dict[str, str]) -> Path
         ],
         cwd=ROOT,
     )
-
     if not tar_path.is_file() or tar_path.stat().st_size == 0:
         raise SystemExit(f"镜像导出失败: {tar_path}")
-
     # 优先通过 tar 内容校验（兼容 ARM64 无法在 amd64 runner 上 docker run 的情况）
     verify_tar_templates(tar_path)
     # AMD64 额外尝试镜像内验证（需先 load，已在上一步导出，可直接 load 后验证）
@@ -150,7 +140,6 @@ def build_target(version: str, target_name: str, target: dict[str, str]) -> Path
                 print(f"警告: 镜像内验证失败（tar 已通过）: {exc}", file=sys.stderr)
         else:
             print(f"警告: docker load 失败，跳过镜像内验证: {load.stderr.strip()[:200]}", file=sys.stderr)
-
     checksum = sha256_file(tar_path)
     checksum_path = DIST_DIR / f"{tar_path.name}.sha256"
     checksum_path.write_text(f"{checksum}  {tar_path.name}\n", encoding="utf-8")
@@ -159,44 +148,126 @@ def build_target(version: str, target_name: str, target: dict[str, str]) -> Path
     print(f"    SHA256: {checksum}")
     return tar_path
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="构建 Pylai Docker 部署镜像并生成 Release tar")
     parser.add_argument("--version", required=True, help="版本号，例如 0.0.1 或 v0.0.1")
     parser.add_argument("--target", default="all", choices=["all", *TARGETS.keys()],
                         help="目标平台，默认 all")
     parser.add_argument("--finalize", action="store_true",
-                        help="跳过镜像构建：校验 dist/ 下已有 tar 产物齐全后仅生成 "
-                             "ManagePylai.py 与 release.json（供 CI 汇总 job 使用）")
+                        help="跳过镜像构建：校验 dist/ 下已有 tar 与管理器产物后生成 "
+                             "release.json（缺少管理器产物时自动构建）")
     return parser.parse_args()
 
-
 def sync_config_editor() -> None:
-    """构建前同步 ConfigEditor/ 源码到 ManagePylai.py（发布单文件分发必需）。"""
+    """构建前同步 ConfigEditor/ 权威源码到 managepylai_editor.py。"""
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "sync_config_editor.py")],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"同步 ConfigEditor 到 ManagePylai.py 失败:\n{result.stderr or result.stdout}")
+        raise SystemExit(f"同步 ConfigEditor 到 managepylai_editor.py 失败:\n{result.stderr or result.stdout}")
     print(result.stdout.strip())
+
+
+MANAGER_ASSETS = (
+    "ManagePylai.py",
+    "ManagePylai.py.sha256",
+    "ManagePylai.pyz",
+    "ManagePylai.pyz.sha256",
+)
+
+
+def check_manager_source_version(version: str) -> None:
+    """发布标签必须与仓库中的 ManagePylai 源码版本一致。"""
+    run(
+        [
+            sys.executable,
+            str(MANAGER_BUILDER),
+            "--check",
+            "--version",
+            version,
+        ],
+        cwd=ROOT,
+    )
+
+
+def verify_manager_artifacts(version: str) -> None:
+    """Fail Closed 校验 .py/.pyz、版本声明与对应 SHA256。"""
+    missing = [name for name in MANAGER_ASSETS if not (DIST_DIR / name).is_file()]
+    if missing:
+        raise SystemExit(f"管理工具产物缺失: {', '.join(missing)}")
+
+    for asset in ("ManagePylai.py", "ManagePylai.pyz"):
+        path = DIST_DIR / asset
+        checksum_path = DIST_DIR / f"{asset}.sha256"
+        content = checksum_path.read_text(encoding="ascii").strip()
+        expected = content.split()[0] if content else ""
+        actual = sha256_file(path)
+        if not expected or actual != expected:
+            raise SystemExit(
+                f"{asset} SHA256 校验失败: 期望 {expected or '<empty>'}, 实际 {actual}"
+            )
+
+        result = subprocess.run(
+            [sys.executable, str(path), "--version"],
+            capture_output=True,
+            text=True,
+        )
+        expected_output = f"ManagePylai.py {version}"
+        if result.returncode != 0 or result.stdout.strip() != expected_output:
+            raise SystemExit(
+                f"{asset} 版本校验失败: {result.stdout.strip() or result.stderr.strip()}"
+            )
+
+    # v0.1.24 的既有自更新器会按 UTF-8 文本读取 ManagePylai.py 并抓取顶层版本。
+    launcher = (DIST_DIR / "ManagePylai.py").read_text(encoding="utf-8")
+    declared = re.search(
+        r'^__version__\s*=\s*["\']([^"\']+)["\']',
+        launcher,
+        re.MULTILINE,
+    )
+    if not declared or normalize_version(declared.group(1)) != version:
+        raise SystemExit("ManagePylai.py 不兼容 v0.1.24 自更新器的文本版本检查")
+
+
+def ensure_manager_artifacts(version: str) -> None:
+    """复用 CI 下载的管理器产物；本地完全缺失时才自动构建。"""
+    present = [name for name in MANAGER_ASSETS if (DIST_DIR / name).is_file()]
+    if not present:
+        run(
+            [
+                sys.executable,
+                str(MANAGER_BUILDER),
+                "--version",
+                version,
+                "--output-dir",
+                str(DIST_DIR),
+            ],
+            cwd=ROOT,
+        )
+    elif len(present) != len(MANAGER_ASSETS):
+        missing = [name for name in MANAGER_ASSETS if name not in present]
+        raise SystemExit(
+            f"管理工具产物不完整，拒绝 finalize: 缺少 {', '.join(missing)}"
+        )
+    verify_manager_artifacts(version)
+    print("==> 管理工具发布物校验通过")
 
 
 def main() -> int:
     args = parse_args()
     version = normalize_version(args.version)
-
     if not (ROOT / "Dockerfile").is_file():
         raise SystemExit("找不到 Dockerfile")
-    if not MANAGE_PY.is_file():
-        raise SystemExit("找不到 ManagePylai.py，请先创建管理工具")
+    if not MANAGER_BUILDER.is_file():
+        raise SystemExit("找不到 build_managepylai.py")
 
     sync_config_editor()
+    check_manager_source_version(version)
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     selected = TARGETS.items() if args.target == "all" else [(args.target, TARGETS[args.target])]
-
     if args.finalize:
         expected = [DIST_DIR / f"Pylai-{version}-Linux-{target['arch']}.tar" for _, target in selected]
         missing = [p.name for p in expected if not p.is_file() or p.stat().st_size == 0]
@@ -221,25 +292,7 @@ def main() -> int:
         outputs = expected
     else:
         outputs = [build_target(version, name, target) for name, target in selected]
-
-    manage_dst = DIST_DIR / "ManagePylai.py"
-    shutil.copy2(MANAGE_PY, manage_dst)
-    # 注入发行版本号：否则自更新比较（__version__）永远失真，ManagePylai 无法发现新版本
-    text = manage_dst.read_text(encoding="utf-8")
-    patched, count = re.subn(
-        r'^__version__ = "[^"]*"',
-        f'__version__ = "{version}"',
-        text,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if count != 1:
-        raise SystemExit("无法定位 ManagePylai.py 中的 __version__ 以便注入发行版本号")
-    manage_dst.write_text(patched, encoding="utf-8")
-    manage_checksum = sha256_file(manage_dst)
-    (DIST_DIR / "ManagePylai.py.sha256").write_text(
-        f"{manage_checksum}  ManagePylai.py\n", encoding="utf-8")
-
+    ensure_manager_artifacts(version)
     manifest = {
         "name": "Pylai",
         "version": version,
@@ -256,19 +309,21 @@ def main() -> int:
             for _, target in selected
         ],
         "manager": "ManagePylai.py",
+        "managerPyz": "ManagePylai.pyz",
         "dbSchemaVersion": read_db_schema_version(),
         "builtAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     (DIST_DIR / "release.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     print("\nRelease 产物:")
     for output in outputs:
         print(f"  - {output.name}")
         print(f"  - {output.name}.sha256")
-    print(f"  - ManagePylai.py")
-    print(f"  - ManagePylai.py.sha256")
-    print(f"  - release.json")
+    print("  - ManagePylai.py")
+    print("  - ManagePylai.py.sha256")
+    print("  - ManagePylai.pyz")
+    print("  - ManagePylai.pyz.sha256")
+    print("  - release.json")
     return 0
 
 

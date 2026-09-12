@@ -37,10 +37,45 @@ jobs:
         working-directory: OS
         run: dotnet build Pylaios.csproj -c Release
 
-      - name: ManagePylai 语法与 ConfigEditor 同步检查
+      - name: ManagePylai 源码边界与 ConfigEditor 同步检查
         run: |
-          python3 -m py_compile ManagePylai.py ConfigEditor/server_code.py scripts/sync_config_editor.py scripts/release.py
+          set -euo pipefail
+          python3 -m py_compile \
+            ManagePylai.py build_managepylai.py managepylai_*.py \
+            ConfigEditor/server_code.py scripts/sync_config_editor.py scripts/release.py
           python3 scripts/sync_config_editor.py --check
+          python3 build_managepylai.py --check
+
+          # 入口必须保持轻量；大逻辑只允许存在于拆分模块。
+          test "$(wc -c < ManagePylai.py)" -lt 4096
+
+      - name: ManagePylai 单文件发布兼容测试
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/managepylai-dist
+          python3 build_managepylai.py --output-dir /tmp/managepylai-dist
+
+          SOURCE_VERSION=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('ManagePylai.py').read_text(encoding='utf-8')
+          print(re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.M).group(1))
+          PY
+          )
+          test "$(python3 /tmp/managepylai-dist/ManagePylai.py --version)" = "ManagePylai.py ${SOURCE_VERSION}"
+          test "$(python3 /tmp/managepylai-dist/ManagePylai.pyz --version)" = "ManagePylai.py ${SOURCE_VERSION}"
+          python3 /tmp/managepylai-dist/ManagePylai.py --help >/dev/null
+          python3 /tmp/managepylai-dist/ManagePylai.pyz --help >/dev/null
+
+          # v0.1.24 自更新器会把新 ManagePylai.py 当 UTF-8 文本读取并抓取版本号。
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('/tmp/managepylai-dist/ManagePylai.py')
+          text = p.read_text(encoding='utf-8')
+          m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+          assert m, 'legacy self-updater cannot read release artifact version'
+          PY
 
       - name: Config validate（生产安全配置 + DataProtection KEK）
         working-directory: OS
