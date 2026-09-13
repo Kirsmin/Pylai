@@ -102,7 +102,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.27"
+__version__ = "0.1.28"
 
 
 class ManageError(Exception):
@@ -1245,6 +1245,12 @@ class InstallAnswers:
 # ============================================================================
 # ManagerConfig / State
 # ============================================================================
+# 组件管理：可独立开关的组件（key → ManagerConfig [Components] 键名）
+COMPONENTS: dict[str, str] = {"backend": "Backend", "ui": "Ui", "adminui": "AdminUi"}
+# 单独开关后端/用户前端属于高级操作（影响整体可用性），Admin UI 为常规运维开关
+ADVANCED_COMPONENTS: frozenset[str] = frozenset({"backend", "ui"})
+
+
 @dataclass(slots=True)
 class ManagerConfig:
     path: Path = HOME / "ManagerConfig.toml"
@@ -1343,6 +1349,13 @@ Level = "{level}"
             text += "\n[Compose.Services]\n"
             text += "".join(f"{k} = {json.dumps(v)}\n" for k, v in services.items())
 
+        components = self.get("Components", default={}) or {}
+        if components:
+            text += "\n# 组件开关（ManagePylai 组件管理维护，缺省视为启用）\n[Components]\n"
+            text += "".join(
+                f"{k} = {'true' if v else 'false'}\n" for k, v in components.items()
+            )
+
         atomic_write(self.path, text)
 
     @property
@@ -1409,6 +1422,21 @@ Level = "{level}"
     def set_download_dir(self, path: str) -> None:
         self.set("Updates", "DownloadDir", value=str(path) if path.strip() else "")
         self.save()
+
+    @property
+    def components(self) -> dict[str, bool]:
+        """组件开关状态（未记录的一律视为启用）。"""
+        return {
+            key: bool(self.get("Components", name, default=True))
+            for key, name in COMPONENTS.items()
+        }
+
+    def set_components(self, states: dict[str, bool], *, save: bool = True) -> None:
+        for key, enabled in states.items():
+            if key in COMPONENTS:
+                self.set("Components", COMPONENTS[key], value=bool(enabled))
+        if save:
+            self.save()
 
     @property
     def skip_version(self) -> str | None:
@@ -2355,7 +2383,7 @@ volumes:
 
         atomic_write(cls.ENV_FILE, "\n".join(answers.env_lines()) + "\n")
         atomic_write(cls.COMPOSE_FILE, compose_text)
-        cls.write_nginx_conf()
+        cls.write_nginx_conf(manager)
 
     @classmethod
     def regenerate(cls, image: str, manager: ManagerConfig | None = None) -> None:
@@ -2374,13 +2402,36 @@ volumes:
         )
 
         atomic_write(cls.COMPOSE_FILE, compose_text)
-        cls.write_nginx_conf()
+        cls.write_nginx_conf(manager)
 
     @classmethod
-    def write_nginx_conf(cls) -> None:
+    def write_nginx_conf(cls, manager: ManagerConfig | None = None) -> None:
         # 拆分拓扑站点配置：静态资源来自 backend 容器同步的共享卷（/var/lib/pylai/www），
         # API/OIDC 反代到 backend 服务；conf.d 片段处于 http 上下文，types 与主配置合并追加
         # （不得下放到 server/location 级，否则整体替换 MIME 映射导致静态资源被下载）。
+        # 组件开关（ManagePylai 组件管理）在此落地：关闭的用户前端/管理面板一律 404。
+        components = (manager or ManagerConfig()).components
+        admin_block = (
+            """\
+    location = /admin { return 301 /admin/; }
+    location /admin/ {
+        alias /var/lib/pylai/www/adminui/;
+        index index.html;
+        try_files $uri $uri/ /admin/index.html;
+    }"""
+            if components["adminui"]
+            else """\
+    # Admin UI 已关闭（ManagePylai 组件管理）
+    location /admin { return 404; }
+    location /admin/ { return 404; }"""
+        )
+        root_block = (
+            "    location / { try_files $uri $uri/ /index.html; }"
+            if components["ui"]
+            else """\
+    # Pylai UI 已关闭（ManagePylai 组件管理）
+    location / { return 404; }"""
+        )
         template = """\
 # 字体 MIME：默认 mime.types 缺少 ttf，浏览器会拒绝加载 @font-face 字体（http 级合并追加）
 types {
@@ -2401,12 +2452,7 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
 
-    location = /admin { return 301 /admin/; }
-    location /admin/ {
-        alias /var/lib/pylai/www/adminui/;
-        index index.html;
-        try_files $uri $uri/ /admin/index.html;
-    }
+@@ADMIN_BLOCK@@
     location /api/ {
         proxy_pass http://backend:5000;
         proxy_set_header Host $http_host;
@@ -2437,9 +2483,11 @@ server {
         proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
         proxy_set_header X-Real-IP $remote_addr;
     }
-    location / { try_files $uri $uri/ /index.html; }
+@@ROOT_BLOCK@@
 }
 """
+        template = template.replace("@@ADMIN_BLOCK@@", admin_block)
+        template = template.replace("@@ROOT_BLOCK@@", root_block)
         atomic_write(CONFIG_DIR / "nginx.conf", template, mode=0o644)
 
     @classmethod

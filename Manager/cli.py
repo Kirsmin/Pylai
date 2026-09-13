@@ -47,7 +47,14 @@ from core import (
     uninstall,
 )
 from install import InstallService, UpdateService
-from services import BackupService, ConfigService, SecurityService, SettingsService, UserService
+from services import (
+    BackupService,
+    ComponentService,
+    ConfigService,
+    SecurityService,
+    SettingsService,
+    UserService,
+)
 
 class InteractiveMenu:
     """轻量交互菜单。
@@ -178,6 +185,7 @@ class InteractiveMenu:
                 ("启动", lambda: service_action(self.ctx, "start")),
                 ("停止", lambda: service_action(self.ctx, "stop")),
                 ("重启", lambda: service_action(self.ctx, "restart")),
+                ("组件管理", lambda: ComponentService(self.ctx).manage()),
                 ("查看最近日志", lambda: self.ctx.docker.view_logs(200)),
                 ("实时日志", lambda: self.ctx.docker.view_logs(200, follow=True)),
             ])

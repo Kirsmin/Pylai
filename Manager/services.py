@@ -12,6 +12,7 @@ import os
 import platform as host_platform
 import re
 import secrets
+import select
 import shutil
 import socket
 import string
@@ -34,9 +35,11 @@ from typing import Any, Literal, Self, TypeVar
 from urllib.parse import urlparse
 
 from core import (
+    ADVANCED_COMPONENTS,
     AppContext,
     BACKUP_DIR,
     CONFIG_FILE,
+    ComposeConfig,
     DEFAULT_DOWNLOAD_DIR,
     GROUP_OPTIONS,
     InstallAnswers,
@@ -729,3 +732,177 @@ class SettingsService:
         enabled = ask_bool("更新前自动备份数据库？", manager.auto_backup)
         manager.set_auto_backup(enabled)
         out(f"AutoBackupBeforeUpdate 已设为 {str(enabled).lower()}。")
+
+
+# ============================================================================
+# 组件管理（单独开关 OS 后端 / 用户前端 / 管理面板）
+# ============================================================================
+COMPONENT_ITEMS: tuple[tuple[str, str], ...] = (
+    ("backend", "Pylai OS 后端"),
+    ("ui", "Pylai UI 用户前端"),
+    ("adminui", "Admin UI 管理面板"),
+)
+
+
+def _component_lines(states: dict[str, bool], index: int) -> list[str]:
+    lines: list[str] = []
+    for idx, (key, label) in enumerate(COMPONENT_ITEMS):
+        cursor = ">" if idx == index else " "
+        box = "x" if states.get(key, True) else " "
+        lines.append(f"  {cursor} [{box}] {label}")
+    return lines
+
+
+def _read_component_key() -> str:
+    """原始模式下读一个按键，仅识别组件管理需要的键。"""
+    fd = sys.stdin.fileno()
+
+    def read_one(timeout: float | None = None) -> str:
+        if timeout is not None:
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                return ""
+        return os.read(fd, 1).decode("utf-8", errors="ignore")
+
+    ch = read_one()
+    if ch == "\x1b":
+        # 方向键为 ESC [ A/B；单独 ESC 取消（限时读取，避免阻塞等待后续字节）
+        if read_one(0.05) == "[":
+            return {"A": "up", "B": "down"}.get(read_one(0.05), "other")
+        return "cancel"
+    if ch in ("\r", "\n"):
+        return "enter"
+    if ch == " ":
+        return "space"
+    if ch in ("q", "Q", "\x03", "\x04"):
+        return "cancel"
+    return "other"
+
+
+def _select_components_fallback(states: dict[str, bool]) -> dict[str, bool] | None:
+    out("当前终端不支持键盘选择，改为逐个确认（直接回车保持当前值）。")
+    result: dict[str, bool] = {}
+    for key, label in COMPONENT_ITEMS:
+        try:
+            result[key] = ask_bool(f"{label} 启用？", states.get(key, True))
+        except SystemExit:
+            return None
+    return result
+
+
+def _select_components(current: dict[str, bool]) -> dict[str, bool] | None:
+    """↑↓ 选择、Space 开关、Enter 确认、Esc/q 取消；非交互终端退化为逐个问答。"""
+    states = {key: bool(current.get(key, True)) for key, _ in COMPONENT_ITEMS}
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return _select_components_fallback(states)
+
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return _select_components_fallback(states)
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    index = 0
+    printed = 0
+
+    out("\n? 组件管理（↑↓ 选择 · Space 开关 · Enter 确认 · Esc 取消）")
+    try:
+        tty.setraw(fd)
+        while True:
+            body = _component_lines(states, index) + [""]
+            if printed:
+                sys.stdout.write(f"\x1b[{printed}A")
+            for line in body:
+                sys.stdout.write("\x1b[2K" + line + "\r\n")
+            sys.stdout.flush()
+            printed = len(body)
+
+            key = _read_component_key()
+            if key == "up":
+                index = (index - 1) % len(COMPONENT_ITEMS)
+            elif key == "down":
+                index = (index + 1) % len(COMPONENT_ITEMS)
+            elif key == "space":
+                name = COMPONENT_ITEMS[index][0]
+                states[name] = not states[name]
+            elif key == "enter":
+                return states
+            elif key == "cancel":
+                return None
+    finally:
+        # 丢弃选择期间残留的按键，避免其被后续确认问答误读（Fail Closed）
+        with suppress(OSError, termios.error):
+            termios.tcflush(fd, termios.TCIFLUSH)
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+class ComponentService:
+    """组件管理：单独开关 OS 后端 / 用户前端 / 管理面板。
+
+    OS 后端与用户前端属于高级操作（影响整体可用性，需二次确认）；Admin UI 是
+    常规运维开关，可随时关闭或开启，不额外确认。
+    """
+
+    def __init__(self, ctx: AppContext) -> None:
+        self.ctx = ctx
+
+    def manage(self) -> None:
+        ctx = self.ctx
+        ctx.require_installed()
+
+        current = ctx.manager.components
+        selected = _select_components(current)
+        if selected is None:
+            out("已取消。")
+            return
+
+        changed = {k: v for k, v in selected.items() if current.get(k, True) != v}
+        if not changed:
+            out("组件状态未变化。")
+            return
+
+        advanced = [key for key in changed if key in ADVANCED_COMPONENTS]
+        if advanced:
+            names = "、".join(label for key, label in COMPONENT_ITEMS if key in advanced)
+            out(f"注意：{names} 的开关会影响整体可用性。")
+            if not ask_bool("确认执行？", False):
+                out("已取消。")
+                return
+
+        # 先在内存生效（供 Nginx 渲染读取），动作全部成功后再落盘，失败可重试
+        ctx.manager.set_components(selected, save=False)
+
+        if "ui" in changed or "adminui" in changed:
+            ComposeConfig.write_nginx_conf(ctx.manager)
+            self._reload_nginx()
+
+        if "backend" in changed:
+            if selected["backend"]:
+                ctx.docker.compose("up", "-d", "backend", timeout=180)
+            else:
+                ctx.docker.compose("stop", "-t", "30", "backend", timeout=120)
+
+        ctx.manager.save()
+
+        for key, label in COMPONENT_ITEMS:
+            if key in changed:
+                out(f"  {'已启用' if selected[key] else '已关闭'} {label}")
+
+    def _reload_nginx(self) -> None:
+        docker = self.ctx.docker
+        if not docker.service_running("nginx"):
+            out("提示：Nginx 未运行，组件配置将在下次启动时生效。")
+            return
+
+        result = docker.compose(
+            "exec", "-T", "nginx", "nginx", "-s", "reload",
+            check=False, timeout=60,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise ManageError(f"Nginx 重载失败（配置已写入，可手动重启服务生效）: {detail}")
+        out("Nginx 已重载，前端组件开关即时生效。")
+
