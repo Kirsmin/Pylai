@@ -29,6 +29,7 @@ def read_version(source: str) -> str:
 
 
 SOURCES: dict[str, tuple[str, str]] = {
+    "Manager/__main__.py": ("Manager/__main__.py", r'^__version__\s*=\s*["\']([^"\']+)["\']'),
     "Manager/core.py": ("Manager/core.py", r'^__version__\s*=\s*["\']([^"\']+)["\']'),
     "OS/Pylaios.csproj": ("OS/Pylaios.csproj", r"<Version>([^<]+)</Version>"),
     "Dockerfile": ("Dockerfile", r"^ARG\s+PYLAI_VERSION=([^\s]+)"),

@@ -286,10 +286,22 @@ jobs:
           (cd dist && sha256sum -c ManagePylai.pyz.sha256)
           test ! -e dist/ManagePylai.py
           python3 - <<'PY'
+          import re
           import zipfile
           names = set(zipfile.ZipFile('dist/ManagePylai.pyz').namelist())
           expected = {'__main__.py', 'core.py', 'install.py', 'editor.py', 'services.py', 'cli.py'}
           assert names == expected, f'unexpected zipapp members: {sorted(names)}'
+          # v0.1.25 自更新器按旧模块名读取顶层版本号，必须仍能读到。
+          with zipfile.ZipFile('dist/ManagePylai.pyz') as zf:
+              for name in ('managepylai_core.py', 'ManagePylai.py', '__main__.py'):
+                  try:
+                      text = zf.read(name).decode('utf-8')
+                  except KeyError:
+                      continue
+                  if re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE):
+                      break
+              else:
+                  raise SystemExit('v0.1.25 legacy self-updater cannot read artifact version')
           PY
 
       - name: Upload manager artifacts

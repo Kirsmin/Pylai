@@ -40,12 +40,12 @@ def read_declared_version(path: Path) -> str:
     return match.group(1)
 
 
-def replace_version(source: str, version: str) -> str:
+def replace_version(source: str, version: str, label: str) -> str:
     updated, count = VERSION_VALUE_RE.subn(
         lambda m: f'{m.group(1)}"{version}"', source, count=1
     )
     if count != 1:
-        raise SystemExit("Manager/core.py must contain exactly one top-level __version__")
+        raise SystemExit(f"{label} must contain exactly one top-level __version__")
     return updated
 
 
@@ -75,11 +75,14 @@ def build_pyz(root: Path, output: Path, version: str) -> bytes:
         tmp_path = Path(tmp.name)
     try:
         with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-            zf.writestr(zip_info(ENTRY_FILE), entry.encode("utf-8"))
+            zf.writestr(
+                zip_info(ENTRY_FILE),
+                replace_version(entry, version, "Manager/__main__.py").encode("utf-8"),
+            )
             for name in SOURCE_FILES:
                 source = (root / name).read_text(encoding="utf-8")
                 if name == "core.py":
-                    source = replace_version(source, version)
+                    source = replace_version(source, version, "Manager/core.py")
                 zf.writestr(zip_info(name), source.encode("utf-8"))
         zip_bytes = tmp_path.read_bytes()
     finally:
@@ -109,10 +112,11 @@ def verify_artifacts(output_dir: Path, version: str) -> None:
         missing = required - names
         if missing:
             raise SystemExit(f"zipapp missing files: {sorted(missing)}")
-        core = zf.read("core.py").decode("utf-8")
-        match = VERSION_RE.search(core)
-        if not match or match.group(1) != version:
-            raise SystemExit("zipapp runtime version declaration is incorrect")
+        for name in ("core.py", ENTRY_FILE):
+            content = zf.read(name).decode("utf-8")
+            match = VERSION_RE.search(content)
+            if not match or match.group(1) != version:
+                raise SystemExit(f"zipapp {name} version declaration is incorrect")
 
 
 def parse_args() -> argparse.Namespace:

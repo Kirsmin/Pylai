@@ -70,11 +70,23 @@ jobs:
           # 发布物是可直接执行的 zipapp，且不再产出 .py 兼容启动器。
           test ! -e /tmp/managepylai-dist/ManagePylai.py
           python3 - <<'PY'
+          import re
           import zipfile
-          from pathlib import Path
-          names = set(zipfile.ZipFile('/tmp/managepylai-dist/ManagePylai.pyz').namelist())
+          pyz = '/tmp/managepylai-dist/ManagePylai.pyz'
+          names = set(zipfile.ZipFile(pyz).namelist())
           expected = {'__main__.py', 'core.py', 'install.py', 'editor.py', 'services.py', 'cli.py'}
           assert names == expected, f'unexpected zipapp members: {sorted(names)}'
+          # v0.1.25 自更新器在 zipapp 内按旧模块名查找顶层版本号，必须仍能读到。
+          with zipfile.ZipFile(pyz) as zf:
+              for name in ('managepylai_core.py', 'ManagePylai.py', '__main__.py'):
+                  try:
+                      text = zf.read(name).decode('utf-8')
+                  except KeyError:
+                      continue
+                  if re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE):
+                      break
+              else:
+                  raise SystemExit('v0.1.25 legacy self-updater cannot read artifact version')
           PY
 
       - name: Config validate（生产安全配置 + DataProtection KEK）
