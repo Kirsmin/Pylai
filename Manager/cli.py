@@ -33,7 +33,7 @@ from string import Template
 from typing import Any, Literal, Self, TypeVar
 from urllib.parse import urlparse
 
-from managepylai_core import (
+from core import (
     AppContext,
     HOME,
     ManageError,
@@ -46,8 +46,8 @@ from managepylai_core import (
     service_action,
     uninstall,
 )
-from managepylai_install import InstallService, UpdateService
-from managepylai_services import BackupService, ConfigService, SecurityService, SettingsService, UserService
+from install import InstallService, UpdateService
+from services import BackupService, ConfigService, SecurityService, SettingsService, UserService
 
 class InteractiveMenu:
     """轻量交互菜单。
@@ -411,7 +411,7 @@ def cmd_user(ctx: AppContext, args: argparse.Namespace) -> None:
 # ============================================================================
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="ManagePylai.py",
+        prog="ManagePylai.pyz",
         description="Pylai Docker Compose 部署管理工具",
     )
 

@@ -102,7 +102,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.25"
+__version__ = "0.1.26"
 
 
 class ManageError(Exception):
@@ -116,27 +116,19 @@ class UnsupportedArchitectureError(ManageError):
 def manager_entry_path() -> Path:
     """返回用户实际执行的管理器入口，而不是当前模块文件。
 
-    源码模式下是仓库根目录的 ManagePylai.py；单文件发布模式下是
-    下载得到的兼容启动器；直接运行 .pyz 时则是 .pyz 本身。
+    发布模式下是下载得到的 ManagePylai.pyz；源码模式下是
+    ``Manager/__main__.py``（此时自更新会被拒绝）。
     """
     return Path(sys.argv[0]).expanduser().resolve()
 
 
 def manager_artifact_version(path: Path) -> str | None:
-    """读取管理器发布物声明的版本，同时兼容文本启动器和纯 zipapp。"""
+    """读取 ManagePylai.pyz 内声明的版本。"""
     version_re = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        text = ""
-
-    if text and (match := version_re.search(text)):
-        return match.group(1)
-
-    try:
         with zipfile.ZipFile(path) as archive:
-            for name in ("managepylai_core.py", "ManagePylai.py", "__main__.py"):
+            for name in ("core.py", "__main__.py"):
                 try:
                     candidate = archive.read(name).decode("utf-8")
                 except (KeyError, UnicodeDecodeError):
@@ -1635,10 +1627,10 @@ class PylaiConfig:
 
         raise ManageError(
             "镜像未提供 pylai.template.toml（新版镜像必需，Dockerfile 需包含 COPY OS/pylai.template.toml）。\n"
-            "原因：当前 ManagePylai.py 为新版（template 主路径），但加载的镜像为旧版构建（仅含 pylai.example.toml）。\n"
+            "原因：当前管理工具为新版（template 主路径），但加载的镜像为旧版构建（仅含 pylai.example.toml）。\n"
             "解决：\n"
             "  1) 推荐：重新构建/下载最新镜像（构建后 docker run --rm --entrypoint cat <image> /opt/pylai/pylai.template.toml 应存在），再执行安装；\n"
-            "  2) 临时兼容：python3 ManagePylai.py install --compat  （或 --compat 与 --config-file/--env-file 组合）将回退到 example 渲染；\n"
+            "  2) 临时兼容：python3 ManagePylai.pyz install --compat  （或 --compat 与 --config-file/--env-file 组合）将回退到 example 渲染；\n"
             f"  当前镜像: {image}\n"
             "  验证命令: docker run --rm --entrypoint ls <image> /opt/pylai/  应同时列出 pylai.template.toml 与 pylai.example.toml"
         )
@@ -2749,7 +2741,13 @@ class SelfUpdater:
             if not ask_bool("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
                 return False
 
-        asset_name = "ManagePylai.pyz" if self.script_path.suffix.lower() == ".pyz" else "ManagePylai.py"
+        if self.script_path.suffix.lower() != ".pyz":
+            raise ManageError(
+                "当前不是发布物（源码模式或旧版 ManagePylai.py）。"
+                "请从 Release 下载 ManagePylai.pyz 后运行。"
+            )
+
+        asset_name = "ManagePylai.pyz"
         new_script = self.script_path.with_name(f".{self.script_path.name}.new")
         sha256_file = self.script_path.with_name(f".{self.script_path.name}.sha256")
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""同步 ConfigEditor/ 权威源码到 managepylai_editor.py。
+"""同步 ConfigEditor/ 权威源码到 Manager/editor.py。
 
-源码拆分后，配置编辑器不再内嵌于 ManagePylai.py 入口；发布构建器会把
-managepylai_editor.py 一并打入 zipapp。同步算法保持与旧版一致：
+源码拆分后，配置编辑器不再内嵌于入口；发布构建器会把 Manager/editor.py
+一并打入 ManagePylai.pyz。同步算法保持与旧版一致：
 server_code.py 覆盖 ``def find_free_port`` 到 ``CONFIG_EDITOR_HTML`` 之前，
 index.html 覆盖 raw triple-quoted HTML 内容。
 """
@@ -14,7 +14,7 @@ import py_compile
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TARGET = ROOT / "managepylai_editor.py"
+TARGET = ROOT / "Manager" / "editor.py"
 SERVER_SRC = ROOT / "ConfigEditor" / "server_code.py"
 HTML_SRC = ROOT / "ConfigEditor" / "index.html"
 
@@ -23,14 +23,14 @@ HTML_START_MARK = 'CONFIG_EDITOR_HTML = r"""'
 
 
 def build_updated(target_text: str, server_text: str, html_text: str) -> str:
-    """按稳定标记重建 managepylai_editor.py 的内嵌区。"""
+    """按稳定标记重建 Manager/editor.py 的内嵌区。"""
     if SERVER_START_MARK not in target_text:
         raise SystemExit(
-            f"错误：managepylai_editor.py 中未找到 server 起始标记 {SERVER_START_MARK!r}"
+            f"错误：Manager/editor.py 中未找到 server 起始标记 {SERVER_START_MARK!r}"
         )
     if HTML_START_MARK not in target_text:
         raise SystemExit(
-            f"错误：managepylai_editor.py 中未找到 HTML 起始标记 {HTML_START_MARK!r}"
+            f"错误：Manager/editor.py 中未找到 HTML 起始标记 {HTML_START_MARK!r}"
         )
 
     server_start = target_text.index(SERVER_START_MARK)
@@ -61,7 +61,7 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="仅检查 ConfigEditor/ 与 managepylai_editor.py 是否一致，不一致时 exit 1",
+        help="仅检查 ConfigEditor/ 与 Manager/editor.py 是否一致，不一致时 exit 1",
     )
     args = parser.parse_args()
 
@@ -71,12 +71,12 @@ def main() -> int:
     updated = build_updated(target_text, server_text, html_text)
 
     if updated == target_text:
-        print("同步检查通过：ConfigEditor/ 与 managepylai_editor.py 一致。")
+        print("同步检查通过：ConfigEditor/ 与 Manager/editor.py 一致。")
         return 0
 
     if args.check:
         print(
-            "同步检查失败：请运行 python3 scripts/sync_config_editor.py 更新 managepylai_editor.py",
+            "同步检查失败：请运行 python3 scripts/sync_config_editor.py 更新 Manager/editor.py",
             file=sys.stderr,
         )
         return 1

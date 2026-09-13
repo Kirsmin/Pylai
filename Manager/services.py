@@ -33,7 +33,7 @@ from string import Template
 from typing import Any, Literal, Self, TypeVar
 from urllib.parse import urlparse
 
-from managepylai_core import (
+from core import (
     AppContext,
     BACKUP_DIR,
     CONFIG_FILE,
@@ -62,7 +62,7 @@ from managepylai_core import (
     toml_str,
     validate_password_local,
 )
-from managepylai_editor import (
+from editor import (
     ConfigEditorServer,
     EDITOR_CTX,
     find_free_port,

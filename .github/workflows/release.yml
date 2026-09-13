@@ -232,10 +232,9 @@ jobs:
           if-no-files-found: error
 
   # ═════════════════════════════════════════════════════════════════
-  # Job 2: 构建 ManagePylai 单文件发布物
-  #   源码保持多文件；Release 同时产出：
-  #   - ManagePylai.pyz：标准 zipapp
-  #   - ManagePylai.py：UTF-8 兼容启动器，内嵌同一 pyz（v0.1.24 自更新器可直接升级）
+  # Job 2: 构建 ManagePylai.pyz 单文件发布物
+  #   源码位于 Manager/（core/install/editor/services/cli + __main__），
+  #   Release 只产出标准 zipapp ManagePylai.pyz（不再有 ManagePylai.py）。
   # ═════════════════════════════════════════════════════════════════
   manager:
     name: Build ManagePylai bundle
@@ -272,27 +271,25 @@ jobs:
       - name: Build manager artifacts
         run: |
           set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          python3 scripts/check_versions.py --version "${VERSION}"
           python3 scripts/sync_config_editor.py --check
-          python3 build_managepylai.py --check --version "${{ steps.version.outputs.version }}"
-          python3 build_managepylai.py \
-            --version "${{ steps.version.outputs.version }}" \
-            --output-dir dist
+          python3 Manager/build.py --check --version "${VERSION}"
+          python3 Manager/build.py --version "${VERSION}" --output-dir dist
 
-      - name: Verify manager artifacts and legacy updater compatibility
+      - name: Verify manager artifacts
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          test "$(python3 dist/ManagePylai.py --version)" = "ManagePylai.py ${VERSION}"
-          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.py ${VERSION}"
-          python3 dist/ManagePylai.py --help >/dev/null
+          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.pyz ${VERSION}"
           python3 dist/ManagePylai.pyz --help >/dev/null
-          (cd dist && sha256sum -c ManagePylai.py.sha256 && sha256sum -c ManagePylai.pyz.sha256)
+          (cd dist && sha256sum -c ManagePylai.pyz.sha256)
+          test ! -e dist/ManagePylai.py
           python3 - <<'PY'
-          import re
-          from pathlib import Path
-          text = Path('dist/ManagePylai.py').read_text(encoding='utf-8')
-          match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-          assert match, 'v0.1.24 legacy self-updater cannot parse bundled ManagePylai.py'
+          import zipfile
+          names = set(zipfile.ZipFile('dist/ManagePylai.pyz').namelist())
+          expected = {'__main__.py', 'core.py', 'install.py', 'editor.py', 'services.py', 'cli.py'}
+          assert names == expected, f'unexpected zipapp members: {sorted(names)}'
           PY
 
       - name: Upload manager artifacts
@@ -300,8 +297,6 @@ jobs:
         with:
           name: pylai-manager
           path: |
-            dist/ManagePylai.py
-            dist/ManagePylai.py.sha256
             dist/ManagePylai.pyz
             dist/ManagePylai.pyz.sha256
           retention-days: 3
@@ -370,10 +365,43 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          (cd dist && sha256sum -c ManagePylai.py.sha256 && sha256sum -c ManagePylai.pyz.sha256)
-          test "$(python3 dist/ManagePylai.py --version)" = "ManagePylai.py ${VERSION}"
-          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.py ${VERSION}"
+          python3 scripts/check_versions.py --version "${VERSION}"
+          (cd dist && sha256sum -c ManagePylai.pyz.sha256)
+          test "$(python3 dist/ManagePylai.pyz --version)" = "ManagePylai.pyz ${VERSION}"
           test -s dist/release.json
+
+      - name: Generate release notes（提交记录表格）
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            TIP="${TAG}"
+          else
+            TIP="${GITHUB_SHA}"
+          fi
+          PREV="$(git describe --tags --abbrev=0 "${TIP}^" 2>/dev/null || true)"
+          if [[ -n "${PREV}" ]]; then
+            RANGE="${PREV}..${TIP}"
+          else
+            RANGE="${TIP}"
+          fi
+
+          {
+            echo "## Pylai v${VERSION}"
+            echo
+            echo "发布物：\`ManagePylai.pyz\`（管理工具）+ \`Pylai-${VERSION}-Linux-AMD64|ARM64.tar\`（Docker 镜像）。"
+            echo
+            echo "| 提交 | 说明 | 作者 | 日期 |"
+            echo "| --- | --- | --- | --- |"
+            git log --reverse --no-merges --date=short \
+              --pretty=format:'%h%x09%s%x09%an%x09%ad' "${RANGE}" \
+              | awk -F'\t' '{ gsub(/\|/, "\\|", $2); printf "| `%s` | %s | %s | %s |\n", $1, $2, $3, $4 }'
+            echo
+          } > release-notes.md
+          echo "release-notes.md 已生成（${RANGE}），共 $(grep -c '^| `' release-notes.md) 条提交"
 
       - name: Create GitHub Release and upload assets
         env:
@@ -391,23 +419,19 @@ jobs:
             gh release create "${RELEASE_TAG}" \
               dist/*.tar \
               dist/*.tar.sha256 \
-              dist/ManagePylai.py \
-              dist/ManagePylai.py.sha256 \
               dist/ManagePylai.pyz \
               dist/ManagePylai.pyz.sha256 \
               dist/release.json \
               --title "Pylai v${RELEASE_VERSION}" \
-              --generate-notes
+              --notes-file release-notes.md
           else
             gh release create "${RELEASE_TAG}" \
               dist/*.tar \
               dist/*.tar.sha256 \
-              dist/ManagePylai.py \
-              dist/ManagePylai.py.sha256 \
               dist/ManagePylai.pyz \
               dist/ManagePylai.pyz.sha256 \
               dist/release.json \
               --title "Pylai v${RELEASE_VERSION}" \
-              --generate-notes \
+              --notes-file release-notes.md \
               --target "${GITHUB_SHA}"
           fi

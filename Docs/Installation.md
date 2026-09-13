@@ -8,9 +8,9 @@
 
 1. 打开 [Releases](https://github.com/Kirsmin/Pylai/releases)
 
-2. 下载 `ManagePylai.py`
+2. 下载 `ManagePylai.pyz`
 
-3. 运行：`python3 ManagePylai.py`
+3. 运行：`python3 ManagePylai.pyz`
 
 4. 按照提示完成安装。注意选择最新版本，不要选择 0.0.x 版本。安装完成后会自动启动 **配置编辑器**。注意修改以下值：
 
@@ -19,4 +19,4 @@
 - `[Email]`、`[Email.Smtp]`：发件人信息
 
 > [!TIP]
-> 完成安装后可以在 `ManagePylai.py` 完成更新 / 卸载 / 维护等等大部分操作
+> 完成安装后可以在 `ManagePylai.pyz` 完成更新 / 卸载 / 维护等等大部分操作

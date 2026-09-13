@@ -1,9 +1,9 @@
 # Pylai 可选 Docker 部署（单容器形态）
 #
-# 本文件是 ManagePylai.py（docker run 单容器）之外的可选部署方式：
+# 本文件是 ManagePylai.pyz（docker run 单容器）之外的可选部署方式：
 #   docker compose up -d --build
 # app 服务直接构建根目录 Dockerfile（单容器镜像，内含 nginx/redis/postgres/supervisord），
-# 与 ManagePylai.py 安装的 Release 镜像行为一致。生产建议仍以 ManagePylai.py 为主路径。
+# 与 ManagePylai.pyz 安装的 Release 镜像行为一致。生产建议仍以 ManagePylai.pyz 为主路径。
 #
 # 使用前：
 #   1) 准备配置目录并生成 pylai.toml（复制 OS/pylai.example.toml 修改，
@@ -14,7 +14,7 @@
 #      PYLAI_DB_PASSWORD / PYLAI_REDIS_PASSWORD 必须显式提供（无默认值，弱默认值会被
 #      entrypoint Fail Closed 拒绝启动）。
 #
-# 本配置为演示/可选部署：TLS 由主机 Nginx 或云负载均衡负责（ManagePylai.py 可生成主机 Nginx 模板）。
+# 本配置为演示/可选部署：TLS 由主机 Nginx 或云负载均衡负责（ManagePylai.pyz 可生成主机 Nginx 模板）。
 
 services:
   app:

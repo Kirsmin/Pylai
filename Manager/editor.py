@@ -33,7 +33,7 @@ from string import Template
 from typing import Any, Literal, Self, TypeVar
 from urllib.parse import urlparse
 
-from managepylai_core import (
+from core import (
     CONFIG_FILE,
     Json,
     ManageError,

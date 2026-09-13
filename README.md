@@ -8,9 +8,9 @@ _✨简单单机 Docker 部署的 OAuth2（客户端/服务端）/OIDC 用户系
 
 1. 安装 `Docker`
 
-2. 在发布页下载最新的 ManagePylai.py 和 tar 文件，放在同一目录
+2. 在发布页下载最新的 ManagePylai.pyz 和 tar 文件，放在同一目录
 
-3. 执行 `python ManagePylai.py`，按照提示操作即可
+3. 执行 `python ManagePylai.pyz`，按照提示操作即可
 
 ## 开发 / 调试
 > [!TIP]

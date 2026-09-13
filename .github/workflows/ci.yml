@@ -37,44 +37,44 @@ jobs:
         working-directory: OS
         run: dotnet build Pylaios.csproj -c Release
 
-      - name: ManagePylai 源码边界与 ConfigEditor 同步检查
+      - name: ManagePylai 源码边界、版本对齐与 ConfigEditor 同步检查
         run: |
           set -euo pipefail
           python3 -m py_compile \
-            ManagePylai.py build_managepylai.py managepylai_*.py \
-            ConfigEditor/server_code.py scripts/sync_config_editor.py scripts/release.py
+            Manager/*.py ConfigEditor/server_code.py scripts/*.py
           python3 scripts/sync_config_editor.py --check
-          python3 build_managepylai.py --check
+          python3 scripts/check_versions.py
+          python3 Manager/build.py --check
 
-          # 入口必须保持轻量；大逻辑只允许存在于拆分模块。
-          test "$(wc -c < ManagePylai.py)" -lt 4096
+          # 根目录只保留 start-dev.py（废弃工具）；管理工具源码全在 Manager/，
+          # 旧入口 ManagePylai.py 与旧构建器 build_managepylai.py 不再存在。
+          test "$(ls ./*.py)" = "./start-dev.py"
 
-      - name: ManagePylai 单文件发布兼容测试
+      - name: ManagePylai.pyz 发布物构建与校验
         run: |
           set -euo pipefail
           rm -rf /tmp/managepylai-dist
-          python3 build_managepylai.py --output-dir /tmp/managepylai-dist
+          python3 Manager/build.py --output-dir /tmp/managepylai-dist
 
           SOURCE_VERSION=$(python3 - <<'PY'
           import re
           from pathlib import Path
-          text = Path('ManagePylai.py').read_text(encoding='utf-8')
+          text = Path('Manager/core.py').read_text(encoding='utf-8')
           print(re.search(r'^__version__\s*=\s*["\']([^"\']+)', text, re.M).group(1))
           PY
           )
-          test "$(python3 /tmp/managepylai-dist/ManagePylai.py --version)" = "ManagePylai.py ${SOURCE_VERSION}"
-          test "$(python3 /tmp/managepylai-dist/ManagePylai.pyz --version)" = "ManagePylai.py ${SOURCE_VERSION}"
-          python3 /tmp/managepylai-dist/ManagePylai.py --help >/dev/null
+          test "$(python3 /tmp/managepylai-dist/ManagePylai.pyz --version)" = "ManagePylai.pyz ${SOURCE_VERSION}"
           python3 /tmp/managepylai-dist/ManagePylai.pyz --help >/dev/null
+          (cd /tmp/managepylai-dist && sha256sum -c ManagePylai.pyz.sha256)
 
-          # v0.1.24 自更新器会把新 ManagePylai.py 当 UTF-8 文本读取并抓取版本号。
+          # 发布物是可直接执行的 zipapp，且不再产出 .py 兼容启动器。
+          test ! -e /tmp/managepylai-dist/ManagePylai.py
           python3 - <<'PY'
-          import re
+          import zipfile
           from pathlib import Path
-          p = Path('/tmp/managepylai-dist/ManagePylai.py')
-          text = p.read_text(encoding='utf-8')
-          m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-          assert m, 'legacy self-updater cannot read release artifact version'
+          names = set(zipfile.ZipFile('/tmp/managepylai-dist/ManagePylai.pyz').namelist())
+          expected = {'__main__.py', 'core.py', 'install.py', 'editor.py', 'services.py', 'cli.py'}
+          assert names == expected, f'unexpected zipapp members: {sorted(names)}'
           PY
 
       - name: Config validate（生产安全配置 + DataProtection KEK）

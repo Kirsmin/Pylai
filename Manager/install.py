@@ -33,7 +33,7 @@ from string import Template
 from typing import Any, Literal, Self, TypeVar
 from urllib.parse import urlparse
 
-from managepylai_core import (
+from core import (
     AppContext,
     CONFIG_DIR,
     CONFIG_FILE,
@@ -587,7 +587,7 @@ class InstallService:
 
     def _run_web_editor(self) -> None:
         """启动网页编辑器并等待用户完成。"""
-        from managepylai_editor import (
+        from editor import (
             ConfigEditorServer,
             EDITOR_CTX,
             find_free_port,
@@ -889,7 +889,7 @@ class UpdateService:
         yes: bool = False,
         dry_run: bool = False,
     ) -> None:
-        """云端更新的强制前置步骤：先把 ManagePylai.py 更新到目标 Release。
+        """云端更新的强制前置步骤：先把 ManagePylai.pyz 更新到目标 Release。
 
         目标版本高于当前管理工具时，成功替换后会 os.execv 重新执行新版脚本，
         并携带同一后端更新参数继续执行；失败则 Fail Closed，不触碰后端。
@@ -900,7 +900,7 @@ class UpdateService:
 
         out(
             f"==> 云端更新前置：目标 Pylai v{target_version} 高于管理工具 v{__version__}，"
-            "先更新 ManagePylai.py。"
+            "先更新 ManagePylai.pyz。"
         )
         client = ReleaseClient(self.ctx.manager)
         updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
@@ -914,7 +914,7 @@ class UpdateService:
             return
         # 正常成功路径会在 updater.update 内 os.execv，不会走到这里。
         raise ManageError(
-            "云端更新要求先更新 ManagePylai.py；管理工具未能更新，后端保持不变。"
+            "云端更新要求先更新 ManagePylai.pyz；管理工具未能更新，后端保持不变。"
         )
 
     def update_cli(self, args: argparse.Namespace) -> None:
@@ -1019,7 +1019,7 @@ class UpdateService:
 
         if result := updater.check():
             version, info = result
-            out(f"最新 ManagePylai.py 版本: {version}")
+            out(f"最新 ManagePylai.pyz 版本: {version}")
             if "dbSchemaVersion" in info:
                 out(f"  dbSchemaVersion: {info['dbSchemaVersion']}")
         else:
@@ -1106,7 +1106,7 @@ class UpdateService:
             if ctx.docker.service_running():
                 out("==> 自动备份数据库...")
                 try:
-                    from managepylai_services import BackupService
+                    from services import BackupService
                     BackupService(ctx).export()
                 except ManageError as exc:
                     out(f"[警告] 自动备份失败，已跳过（{exc}）。建议更新完成后立即手动备份。")
@@ -1162,11 +1162,11 @@ class UpdateService:
         raise ManageError(
             f"PostgreSQL 数据目录跨大版本不兼容（当前 {old.group(1)}，目标 {new_image}），无法直接更新。\n"
             "迁移步骤：\n"
-            "  1) 确保当前后端 pg_dump 与数据库同版本后执行 `ManagePylai.py backup create` 备份数据；\n"
+            "  1) 确保当前后端 pg_dump 与数据库同版本后执行 `ManagePylai.pyz backup create` 备份数据；\n"
             "  2) `docker volume rm pylai_pgdata` 删除旧数据目录（数据已备份）；\n"
-            "  3) 重新执行 `ManagePylai.py update --force-pg-upgrade`（新库将全新初始化）；\n"
-            "  4) `ManagePylai.py backup restore <备份名>` 恢复数据。\n"
-            "数据可丢弃时，可直接执行 `ManagePylai.py update --force-pg-upgrade`。"
+            "  3) 重新执行 `ManagePylai.pyz update --force-pg-upgrade`（新库将全新初始化）；\n"
+            "  4) `ManagePylai.pyz backup restore <备份名>` 恢复数据。\n"
+            "数据可丢弃时，可直接执行 `ManagePylai.pyz update --force-pg-upgrade`。"
         )
 
     def preflight_config(self, image: str) -> None:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 废弃的工具
 """Pylai 开发实例启动器。
 
 流程：代码哈希比对 → 必要时重建镜像 → 启动 loopback 容器 → 等待就绪 →

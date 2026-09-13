@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST_DIR = ROOT / "dist"
-MANAGER_BUILDER = ROOT / "build_managepylai.py"
+MANAGER_BUILDER = ROOT / "Manager" / "build.py"
 MIGRATIONS_DIR = ROOT / "OS" / "Features" / "Database" / "Migrations"
 TARGETS = {
     "linux-amd64": {"platform": "linux/amd64", "os": "Linux", "arch": "AMD64"},
@@ -159,20 +158,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def sync_config_editor() -> None:
-    """构建前同步 ConfigEditor/ 权威源码到 managepylai_editor.py。"""
+    """构建前同步 ConfigEditor/ 权威源码到 Manager/editor.py。"""
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "sync_config_editor.py")],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"同步 ConfigEditor 到 managepylai_editor.py 失败:\n{result.stderr or result.stdout}")
+        raise SystemExit(f"同步 ConfigEditor 到 Manager/editor.py 失败:\n{result.stderr or result.stdout}")
     print(result.stdout.strip())
 
 
 MANAGER_ASSETS = (
-    "ManagePylai.py",
-    "ManagePylai.py.sha256",
     "ManagePylai.pyz",
     "ManagePylai.pyz.sha256",
 )
@@ -193,12 +190,12 @@ def check_manager_source_version(version: str) -> None:
 
 
 def verify_manager_artifacts(version: str) -> None:
-    """Fail Closed 校验 .py/.pyz、版本声明与对应 SHA256。"""
+    """Fail Closed 校验 .pyz、版本声明与对应 SHA256。"""
     missing = [name for name in MANAGER_ASSETS if not (DIST_DIR / name).is_file()]
     if missing:
         raise SystemExit(f"管理工具产物缺失: {', '.join(missing)}")
 
-    for asset in ("ManagePylai.py", "ManagePylai.pyz"):
+    for asset in ("ManagePylai.pyz",):
         path = DIST_DIR / asset
         checksum_path = DIST_DIR / f"{asset}.sha256"
         content = checksum_path.read_text(encoding="ascii").strip()
@@ -214,21 +211,11 @@ def verify_manager_artifacts(version: str) -> None:
             capture_output=True,
             text=True,
         )
-        expected_output = f"ManagePylai.py {version}"
+        expected_output = f"ManagePylai.pyz {version}"
         if result.returncode != 0 or result.stdout.strip() != expected_output:
             raise SystemExit(
                 f"{asset} 版本校验失败: {result.stdout.strip() or result.stderr.strip()}"
             )
-
-    # v0.1.24 的既有自更新器会按 UTF-8 文本读取 ManagePylai.py 并抓取顶层版本。
-    launcher = (DIST_DIR / "ManagePylai.py").read_text(encoding="utf-8")
-    declared = re.search(
-        r'^__version__\s*=\s*["\']([^"\']+)["\']',
-        launcher,
-        re.MULTILINE,
-    )
-    if not declared or normalize_version(declared.group(1)) != version:
-        raise SystemExit("ManagePylai.py 不兼容 v0.1.24 自更新器的文本版本检查")
 
 
 def ensure_manager_artifacts(version: str) -> None:
@@ -261,7 +248,7 @@ def main() -> int:
     if not (ROOT / "Dockerfile").is_file():
         raise SystemExit("找不到 Dockerfile")
     if not MANAGER_BUILDER.is_file():
-        raise SystemExit("找不到 build_managepylai.py")
+        raise SystemExit("找不到 Manager/build.py")
 
     sync_config_editor()
     check_manager_source_version(version)
@@ -308,8 +295,7 @@ def main() -> int:
             }
             for _, target in selected
         ],
-        "manager": "ManagePylai.py",
-        "managerPyz": "ManagePylai.pyz",
+        "manager": "ManagePylai.pyz",
         "dbSchemaVersion": read_db_schema_version(),
         "builtAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -319,8 +305,6 @@ def main() -> int:
     for output in outputs:
         print(f"  - {output.name}")
         print(f"  - {output.name}.sha256")
-    print("  - ManagePylai.py")
-    print("  - ManagePylai.py.sha256")
     print("  - ManagePylai.pyz")
     print("  - ManagePylai.pyz.sha256")
     print("  - release.json")
