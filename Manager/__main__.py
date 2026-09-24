@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-__version__ = "0.1.29"
+__version__ = "0.1.30"
 
 from core import __version__ as _runtime_version
 from cli import main

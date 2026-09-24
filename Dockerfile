@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 
-ARG PYLAI_VERSION=0.1.29
+ARG PYLAI_VERSION=0.1.30
 ARG PYLAI_DB_SCHEMA=dev
 
 FROM node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS ui
@@ -29,14 +29,36 @@ RUN dotnet publish Pylaios.csproj -c Release -o /app \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0.11 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg lsb-release \
-    && echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        postgresql-18 redis-server nginx supervisor openssl python3 \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt_update() { \
+        rm -rf /var/lib/apt/lists/*; \
+        apt-get -o Acquire::Retries=3 update; \
+    }; \
+    apt_install() { \
+        apt-get -o Acquire::Retries=3 install -y --no-install-recommends "$@"; \
+    }; \
+    apt_install_with_refresh() { \
+        attempt=1; \
+        while true; do \
+            apt_update; \
+            if apt_install "$@"; then \
+                return 0; \
+            fi; \
+            if [ "$attempt" -ge 3 ]; then \
+                return 1; \
+            fi; \
+            attempt=$((attempt + 1)); \
+            echo "APT install failed; refreshing indexes and retrying (${attempt}/3)..."; \
+            sleep 5; \
+        done; \
+    }; \
+    apt_install_with_refresh ca-certificates curl gnupg lsb-release; \
+    echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg; \
+    apt_install_with_refresh postgresql-18 redis-server nginx supervisor openssl python3; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=ui /ui/dist /opt/pylai/ui
 COPY --from=admin-ui /adminui/dist /opt/pylai/adminui
