@@ -336,6 +336,7 @@ public static class AppServices
         services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         services.AddScoped<EmailSender>();
         services.AddScoped<IUserAccessRevoker, UserAccessRevoker>();
+        services.AddScoped<IUserHardDeleter, UserHardDeleter>();
         return services;
     }
 

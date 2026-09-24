@@ -9,11 +9,13 @@ public sealed class UserCommands
 {
     private readonly CliCommandContext _ctx;
     private readonly IUserAccessRevoker _userAccessRevoker;
+    private readonly IUserHardDeleter _userHardDeleter;
 
-    public UserCommands(CliCommandContext ctx, IUserAccessRevoker userAccessRevoker)
+    public UserCommands(CliCommandContext ctx, IUserAccessRevoker userAccessRevoker, IUserHardDeleter userHardDeleter)
     {
         _ctx = ctx;
         _userAccessRevoker = userAccessRevoker;
+        _userHardDeleter = userHardDeleter;
     }
 
     [Command("list", Description = "用户列表（可按组/状态过滤、分页）")]
@@ -189,6 +191,22 @@ public sealed class UserCommands
             userId: user.Uid.ToString(), userEmail: user.Email);
 
         return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name}（uid:{user.Uid}）已删除。" });
+    }
+
+    [Command("hard-delete", Description = "硬删除用户（物理删除全部数据，不可恢复，用户名与邮箱立即释放）")]
+    public async Task<int> HardDeleteAsync([Argument("uid|name|email")] string target)
+    {
+        var user = await CliHelpers.FindUserAsync(_ctx, target);
+        if (user is null)
+            return await CliHelpers.ErrorAsync($"用户不存在: {target}");
+
+        await _userHardDeleter.HardDeleteAsync(user.Uid);
+
+        await CliHelpers.LogAsync(_ctx, "cli:user hard-delete", true,
+            $"CLI hard-deleted user {user.Name} (uid:{user.Uid})",
+            userId: user.Uid.ToString(), userEmail: user.Email);
+
+        return await CliHelpers.OkAsync(new { success = true, message = $"用户 {user.Name}（uid:{user.Uid}）已硬删除，数据不可恢复，用户名与邮箱已释放。" });
     }
 
     [Command("revoke-sessions", Description = "强制吊销用户全部活跃会话")]

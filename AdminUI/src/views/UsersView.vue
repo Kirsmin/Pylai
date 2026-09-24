@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useDialog, useMessage } from 'naive-ui'
+import { useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import PageHeader from '@/components/PageHeader.vue'
 import AppPagination from '@/components/AppPagination.vue'
@@ -10,7 +10,6 @@ import type { AdminUserDetail, AdminUserListItem, AdminUserSession, AdminUserTok
 
 const authStore = useAuthStore()
 const message = useMessage()
-const dialog = useDialog()
 
 const users = ref<AdminUserListItem[]>([])
 const total = ref(0)
@@ -212,6 +211,40 @@ async function revokeToken(uid: string) {
   } catch (err) { message.error(err instanceof Error ? err.message : '吊销失败') }
 }
 
+// Delete（二级界面：先选择软/硬删除，再确认执行）
+const deleteVisible = ref(false)
+const deleteStep = ref<1 | 2>(1)
+const deleteTarget = ref<AdminUserListItem | null>(null)
+const deleteMode = ref<'soft' | 'hard'>('soft')
+const deleteSaving = ref(false)
+const canHardDelete = computed(() => endpointAllowed('DELETE', '/api/admin/users/{uid}/hard'))
+const targetDeleted = computed(() => (deleteTarget.value?.status ?? '').toLowerCase() === 'deleted')
+
+function openDelete(user: AdminUserListItem) {
+  deleteTarget.value = user
+  deleteMode.value = 'soft'
+  deleteStep.value = 1
+  deleteVisible.value = true
+}
+async function confirmDelete() {
+  const user = deleteTarget.value
+  if (!user) return
+  deleteSaving.value = true
+  try {
+    const path = deleteMode.value === 'hard'
+      ? `/api/admin/users/${encodeURIComponent(user.uid)}/hard`
+      : `/api/admin/users/${encodeURIComponent(user.uid)}`
+    // 硬删除需要 MFA（TOTP/Passkey）：后端返回 mfa_step_up_required 时由全局 Step-up 弹窗接管并重放
+    await authStore.request(path, { method: 'DELETE' })
+    message.success(deleteMode.value === 'hard' ? `用户 ${user.name} 已硬删除，用户名与邮箱已释放` : `用户 ${user.name} 已软删除，可随时重新启用`)
+    deleteVisible.value = false
+    if (detailVisible.value) detailVisible.value = false
+    load()
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : '删除失败')
+  } finally { deleteSaving.value = false }
+}
+
 function moreOptions(user: AdminUserListItem) {
   const opts: Array<{ label: string; key: string }> = []
   if (endpointAllowed('POST', '/api/admin/users/{uid}/reset-password')) opts.push({ label: '重置密码', key: 'password' })
@@ -225,16 +258,7 @@ function handleMore(key: string | number, user: AdminUserListItem) {
   if (a === 'password') openPassword(user)
   else if (a === 'sessions') openSessions(user)
   else if (a === 'token') openToken(user)
-  else if (a === 'delete') dialog.warning({
-    title: '删除用户', content: `软删除 ${user.name} 并吊销其会话/Token？`,
-    positiveText: '删除', negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await authStore.request(`/api/admin/users/${encodeURIComponent(user.uid)}`, { method: 'DELETE' })
-        message.success('用户已删除'); if (detailVisible.value) detailVisible.value = false; load()
-      } catch (err) { message.error(err instanceof Error ? err.message : '删除失败') }
-    }
-  })
+  else if (a === 'delete') openDelete(user)
 }
 </script>
 
@@ -450,6 +474,56 @@ function handleMore(key: string | number, user: AdminUserListItem) {
         </div>
       </template>
     </NModal>
+
+    <!-- Delete（二级界面：选择删除方式 → 确认执行） -->
+    <NModal
+      v-model:show="deleteVisible"
+      preset="card"
+      style="width:min(calc(100vw - 24px),540px)"
+      :title="deleteStep === 1 ? '删除用户' : (deleteMode === 'hard' ? '确认硬删除' : '确认软删除')"
+    >
+      <div v-if="deleteTarget" class="admin-form-stack">
+        <div class="admin-line-card" style="display:flex;flex-direction:column;gap:2px;">
+          <strong>{{ deleteTarget.displayName || deleteTarget.name }}</strong>
+          <span class="mono small muted">{{ deleteTarget.name }}<template v-if="deleteTarget.email"> · {{ deleteTarget.email }}</template></span>
+        </div>
+
+        <template v-if="deleteStep === 1">
+          <NRadioGroup v-model:value="deleteMode" style="display:flex;flex-direction:column;gap:12px;">
+            <NRadio value="soft" :disabled="targetDeleted">
+              <div><strong>软删除（可恢复）</strong></div>
+              <div class="muted small">标记为 Deleted 并吊销全部会话与 Token；之后可随时「启用」恢复。无需 MFA 验证。</div>
+            </NRadio>
+            <NRadio v-if="canHardDelete" value="hard">
+              <div><strong>硬删除（不可恢复）</strong></div>
+              <div class="muted small">物理删除账号全部数据，无法恢复；用户名与邮箱立即释放，可被其他人注册。需要 MFA（TOTP/Passkey）验证。</div>
+            </NRadio>
+          </NRadioGroup>
+          <p v-if="targetDeleted" class="muted small modal-note">该账号已处于软删除状态：可「启用」恢复，或直接硬删除以彻底释放用户名与邮箱。</p>
+          <div class="modal-actions">
+            <NButton quaternary @click="deleteVisible = false">取消</NButton>
+            <NButton type="primary" :disabled="targetDeleted && deleteMode === 'soft'" @click="deleteStep = 2">下一步</NButton>
+          </div>
+        </template>
+
+        <template v-else>
+          <p v-if="deleteMode === 'soft'" class="modal-note">
+            确认软删除 <strong>{{ deleteTarget.name }}</strong>？其全部会话与 Token 将被吊销，之后可随时重新「启用」。
+          </p>
+          <div v-else class="delete-hard-warning">
+            <p><strong>此操作不可恢复。</strong></p>
+            <p>账号 <strong>{{ deleteTarget.name }}</strong>（{{ deleteTarget.email || '无邮箱' }}）的全部数据——会话、UserToken、MFA 设置、外部登录绑定与 OAuth 授权——将被物理删除，其用户名与邮箱会立即释放，可被其他人注册。</p>
+            <p class="muted small">点击确认后将要求完成 MFA（TOTP/Passkey）验证。</p>
+          </div>
+          <div class="modal-actions">
+            <NButton quaternary :disabled="deleteSaving" @click="deleteStep = 1">返回</NButton>
+            <NButton :type="deleteMode === 'hard' ? 'error' : 'warning'" :loading="deleteSaving" @click="confirmDelete">
+              {{ deleteMode === 'hard' ? '确认硬删除' : '确认软删除' }}
+            </NButton>
+          </div>
+        </template>
+      </div>
+    </NModal>
   </section>
 </template>
 
@@ -460,6 +534,8 @@ function handleMore(key: string | number, user: AdminUserListItem) {
 .modal-action-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 2px; }
 .modal-note { margin: 0; }
+.delete-hard-warning { border: 1px solid rgba(208, 48, 80, .35); background: rgba(208, 48, 80, .08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.delete-hard-warning p { margin: 0; }
 @media (max-width: 780px) { .user-filter-grid { grid-template-columns: 1fr 1fr; } .user-search-filter { grid-column: 1 / -1; } }
 @media (max-width: 520px) { .user-filter-grid { grid-template-columns: 1fr; } .user-search-filter { grid-column: auto; } }
 </style>

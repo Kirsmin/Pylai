@@ -218,7 +218,8 @@ class InteractiveMenu:
                 ("用户列表", users.list_users),
                 ("查看用户详情", users.show_user),
                 ("创建用户", lambda: users.create_user(interactive=True)),
-                ("删除用户", users.delete_user),
+                ("软删除用户", users.delete_user),
+                ("硬删除用户（不可恢复）", users.hard_delete_user),
                 ("修改用户密码", users.reset_password),
                 ("移除 TOTP 认证器", users.remove_totp),
                 ("设置用户组", lambda: users.set_group(interactive=True)),
@@ -403,6 +404,8 @@ def cmd_user(ctx: AppContext, args: argparse.Namespace) -> None:
             )
         case "delete":
             service.delete_user(args.target, assume_yes=args.yes)
+        case "hard-delete":
+            service.hard_delete_user(args.target, assume_yes=args.yes)
         case "set-group":
             service.set_group(args.target, args.group, interactive=False)
         case "set-status":
@@ -551,8 +554,11 @@ def build_parser() -> argparse.ArgumentParser:
     create_p.add_argument("--name", help="登录名")
     create_p.add_argument("--group", choices=["normal", "admin", "max"], help="用户组")
 
-    delete_p = user_sub.add_parser("delete", help="删除用户")
+    delete_p = user_sub.add_parser("delete", help="软删除用户（可重新启用）")
     delete_p.add_argument("target", nargs="?")
+
+    hard_delete_p = user_sub.add_parser("hard-delete", help="硬删除用户（不可恢复，释放用户名/邮箱）")
+    hard_delete_p.add_argument("target", nargs="?")
 
     set_group_p = user_sub.add_parser("set-group", help="设置用户组")
     set_group_p.add_argument("target", nargs="?")

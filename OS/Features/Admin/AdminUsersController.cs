@@ -16,6 +16,7 @@ public class AdminUsersController : ControllerBase
     private readonly IPasswordHasher<User> _passwordHasher;
     private readonly IUserTokenService _userTokenService;
     private readonly IUserAccessRevoker _userAccessRevoker;
+    private readonly IUserHardDeleter _userHardDeleter;
     private readonly IMfaService _mfa;
     private readonly IRedisStateCache _stateCache;
     private readonly IAuditService _auditService;
@@ -28,6 +29,7 @@ public class AdminUsersController : ControllerBase
         IPasswordHasher<User> passwordHasher,
         IUserTokenService userTokenService,
         IUserAccessRevoker userAccessRevoker,
+        IUserHardDeleter userHardDeleter,
         IMfaService mfa,
         IRedisStateCache stateCache,
         IAuditService auditService,
@@ -39,6 +41,7 @@ public class AdminUsersController : ControllerBase
         _passwordHasher = passwordHasher;
         _userTokenService = userTokenService;
         _userAccessRevoker = userAccessRevoker;
+        _userHardDeleter = userHardDeleter;
         _mfa = mfa;
         _stateCache = stateCache;
         _auditService = auditService;
@@ -416,9 +419,7 @@ public class AdminUsersController : ControllerBase
         if (target.Status == UserStatus.Deleted)
             return NotFound(new ApiResponse { Success = false, Error = "用户不存在。", ErrorCode = "not_found" });
 
-        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
-        if (stepUp is not null) return stepUp;
-
+        // 软删除不要求 MFA step-up（可随时重新启用恢复）；硬删除才需要
         target.Status = UserStatus.Deleted;
         await _userAccessRevoker.RevokeUserAccessAsync(target.Uid);
 
@@ -426,6 +427,33 @@ public class AdminUsersController : ControllerBase
             target.Uid.ToString(), target.Email, true, $"Admin API deleted user {target.Name}");
 
         _logger.LogInformation("管理员删除用户 | uid:{Uid} | 用户:{Name}", target.Uid, target.Name);
+
+        return Ok(new ApiResponse { Success = true });
+    }
+
+    [HttpDelete("{uid:guid}/hard")]
+    public async Task<IActionResult> HardDelete(Guid uid)
+    {
+        var (current, target, error) = await ResolveTargetAsync(uid);
+        if (error is not null) return error;
+        if (current is null || target is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
+
+        if (target.Uid == current.Uid)
+            return StatusCode(403, new ApiResponse { Success = false, Error = "不能删除自己。", ErrorCode = "forbidden" });
+
+        // 硬删除不可恢复且释放用户名/邮箱，强制 MFA step-up（TOTP/Passkey）
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null) return stepUp;
+
+        var name = target.Name;
+        var email = target.Email;
+        await _userHardDeleter.HardDeleteAsync(target.Uid);
+
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.AdminUserHardDeleted,
+            target.Uid.ToString(), email, true, $"Admin API hard-deleted user {name}");
+
+        _logger.LogInformation("管理员硬删除用户 | uid:{Uid} | 用户:{Name}", target.Uid, name);
 
         return Ok(new ApiResponse { Success = true });
     }

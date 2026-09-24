@@ -79,7 +79,8 @@ public class AdminCapabilitiesController : ControllerBase
                 Endpoint("DELETE", "/api/admin/users/{uid}/sessions/{sessionId}"),
                 Endpoint("GET", "/api/admin/users/{uid}/token"),
                 Endpoint("DELETE", "/api/admin/users/{uid}/token"),
-                Endpoint("DELETE", "/api/admin/users/{uid}")
+                Endpoint("DELETE", "/api/admin/users/{uid}"),
+                Endpoint("DELETE", "/api/admin/users/{uid}/hard")
             ]
         };
         return capability;

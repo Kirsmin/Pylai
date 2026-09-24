@@ -299,12 +299,25 @@ class UserService:
         target = target or ask("要删除的用户标识（uid/用户名/邮箱）")
 
         if not assume_yes and not confirm_danger(
-            f"将软删除用户 {target}，其全部会话将被吊销。"
+            f"将软删除用户 {target}，其全部会话将被吊销，之后可重新启用。"
         ):
             out("已取消。")
             return
 
         data = self.execute("delete", target)
+        out(data.get("message", "未知错误"))
+
+    def hard_delete_user(self, target: str | None = None, *, assume_yes: bool = False) -> None:
+        target = target or ask("要硬删除的用户标识（uid/用户名/邮箱）")
+
+        if not assume_yes and not confirm_danger(
+            f"将硬删除用户 {target}：物理删除全部数据且不可恢复，其用户名与邮箱将被释放，可被其他人注册。",
+            required_word="HARD DELETE",
+        ):
+            out("已取消。")
+            return
+
+        data = self.execute("hard-delete", target)
         out(data.get("message", "未知错误"))
 
     def set_group(
