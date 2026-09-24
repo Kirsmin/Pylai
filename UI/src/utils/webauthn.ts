@@ -45,7 +45,7 @@ export async function getAssertion(options: any) {
     id: credential.id,
     rawId: encode(credential.rawId),
     type: credential.type,
-    clientExtensionResults: credential.clientExtensionResults ?? {},
+    clientExtensionResults: credential.getClientExtensionResults() ?? {},
     response: {
       clientDataJSON: encode(response.clientDataJSON),
       authenticatorData: encode(response.authenticatorData),
@@ -73,7 +73,7 @@ export async function createCredential(options: any) {
     id: credential.id,
     rawId: encode(credential.rawId),
     type: credential.type,
-    clientExtensionResults: credential.clientExtensionResults ?? {},
+    clientExtensionResults: credential.getClientExtensionResults() ?? {},
     response: {
       clientDataJSON: encode(response.clientDataJSON),
       attestationObject: encode(response.attestationObject),
