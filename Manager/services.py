@@ -232,6 +232,8 @@ class UserService:
         out(f"注册时间:    {user.get('registerTime')}")
         out(f"最后登录:    {user.get('lastLoginAt') or '从未登录'}")
         out(f"活跃会话数:  {user.get('activeSessions', 0)}")
+        out(f"TOTP 认证器: {'已绑定' if user.get('totpEnabled') else '未绑定'}")
+        out(f"Passkey:     {user.get('webAuthnCount', 0)} 个")
 
         if user.get("externalLogins"):
             out("外部登录绑定:")
@@ -380,6 +382,31 @@ class UserService:
             out(data.get("message", "密码已重置，该用户全部会话与 token 已吊销。"))
         else:
             out("密码重置失败。")
+
+    def remove_totp(self, target: str | None = None) -> None:
+        target = target or ask("用户标识（uid/用户名/邮箱）")
+
+        data = self.execute("show", target)
+        if not data.get("success"):
+            out("用户不存在或查询失败。")
+            return
+
+        user = data.get("user", {})
+        if not user.get("totpEnabled"):
+            out(f"用户 {user.get('name', target)} 未绑定 TOTP 认证器，无需移除。")
+            return
+
+        passkeys = user.get("webAuthnCount", 0)
+
+        if not confirm_danger(
+            f"将移除用户 {user.get('name')} 已绑定的 TOTP 认证器（Passkey 不受影响），"
+            f"并吊销其全部会话与 token；该账户当前 Passkey 数量为 {passkeys}。"
+        ):
+            out("已取消。")
+            return
+
+        data = self.execute("remove-totp", target)
+        out(data.get("message", "未知错误"))
 
 
 class SecurityService:

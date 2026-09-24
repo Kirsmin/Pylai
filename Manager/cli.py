@@ -220,6 +220,7 @@ class InteractiveMenu:
                 ("创建用户", lambda: users.create_user(interactive=True)),
                 ("删除用户", users.delete_user),
                 ("修改用户密码", users.reset_password),
+                ("移除 TOTP 认证器", users.remove_totp),
                 ("设置用户组", lambda: users.set_group(interactive=True)),
                 ("设置用户状态", lambda: users.set_status(interactive=True)),
                 ("吊销用户全部会话", users.revoke_sessions),
@@ -410,6 +411,8 @@ def cmd_user(ctx: AppContext, args: argparse.Namespace) -> None:
             service.revoke_sessions(args.target)
         case "reset-password":
             service.reset_password(args.target, args.password, privileged=False)
+        case "remove-totp":
+            service.remove_totp(args.target)
         case _:
             raise ManageError("请指定 user 子命令")
 
@@ -565,6 +568,9 @@ def build_parser() -> argparse.ArgumentParser:
     reset_password_p = user_sub.add_parser("reset-password", help="重置密码")
     reset_password_p.add_argument("target", nargs="?")
     reset_password_p.add_argument("--password", help="新密码")
+
+    remove_totp_p = user_sub.add_parser("remove-totp", help="移除用户已绑定的 TOTP 认证器")
+    remove_totp_p.add_argument("target", nargs="?")
 
     return parser
 

@@ -102,7 +102,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.30"
+__version__ = "0.1.31"
 
 
 class ManageError(Exception):

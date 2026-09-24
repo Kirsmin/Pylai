@@ -64,6 +64,8 @@ public sealed class UserCommands
             .ToListAsync();
         var activeSessions = await _ctx.Db.UserSessions
             .CountAsync(s => s.UserUid == user.Uid && s.RevokedAt == null && s.ExpiresAt > DateTimeOffset.UtcNow);
+        var mfa = await _ctx.Db.UserMfaSettings.AsNoTracking().FirstOrDefaultAsync(m => m.UserUid == user.Uid);
+        var webAuthnCount = await _ctx.Db.WebAuthnCredentials.CountAsync(c => c.UserUid == user.Uid);
 
         return await CliHelpers.OkAsync(new
         {
@@ -80,6 +82,8 @@ public sealed class UserCommands
                 lastLoginAt = user.LastLoginAt.HasValue ? user.LastLoginAt.Value.ToString("yyyy-MM-dd HH:mm:ss UTC") : null,
                 lockoutEnd = user.LockoutEnd,
                 activeSessions,
+                totpEnabled = mfa?.TotpEnabled == true && !string.IsNullOrWhiteSpace(mfa.EncryptedTotpSecret),
+                webAuthnCount,
                 externalLogins = logins
             }
         });
@@ -295,6 +299,32 @@ public sealed class UserCommands
             userId: user.Uid.ToString(), userEmail: user.Email);
 
         return await CliHelpers.OkAsync(new { success = true, message = $"已重置用户 {user.Name}（uid:{user.Uid}）的密码。" });
+    }
+
+    [Command("remove-totp", Description = "移除用户已绑定的 TOTP 认证器（吊销全部会话与 token，Passkey 不受影响）")]
+    public async Task<int> RemoveTotpAsync([Argument("uid|name|email")] string target)
+    {
+        var user = await CliHelpers.FindUserAsync(_ctx, target);
+        if (user is null)
+            return await CliHelpers.ErrorAsync($"用户不存在: {target}");
+
+        var settings = await _ctx.Db.UserMfaSettings.FirstOrDefaultAsync(m => m.UserUid == user.Uid);
+        if (settings?.TotpEnabled != true || string.IsNullOrWhiteSpace(settings.EncryptedTotpSecret))
+            return await CliHelpers.ErrorAsync($"用户 {user.Name} 未绑定 TOTP 认证器。");
+
+        settings.TotpEnabled = false;
+        settings.EncryptedTotpSecret = null;
+        settings.LastTotpCounter = null;
+        settings.UpdatedAt = DateTimeOffset.UtcNow;
+        await _ctx.Db.SaveChangesAsync();
+
+        await _userAccessRevoker.RevokeUserAccessAsync(user.Uid);
+
+        await CliHelpers.LogAsync(_ctx, "cli:user remove-totp", true,
+            $"CLI removed TOTP authenticator for {user.Name} (uid:{user.Uid})",
+            userId: user.Uid.ToString(), userEmail: user.Email);
+
+        return await CliHelpers.OkAsync(new { success = true, message = $"已移除用户 {user.Name}（uid:{user.Uid}）的 TOTP 认证器，其全部会话与 token 已吊销。" });
     }
 
     private string GeneratePolicyCompliantPassword()
