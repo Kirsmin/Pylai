@@ -11,6 +11,7 @@
   E. AdminUI BFF CSRF 隔离（Pylaios.AdminCsrf ↔ X-CSRF-Token）
   F. OAuth PKCE 流程完整性：缺 challenge 拒绝、错误 verifier 拒绝、
      正向拿码换 token、Refresh Token 轮换后旧 token 重放拒绝
+  H. GET /api/users 令牌边界：client_credentials 令牌放行、用户令牌与伪造令牌 401
   G. MFA/WebAuthn 边界条件（Fido2 preview 专项回归）：
      TOTP enroll 强制 HTTPS、伪造 transactionId/attestation 拒绝；
      可直连后端时（--backend-url）额外覆盖 TOTP 正向注册 + 登录 step-up + 重放防护
@@ -587,6 +588,83 @@ class Suite:
                    and replayed.get("error") == "invalid_grant",
                    f"旧 refresh token 重放应 invalid_grant，实际 {st} {str(replayed)[:200]}")
 
+    # ---- H. GET /api/users 令牌边界（仅 client_credentials 令牌可用）----
+    def s_users_api_token_scope(self):
+        if not self.client_secret:
+            self.skipped.append("users_api_token_scope(no-client-secret)")
+            return
+        got = self._obtain_user()
+        if got is None:
+            return
+        c = got[0]
+
+        # 正向：client_credentials 换令牌 → 200 + 约定字段
+        st, _, body, _ = c.raw("POST", "/connect/token", form={
+            "grant_type": "client_credentials", "client_id": "pylai-console",
+            "client_secret": self.client_secret,
+            "scope": "openid"})
+        client_tokens = _json(body)
+        if not self.check(st == 200 and isinstance(client_tokens, dict)
+                          and client_tokens.get("access_token"),
+                          f"client_credentials 应换取 access_token，实际 {st} {str(client_tokens)[:200]}"):
+            return
+        client_token = client_tokens["access_token"]
+
+        anon = Client(self.base)
+        st, headers, body, _ = anon.raw("GET", "/api/users",
+                                        extra_headers={"Authorization": f"Bearer {client_token}"})
+        data = _json(body)
+        if not self.check(st == 200 and isinstance(data, dict) and isinstance(data.get("users"), list),
+                          f"client 令牌访问 /api/users 应 200 users 数组，实际 {st} {str(data)[:200]}"):
+            return
+        self.check("success" not in data, "顶层 success 应被 API envelope 移除")
+        if data["users"]:
+            sample = data["users"][0]
+            for field in ("uid", "email", "status", "group", "role", "preferredUsername", "name"):
+                self.check(field in sample, f"/api/users 元素缺字段 {field}: {str(sample)[:200]}")
+            self.check("passwordHash" not in json.dumps(data), "/api/users 不得泄漏 passwordHash")
+
+        # 负向：用户 access token 必须被拒绝（sub 为 Guid）
+        verifier, challenge = pkce_pair()
+        st, headers, _, _ = c.raw("GET", "/connect/authorize?" + urllib.parse.urlencode({
+            "response_type": "code", "client_id": "pylai-console",
+            "redirect_uri": "https://oauthdebugger.com/debug",
+            "scope": "openid profile:basic", "state": "users-api",
+            "nonce": pysecrets.token_hex(8),
+            "code_challenge": challenge, "code_challenge_method": "S256"}))
+        loc = headers.get("Location", "")
+        if not self.check(st in (301, 302) and "requestId=" in loc,
+                          f"users_api authorize 应 302 到 consent，实际 {st} {loc[:160]!r}"):
+            return
+        request_id = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["requestId"][0]
+        st, body, raw = c.post("/api/auth/authorize-request/consent", csrf=True,
+                               payload={"requestId": request_id, "approved": True})
+        if not self.check(st == 200 and body and body.get("redirectUrl"),
+                          f"users_api consent 批准失败 {st} {raw[:160]}"):
+            return
+        st, headers, _, _ = c.raw("GET", body["redirectUrl"])
+        loc = headers.get("Location", "")
+        if not self.check("code=" in loc, f"users_api consent 后应 302 携带 code，实际 {loc[:160]!r}"):
+            return
+        code = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["code"][0]
+        st, _, body, _ = c.raw("POST", "/connect/token", form={
+            "grant_type": "authorization_code", "code": code,
+            "redirect_uri": "https://oauthdebugger.com/debug",
+            "client_id": "pylai-console", "client_secret": self.client_secret,
+            "code_verifier": verifier})
+        user_tokens = _json(body)
+        if not self.check(st == 200 and isinstance(user_tokens, dict) and user_tokens.get("access_token"),
+                          f"users_api 用户令牌签发失败 {st} {str(user_tokens)[:200]}"):
+            return
+        st, _, body, _ = anon.raw("GET", "/api/users",
+                                  extra_headers={"Authorization": f"Bearer {user_tokens['access_token']}"})
+        self.check(st == 401 and (_json(body) or {}).get("errorCode") == "unauthorized",
+                   f"用户令牌访问 /api/users 应 401 unauthorized，实际 {st} {body[:160]}")
+
+        # 负向：伪造令牌 401
+        st, _, _, _ = anon.raw("GET", "/api/users", extra_headers={"Authorization": "Bearer invalid-token"})
+        self.check(st == 401, f"伪造令牌访问 /api/users 应 401，实际 {st}")
+
     # ---- G. MFA/WebAuthn 边界（Fido2 preview 专项）----
     def s_mfa_webauthn_edges(self, candidates: list[tuple[str, str]],
                              backend_url: str | None):
@@ -745,6 +823,7 @@ def main() -> int:
         ("admin_bff_csrf", lambda: suite.s_admin_bff_csrf(
             candidates("ADMIN", "admin@pylaios.local"))),
         ("oauth_pkce", suite.s_oauth_pkce),
+        ("users_api_token_scope", suite.s_users_api_token_scope),
         ("mfa_webauthn_edges", lambda: suite.s_mfa_webauthn_edges(
             candidates("MAX", "max@pylaios.local"), args.backend_url)),
     ]
