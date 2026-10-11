@@ -62,6 +62,12 @@ HOME = Path(os.environ.get("PYLAI_HOME", "~/.pylai")).expanduser()
 STATE_FILE = HOME / "state.json"
 CONFIG_DIR = HOME / "config"
 CONFIG_FILE = CONFIG_DIR / "pylai.toml"
+# Nginx 站点配置必须按「目录」挂进容器：单文件 bind mount 会把 inode 钉死，
+# atomic_write() 换 inode 后运行中的容器仍读旧文件，reload 静默失效。
+NGINX_CONF_DIR = CONFIG_DIR / "nginx.d"
+NGINX_CONF_FILE = NGINX_CONF_DIR / "default.conf"
+NGINX_CONF_IN_CONTAINER = "/etc/nginx/conf.d/default.conf"
+LEGACY_NGINX_CONF_FILE = CONFIG_DIR / "nginx.conf"
 CERT_DIR = CONFIG_DIR / "certs"
 CONTAINER_CONFIG_DIR = "/etc/pylai"
 CONTAINER_CERT_DIR = f"{CONTAINER_CONFIG_DIR}/certs"
@@ -102,7 +108,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.33"
+__version__ = "0.1.34"
 
 
 class ManageError(Exception):
@@ -150,7 +156,7 @@ def utc_now_iso() -> str:
 
 
 def ensure_home() -> None:
-    for path in (CONFIG_DIR, CERT_DIR, DATA_DIR, BACKUP_DIR):
+    for path in (CONFIG_DIR, NGINX_CONF_DIR, CERT_DIR, DATA_DIR, BACKUP_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -1431,6 +1437,9 @@ Level = "{level}"
             for key, name in COMPONENTS.items()
         }
 
+    def component_enabled(self, key: str) -> bool:
+        return bool(self.components.get(key, True))
+
     def set_components(self, states: dict[str, bool], *, save: bool = True) -> None:
         for key, enabled in states.items():
             if key in COMPONENTS:
@@ -1920,7 +1929,72 @@ class DockerCompose:
         self.compose("stop", "-t", str(timeout_sec), timeout=120)
 
     def restart(self, timeout_sec: int = 30) -> None:
-        self.compose("restart", "-t", str(timeout_sec), "backend", timeout=120)
+        # 重启整套拓扑：只重启 backend 会留下状态不一致的其它服务
+        self.compose("restart", "-t", str(timeout_sec), timeout=120)
+
+    def compose_passthrough(self, args: Sequence[str]) -> int:
+        """原样直通 docker compose（继承终端，支持 logs -f 等流式/交互命令）。"""
+        if not self.compose_file.is_file():
+            raise ManageError("docker-compose.yml 不存在，请先执行安装。")
+        cmd = [
+            "docker", "compose",
+            "-p", self.project,
+            "--env-file", str(self.env_file),
+            "-f", str(self.compose_file),
+            *[str(a) for a in args],
+        ]
+        out(f"$ {' '.join(cmd)}")
+        try:
+            return subprocess.call(cmd)
+        except FileNotFoundError as exc:
+            raise ManageError("未找到 docker，请先安装 Docker。") from exc
+
+    def file_hash_in(self, path: str, service: ServiceName = "nginx") -> str | None:
+        """读取容器内文件的 sha256，用于识别失效挂载（容器看到的与宿主不一致）。"""
+        result = self.compose("exec", "-T", service, "sha256sum", path, check=False, timeout=60)
+        if result.returncode != 0:
+            return None
+        parts = result.stdout.split()
+        return parts[0] if parts else None
+
+    def print_status(self) -> None:
+        """输出各容器状态；非运行状态显式告警（原样 ps 输出太容易被忽略）。"""
+        if not self.compose_file.is_file():
+            out("尚未安装（docker-compose.yml 不存在）。")
+            return
+
+        result = self.compose("ps", "-a", "--format", "json", check=False)
+        try:
+            entries = json.loads(result.stdout or "[]")
+        except ValueError:
+            entries = []
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not entries:
+            out("未找到服务。")
+            return
+
+        down: list[str] = []
+        for entry in entries:
+            name = str(entry.get("Name") or entry.get("Service") or "unknown")
+            state = str(entry.get("State") or "unknown")
+            status = str(entry.get("Status") or "")
+            health = str(entry.get("Health") or "")
+            suffix = f" [{health}]" if health else ""
+            if state == "running":
+                out(f"  {name}: {state} ({status}){suffix}")
+            else:
+                out(f"⚠ {name}: {state} ({status}){suffix}")
+                down.append(name)
+
+        if not down:
+            out("全部服务运行中。")
+            return
+
+        out(f"⚠ 未运行的服务: {', '.join(down)}")
+        if any("nginx" in name for name in down):
+            out("  对外入口 Nginx 未运行 → 站点会返回 502（后端健康≠站点可用）。")
+        out("  修复：ManagePylai.pyz start（收敛全部服务）；手动操作：ManagePylai.pyz compose up -d nginx")
 
     def down(self) -> None:
         self.compose("down", "-v", timeout=120)
@@ -2346,7 +2420,7 @@ services:
     ports:
       - "${{PYLAI_PUBLIC_PORT:?}}:80"
     volumes:
-      - {config_dir}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - {config_dir}/nginx.d:/etc/nginx/conf.d:ro
       - pylai_www:/var/lib/pylai/www:ro
     logging:
       driver: "json-file"
@@ -2488,7 +2562,25 @@ server {
 """
         template = template.replace("@@ADMIN_BLOCK@@", admin_block)
         template = template.replace("@@ROOT_BLOCK@@", root_block)
-        atomic_write(CONFIG_DIR / "nginx.conf", template, mode=0o644)
+        NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write(NGINX_CONF_FILE, template, mode=0o644)
+        cls.migrate_nginx_conf()
+
+    @classmethod
+    def migrate_nginx_conf(cls) -> None:
+        """清理旧版单文件挂载残留（{config_dir}/nginx.conf）。
+
+        旧布局把 nginx.conf 以单文件 bind mount 进容器，atomic_write 换 inode 后
+        容器读旧文件，组件开关 reload 静默失效。迁移后统一走目录挂载 nginx.d/。
+        旧文件内容由 ManagerConfig 全量重渲染，直接删除不留歧义。
+        """
+        if not LEGACY_NGINX_CONF_FILE.exists():
+            return
+        target = LEGACY_NGINX_CONF_FILE.resolve()
+        if target.parent != CONFIG_DIR.resolve() or target.name != LEGACY_NGINX_CONF_FILE.name:
+            raise ManageError(f"拒绝删除非预期路径: {target}")
+        target.unlink()
+        out(f"已迁移旧版 Nginx 配置：{LEGACY_NGINX_CONF_FILE} → {NGINX_CONF_FILE}")
 
     @classmethod
     def ensure_volumes(cls) -> None:
@@ -3164,37 +3256,59 @@ def uninstall(ctx: AppContext, *, yes: bool, purge: bool) -> None:
 type ServiceAction = Literal["start", "stop", "restart", "status"]
 
 
+def converge_stack(ctx: AppContext, *, timeout: int = 300) -> bool:
+    """把容器收敛到「编排文件 + 组件开关」的目标状态，并校验对外可用性。
+
+    唯一入口，禁止只拉起单个服务：``compose up -d backend`` 只会带出
+    postgres/redis（depends_on 方向），对外入口 nginx 会被留在停止状态，
+    站点 502 而工具仍报成功。后端组件被主动关闭时返回 False（属预期）。
+    """
+    docker = ctx.docker
+    docker.compose("up", "-d", "--remove-orphans", timeout=timeout)
+
+    if not ctx.manager.component_enabled("backend"):
+        # 后端组件被主动关闭 = 站点整体下线：连对外入口一起停，避免留下 502 的死入口
+        for service in ("nginx", "backend"):
+            docker.compose("stop", "-t", "30", service, check=False, timeout=120)
+        out("组件开关：Pylai OS 后端已关闭，站点已下线（属预期）。")
+        return False
+
+    if not docker.wait_healthy(ctx.state.api_port, timeout=None, warn_after=300):
+        docker.dump_diagnostics(tail=200)
+        raise ManageError("健康检查未通过：backend 未就绪，请查看上方诊断。")
+
+    if not docker.service_running("nginx"):
+        docker.dump_diagnostics(tail=200)
+        raise ManageError(
+            "对外入口 Nginx 未运行：站点会返回 502（backend 健康不代表站点可用）。"
+            "请查看上方 nginx 日志排查。"
+        )
+
+    out("启动完成：backend 与 nginx 均已就绪。")
+    return True
+
+
 def service_action(ctx: AppContext, action: ServiceAction) -> None:
     """统一处理 start/stop/restart/status，取代原先的四个孪生函数。"""
     if action == "status":
-        result = ctx.docker.docker(
-            "ps", "-a", "--filter", f"name={ctx.docker.project}",
-            "--format", "{{.Names}} {{.Status}}", check=False,
-        )
-        out(result.stdout.strip() or "未找到服务")
+        ctx.docker.print_status()
         return
 
     ctx.require_installed()
 
     match action:
         case "start":
-            ctx.docker.compose("up", "-d", timeout=120)
             try:
                 ctx.docker.validate_compose()
             except ManageError as e:
                 out(f"Compose 校验警告: {e}")
-            healthy = ctx.docker.wait_healthy(ctx.state.api_port, timeout=None, warn_after=300)
-            if healthy:
-                out("启动完成。")
-            else:
-                out("服务已启动，但健康检查未通过。")
-                ctx.docker.dump_diagnostics(tail=200)
+            converge_stack(ctx)
         case "stop":
             ctx.docker.stop()
             out("已停止。")
         case "restart":
             ctx.docker.restart()
-            out("已重启。")
+            converge_stack(ctx)
 
 
 # ============================================================================

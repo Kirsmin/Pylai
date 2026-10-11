@@ -45,6 +45,8 @@ from core import (
     InstallAnswers,
     Json,
     ManageError,
+    NGINX_CONF_FILE,
+    NGINX_CONF_IN_CONTAINER,
     PYLAI_CONFIG_ARG,
     STATUS_OPTIONS,
     TomlText,
@@ -56,6 +58,7 @@ from core import (
     choose,
     configure_smtp_interactive,
     confirm_danger,
+    converge_stack,
     ensure_home,
     generate_host_nginx_template,
     is_valid_url,
@@ -912,20 +915,19 @@ class ComponentService:
                 out("已取消。")
                 return
 
-        # 先在内存生效（供 Nginx 渲染读取），动作全部成功后再落盘，失败可重试
+        # 先在内存生效（供 Nginx 渲染读取），随后立即落盘用户意图：
+        # 收敛失败时不会留下「配置说关了、容器还开着」的错位状态
         ctx.manager.set_components(selected, save=False)
+        ctx.manager.save()
 
         if "ui" in changed or "adminui" in changed:
             ComposeConfig.write_nginx_conf(ctx.manager)
             self._reload_nginx()
 
-        if "backend" in changed:
-            if selected["backend"]:
-                ctx.docker.compose("up", "-d", "backend", timeout=180)
-            else:
-                ctx.docker.compose("stop", "-t", "30", "backend", timeout=120)
-
-        ctx.manager.save()
+        # 收敛整套拓扑（含对外入口 nginx）：绝不能只对单个服务做 compose 操作，
+        # 否则 compose up -d backend 只会带出 postgres/redis，留下 502 的半启动栈
+        out("==> 收敛服务状态（compose up -d）...")
+        converge_stack(ctx)
 
         for key, label in COMPONENT_ITEMS:
             if key in changed:
@@ -934,8 +936,24 @@ class ComponentService:
     def _reload_nginx(self) -> None:
         docker = self.ctx.docker
         if not docker.service_running("nginx"):
-            out("提示：Nginx 未运行，组件配置将在下次启动时生效。")
+            out("提示：Nginx 未运行，配置已写入，拉起服务后生效。")
             return
+
+        if not self._conf_visible_in_container():
+            # 旧版单文件 bind mount 会把 inode 钉死：宿主换了新文件、容器仍读旧文件，
+            # reload 会静默加载旧配置。强制重建容器，保证「即时生效」不是空话。
+            out("检测到容器内 Nginx 配置未同步（旧版单文件挂载），重建 Nginx 容器...")
+            docker.compose("up", "-d", "--force-recreate", "nginx", timeout=180)
+            if not self._conf_visible_in_container():
+                raise ManageError(
+                    "容器内 Nginx 配置与宿主不一致，组件开关无法即时生效；"
+                    "请执行 compose up -d --force-recreate nginx 或重新安装。"
+                )
+
+        test = docker.compose("exec", "-T", "nginx", "nginx", "-t", check=False, timeout=60)
+        if test.returncode != 0:
+            detail = (test.stderr or test.stdout).strip()
+            raise ManageError(f"Nginx 配置校验失败（配置已写入）: {detail}")
 
         result = docker.compose(
             "exec", "-T", "nginx", "nginx", "-s", "reload",
@@ -945,4 +963,9 @@ class ComponentService:
             detail = (result.stderr or result.stdout).strip()
             raise ManageError(f"Nginx 重载失败（配置已写入，可手动重启服务生效）: {detail}")
         out("Nginx 已重载，前端组件开关即时生效。")
+
+    def _conf_visible_in_container(self) -> bool:
+        """校验容器内看到的站点配置与宿主一致（识别失效挂载）。"""
+        expected = hashlib.sha256(NGINX_CONF_FILE.read_bytes()).hexdigest()
+        return self.ctx.docker.file_hash_in(NGINX_CONF_IN_CONTAINER) == expected
 

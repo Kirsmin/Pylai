@@ -700,6 +700,9 @@ class InstallService:
                         with suppress(Exception):
                             ctx.docker.compose("down", "-v", check=False)
                 raise ManageError("服务启动失败，请根据上方诊断信息排查。")
+            if not ctx.docker.service_running("nginx"):
+                ctx.docker.dump_diagnostics(tail=200)
+                raise ManageError("对外入口 Nginx 未运行：站点会返回 502，请根据上方诊断信息排查。")
         pipeline.add("健康检查", step_health)
 
         # 执行流水线
@@ -1127,6 +1130,10 @@ class UpdateService:
         if not ctx.docker.wait_healthy(ctx.state.api_port, timeout=None, warn_after=300):
             ctx.docker.dump_diagnostics(tail=200)
             raise ManageError("更新后健康检查未通过，请查看上方诊断。")
+
+        if not ctx.docker.service_running("nginx"):
+            ctx.docker.dump_diagnostics(tail=200)
+            raise ManageError("更新后对外入口 Nginx 未运行：站点会返回 502，请查看上方诊断。")
 
         ctx.state.set("version", version)
         ctx.state.set("architecture", arch)

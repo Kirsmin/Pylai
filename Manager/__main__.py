@@ -9,7 +9,21 @@
 """
 from __future__ import annotations
 
-__version__ = "0.1.33"
+import sys
+
+__version__ = "0.1.34"
+
+# 版本守卫必须放在 import core 之前：源码使用 PEP 695（type X = ...）等 3.12+ 语法，
+# 旧解释器只会在 import 阶段抛裸 SyntaxError，用户完全看不出是 Python 版本问题。
+MIN_PYTHON = (3, 12)
+if sys.version_info < MIN_PYTHON:
+    _current = ".".join(str(part) for part in sys.version_info[:3])
+    _required = ".".join(str(part) for part in MIN_PYTHON)
+    sys.exit(
+        f"ManagePylai 需要 Python {_required}+（当前 {_current}，解释器 {sys.executable}）。\n"
+        f"请改用较新的解释器运行，例如：python3.13 ManagePylai.pyz ...\n"
+        "Ubuntu 22.04 自带 python3.10 过旧，可用 pyenv/venv 安装 3.12+ 后运行。"
+    )
 
 from core import __version__ as _runtime_version
 from cli import main

@@ -12,6 +12,7 @@ import os
 import platform as host_platform
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import string
@@ -42,6 +43,7 @@ from core import (
     __version__,
     ask_bool,
     confirm_danger,
+    converge_stack,
     out,
     service_action,
     uninstall,
@@ -182,14 +184,27 @@ class InteractiveMenu:
         ]
         if self.ctx.state.installed:
             items.extend([
-                ("启动", lambda: service_action(self.ctx, "start")),
+                ("启动（收敛全部服务）", lambda: service_action(self.ctx, "start")),
                 ("停止", lambda: service_action(self.ctx, "stop")),
                 ("重启", lambda: service_action(self.ctx, "restart")),
+                ("手动拉起（compose up -d）", lambda: converge_stack(self.ctx)),
+                ("Compose 直通（手动操作容器）", self._compose_passthrough),
                 ("组件管理", lambda: ComponentService(self.ctx).manage()),
                 ("查看最近日志", lambda: self.ctx.docker.view_logs(200)),
                 ("实时日志", lambda: self.ctx.docker.view_logs(200, follow=True)),
             ])
         self.run_submenu("服务", items)
+
+    def _compose_passthrough(self) -> None:
+        """手动直通 docker compose：例如 up -d nginx / ps -a / logs -f nginx。"""
+        raw = ask("docker compose 参数", "ps -a")
+        argv = shlex.split(raw)
+        if not argv:
+            out("已取消。")
+            return
+        code = self.ctx.docker.compose_passthrough(argv)
+        if code:
+            out(f"docker compose 退出码: {code}")
 
     def _config(self) -> None:
         service = ConfigService(self.ctx)
@@ -322,6 +337,21 @@ def cmd_self_update(ctx: AppContext, args: argparse.Namespace) -> None:
             out("当前已是最新，或无法获取版本信息。")
     else:
         updater.update(force=args.force, dry_run=args.dry_run, skip_prompt=args.yes)
+
+
+def cmd_compose(ctx: AppContext, args: argparse.Namespace) -> None:
+    """直通 docker compose：手动拉起服务、查看状态、抓日志都走它。"""
+    ctx.require_installed()
+
+    argv = [str(a) for a in (args.args or [])]
+    if not argv:
+        out("用法: ManagePylai.pyz compose <docker compose 参数...>")
+        out("示例: compose up -d nginx | compose ps -a | compose logs -f nginx | compose restart nginx")
+        raise SystemExit(2)
+
+    code = ctx.docker.compose_passthrough(argv)
+    if code:
+        raise SystemExit(code)
 
 
 def cmd_logs(ctx: AppContext, args: argparse.Namespace) -> None:
@@ -493,12 +523,23 @@ def build_parser() -> argparse.ArgumentParser:
     self_update_p.add_argument("--force", action="store_true")
 
     for name, help_text in (
-        ("start", "启动服务"),
+        ("start", "启动服务（收敛全部服务）"),
         ("stop", "停止服务"),
         ("restart", "重启服务"),
         ("status", "查看状态"),
     ):
         subparsers.add_parser(name, help=help_text)
+
+    compose_p = subparsers.add_parser(
+        "compose",
+        help="直通 docker compose（手动拉起/诊断）",
+        description=(
+            "把参数原样交给 docker compose（自动带上项目名/--env-file/-f）。\n"
+            "示例：compose up -d nginx ｜ compose ps -a ｜ compose logs -f nginx ｜ compose restart nginx"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    compose_p.add_argument("args", nargs=argparse.REMAINDER, help="docker compose 参数")
 
     logs_p = subparsers.add_parser("logs", help="查看日志")
     logs_p.add_argument(
@@ -589,6 +630,7 @@ COMMANDS: dict[str, Callable[[AppContext, argparse.Namespace], None]] = {
     "stop": lambda ctx, _a: service_action(ctx, "stop"),
     "restart": lambda ctx, _a: service_action(ctx, "restart"),
     "status": lambda ctx, _a: service_action(ctx, "status"),
+    "compose": cmd_compose,
     "logs": cmd_logs,
     "config": cmd_config,
     "backup": cmd_backup,
