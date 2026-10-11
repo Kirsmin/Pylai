@@ -108,7 +108,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.35"
+__version__ = "0.1.36"
 
 
 class ManageError(Exception):
@@ -1892,14 +1892,33 @@ class DockerCompose:
     def service_exists(self, service: ServiceName = "backend") -> bool:
         return bool(self.compose("ps", "-q", service, check=False).stdout.strip())
 
+    @staticmethod
+    def parse_ps_json(text: str) -> list[Json]:
+        """解析 ``compose ps --format json``。
+
+        Docker Compose v2 输出是 JSONL（每行一个对象，多容器即多行），旧版是数组，
+        因此不能对整段输出 ``json.loads``——多容器时会静默解析失败
+        （status 误报「未找到服务」）。
+        """
+        entries: list[Json] = []
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            with suppress(ValueError):
+                item = json.loads(line)
+                entries.extend(item if isinstance(item, list) else [item])
+        if entries:
+            return entries
+
+        with suppress(ValueError):
+            data = json.loads((text or "").strip() or "[]")
+            return data if isinstance(data, list) else [data]
+        return []
+
     def service_status(self, service: ServiceName = "backend") -> Literal["running", "exited"]:
         result = self.compose("ps", "--format", "json", service, check=False)
-        try:
-            entries = json.loads(result.stdout or "[]")
-        except ValueError:
-            return "exited"
-        if isinstance(entries, dict):
-            entries = [entries]
+        entries = self.parse_ps_json(result.stdout)
         return (
             "running"
             if any(e.get("Service") == service and e.get("State") == "running" for e in entries)
@@ -1964,12 +1983,7 @@ class DockerCompose:
             return
 
         result = self.compose("ps", "-a", "--format", "json", check=False)
-        try:
-            entries = json.loads(result.stdout or "[]")
-        except ValueError:
-            entries = []
-        if isinstance(entries, dict):
-            entries = [entries]
+        entries = self.parse_ps_json(result.stdout)
         if not entries:
             out("未找到服务。")
             return
@@ -2135,20 +2149,17 @@ class DockerCompose:
         result = self.compose("ps", "-a", "--format", "json", check=False)
         if result.returncode != 0 or not result.stdout.strip():
             return
-        try:
-            entries = json.loads(result.stdout)
-            if isinstance(entries, dict):
-                entries = [entries]
-            out("  当前服务状态:")
-            for e in entries:
-                name = e.get("Name", e.get("Service", "unknown"))
-                state = e.get("State", "unknown")
-                status = e.get("Status", "unknown")
-                health = e.get("Health", "")
-                health_str = f" [{health}]" if health else ""
-                out(f"    • {name}: {state} ({status}){health_str}")
-        except (json.JSONDecodeError, TypeError):
-            pass
+        entries = self.parse_ps_json(result.stdout)
+        if not entries:
+            return
+        out("  当前服务状态:")
+        for e in entries:
+            name = e.get("Name", e.get("Service", "unknown"))
+            state = e.get("State", "unknown")
+            status = e.get("Status", "unknown")
+            health = e.get("Health", "")
+            health_str = f" [{health}]" if health else ""
+            out(f"    • {name}: {state} ({status}){health_str}")
 
     def dump_diagnostics(self, *, tail: int = 200) -> None:
         """安装/更新失败时输出分服务诊断，不依赖 service_exists 误导。"""
