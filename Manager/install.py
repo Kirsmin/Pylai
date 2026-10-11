@@ -71,6 +71,7 @@ from core import (
     toml_str,
     utc_now_iso,
     validate_answers,
+    verify_public_entry,
 )
 
 
@@ -703,6 +704,7 @@ class InstallService:
             if not ctx.docker.service_running("nginx"):
                 ctx.docker.dump_diagnostics(tail=200)
                 raise ManageError("对外入口 Nginx 未运行：站点会返回 502，请根据上方诊断信息排查。")
+            verify_public_entry(ctx)
         pipeline.add("健康检查", step_health)
 
         # 执行流水线
@@ -1134,6 +1136,8 @@ class UpdateService:
         if not ctx.docker.service_running("nginx"):
             ctx.docker.dump_diagnostics(tail=200)
             raise ManageError("更新后对外入口 Nginx 未运行：站点会返回 502，请查看上方诊断。")
+
+        verify_public_entry(ctx)
 
         ctx.state.set("version", version)
         ctx.state.set("architecture", arch)

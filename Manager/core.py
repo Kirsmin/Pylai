@@ -108,7 +108,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.36"
+__version__ = "0.1.37"
 
 
 class ManageError(Exception):
@@ -1976,6 +1976,31 @@ class DockerCompose:
         parts = result.stdout.split()
         return parts[0] if parts else None
 
+    @staticmethod
+    def probe_http(url: str, timeout: int = 5) -> int | None:
+        """探测 HTTP 端点，返回状态码；不可达返回 None。"""
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except Exception:
+            return None
+
+    def public_entry_ok(self, public_port: int, *, attempts: int = 3) -> bool:
+        """端到端探测对外入口（nginx 容器 → backend）。
+
+        只看 nginx 是否 running 是不够的：upstream DNS 失联、配置/挂载异常时
+        nginx 活着但站点 502，工具会误报成功。
+        """
+        url = f"http://127.0.0.1:{public_port}/health/ready"
+        for index in range(max(1, attempts)):
+            if index:
+                time.sleep(2)
+            if self.probe_http(url) == 200:
+                return True
+        return False
+
     def print_status(self) -> None:
         """输出各容器状态；非运行状态显式告警（原样 ps 输出太容易被忽略）。"""
         if not self.compose_file.is_file():
@@ -3267,6 +3292,31 @@ def uninstall(ctx: AppContext, *, yes: bool, purge: bool) -> None:
 type ServiceAction = Literal["start", "stop", "restart", "status"]
 
 
+def verify_public_entry(ctx: AppContext) -> None:
+    """断言对外入口端到端可用（nginx 容器 → backend），否则 Fail Closed。
+
+    nginx 进程活着不等于站点可用：upstream DNS 失效（backend 重建换 IP）、
+    配置/挂载异常都会让 nginx 回 502，而工具此前只检查 running 就报成功。
+    探测失败时先自动重建 Nginx 容器（刷新 upstream 解析与配置）一次。
+    """
+    docker = ctx.docker
+    port = ctx.state.public_port
+    if docker.public_entry_ok(port):
+        return
+
+    out("对外入口探测失败，尝试重建 Nginx 容器（刷新 upstream 与配置）...")
+    docker.compose("up", "-d", "--force-recreate", "nginx", timeout=180)
+    if docker.public_entry_ok(port):
+        out("已通过重建 Nginx 容器恢复对外入口。")
+        return
+
+    docker.dump_diagnostics(tail=200)
+    raise ManageError(
+        f"对外入口探测失败（http://127.0.0.1:{port}/health/ready）："
+        "Nginx 无法访问 backend，站点会返回 502，请查看上方诊断。"
+    )
+
+
 def converge_stack(ctx: AppContext, *, timeout: int = 300) -> bool:
     """把容器收敛到「编排文件 + 组件开关」的目标状态，并校验对外可用性。
 
@@ -3295,7 +3345,8 @@ def converge_stack(ctx: AppContext, *, timeout: int = 300) -> bool:
             "请查看上方 nginx 日志排查。"
         )
 
-    out("启动完成：backend 与 nginx 均已就绪。")
+    verify_public_entry(ctx)
+    out("启动完成：backend、nginx 与对外入口均已就绪。")
     return True
 
 
@@ -3303,6 +3354,14 @@ def service_action(ctx: AppContext, action: ServiceAction) -> None:
     """统一处理 start/stop/restart/status，取代原先的四个孪生函数。"""
     if action == "status":
         ctx.docker.print_status()
+        if ctx.state.installed and ctx.docker.service_running("nginx"):
+            port = ctx.state.public_port
+            code = ctx.docker.probe_http(f"http://127.0.0.1:{port}/health/ready")
+            if code == 200:
+                out(f"  对外入口探测: 200（http://127.0.0.1:{port}/health/ready）")
+            else:
+                out(f"⚠ 对外入口探测失败（{code if code is not None else '不可达'}）"
+                    f"：站点可能返回 502，执行 start 修复")
         return
 
     ctx.require_installed()
