@@ -3292,15 +3292,16 @@ def uninstall(ctx: AppContext, *, yes: bool, purge: bool) -> None:
 type ServiceAction = Literal["start", "stop", "restart", "status"]
 
 
-def verify_public_entry(ctx: AppContext) -> None:
+def verify_public_entry(ctx: AppContext, *, port: int | None = None) -> None:
     """断言对外入口端到端可用（nginx 容器 → backend），否则 Fail Closed。
 
     nginx 进程活着不等于站点可用：upstream DNS 失效（backend 重建换 IP）、
     配置/挂载异常都会让 nginx 回 502，而工具此前只检查 running 就报成功。
     探测失败时先自动重建 Nginx 容器（刷新 upstream 解析与配置）一次。
+    安装流程必须显式传 port（此时 state.json 尚未写入）。
     """
     docker = ctx.docker
-    port = ctx.state.public_port
+    port = port or ctx.state.public_port
     if docker.public_entry_ok(port):
         return
 

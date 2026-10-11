@@ -704,7 +704,7 @@ class InstallService:
             if not ctx.docker.service_running("nginx"):
                 ctx.docker.dump_diagnostics(tail=200)
                 raise ManageError("对外入口 Nginx 未运行：站点会返回 502，请根据上方诊断信息排查。")
-            verify_public_entry(ctx)
+            verify_public_entry(ctx, port=answers.public_port)
         pipeline.add("健康检查", step_health)
 
         # 执行流水线
