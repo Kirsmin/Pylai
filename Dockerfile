@@ -14,7 +14,7 @@ RUN pnpm build
 FROM node@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS admin-ui
 WORKDIR /adminui
 RUN corepack enable
-COPY AdminUI/package.json AdminUI/pnpm-lock.yaml ./
+COPY AdminUI/package.json AdminUI/pnpm-lock.yaml AdminUI/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY AdminUI/ ./
 RUN pnpm build
