@@ -1,6 +1,6 @@
 {
   "name": "pylaiadminui",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
     "@vicons/tabler": "0.13.0",
     "naive-ui": "2.44.1",
     "pinia": "3.0.4",
-    "vue": "3.5.41",
+    "vue": "3.5.43",
     "vue-router": "5.2.0"
   },
   "devDependencies": {
@@ -32,5 +32,11 @@
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "shell-quote": "1.12.0",
+      "source-map-js": "1.2.2"
+    }
   }
 }
