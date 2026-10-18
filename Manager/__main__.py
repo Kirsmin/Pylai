@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-__version__ = "0.1.37"
+__version__ = "0.1.38"
 
 # 版本守卫必须放在 import core 之前：源码使用 PEP 695（type X = ...）等 3.12+ 语法，
 # 旧解释器只会在 import 阶段抛裸 SyntaxError，用户完全看不出是 Python 版本问题。

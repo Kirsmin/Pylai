@@ -19,6 +19,8 @@ public class AccountEmailController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly IEmailVerificationCodeService _emailCodeService;
     private readonly IUserAccessRevoker _userAccessRevoker;
+    private readonly IAuditService _auditService;
+    private readonly IpResolutionService _ipResolver;
     private readonly TestModeOptions _testMode;
     private readonly ILogger<AccountEmailController> _logger;
 
@@ -28,6 +30,8 @@ public class AccountEmailController : ControllerBase
         ApplicationDbContext context,
         IEmailVerificationCodeService emailCodeService,
         IUserAccessRevoker userAccessRevoker,
+        IAuditService auditService,
+        IpResolutionService ipResolver,
         TestModeOptions testMode,
         ILogger<AccountEmailController> logger)
     {
@@ -36,6 +40,8 @@ public class AccountEmailController : ControllerBase
         _context = context;
         _emailCodeService = emailCodeService;
         _userAccessRevoker = userAccessRevoker;
+        _auditService = auditService;
+        _ipResolver = ipResolver;
         _testMode = testMode;
         _logger = logger;
     }
@@ -71,6 +77,8 @@ public class AccountEmailController : ControllerBase
         if (await _context.IsEmailTakenAsync(request.Email))
         {
             _logger.LogWarning("邮箱已被其他用户占用 | uid:{Uid} | {Email}", user.Uid, request.Email);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendSuppressed, user.Uid.ToString(), request.Email, true,
+                "email_taken（防枚举：绑定邮箱验证码未发送）");
             return StatusCode(403, new EmailCodeResponse { Success = false, Error = "邮箱验证已被限制，请稍后重试。", ErrorCode = "banned" });
         }
 
@@ -85,7 +93,7 @@ public class AccountEmailController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
 
-        var sendError = await SendEmailCodeSafeAsync(user, request.Email, code, MailThemeKind.Bind, "绑定邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, request.Email, code, MailThemeKind.Bind, "bind-email");
         if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "绑定邮箱码已发送 | uid:{Uid} | → {Email}", code, user.Uid, request.Email);
@@ -102,7 +110,10 @@ public class AccountEmailController : ControllerBase
         var key = $"bind-email:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
         if (result.Status != EmailCodeStatus.Ok)
+        {
+            await AuditCodeVerifyFailureAsync(user, "bind-email", result);
             return MapEmailCodeError(result);
+        }
 
         user.Email = result.Entry!.Email;
         user.NormalizedEmail = UsernameNormalizer.Normalize(user.Email!);
@@ -112,11 +123,13 @@ public class AccountEmailController : ControllerBase
         }
         catch (DbUpdateException ex) when (ex.IsUniqueViolation())
         {
+            await AuditAsync(AuthConstants.EventTypes.EmailChanged, user, result.Entry.Email, false, "duplicate（唯一冲突）");
             return StatusCode(409, new EmailCodeResponse { Success = false, Error = "邮箱已被其他用户占用。", ErrorCode = "duplicate" });
         }
         await _emailCodeService.RemoveAsync(key);
 
         _logger.LogInformation("邮箱绑定成功 | uid:{Uid} | {Email}", user.Uid, result.Entry.Email);
+        await AuditAsync(AuthConstants.EventTypes.EmailChanged, user, result.Entry.Email, true, "bound");
 
         return Ok(new EmailCodeResponse { Success = true, VerifiedEmail = result.Entry.Email });
     }
@@ -152,6 +165,8 @@ public class AccountEmailController : ControllerBase
         if (await _context.IsEmailTakenAsync(request.NewEmail))
         {
             _logger.LogWarning("新邮箱已被其他用户占用 | uid:{Uid} | {NewEmail}", user.Uid, request.NewEmail);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendSuppressed, user.Uid.ToString(), request.NewEmail, true,
+                "email_taken（防枚举：更换邮箱验证码未发送）");
             return StatusCode(403, new EmailCodeResponse { Success = false, Error = "邮箱验证已被限制，请稍后重试。", ErrorCode = "banned" });
         }
 
@@ -159,7 +174,7 @@ public class AccountEmailController : ControllerBase
 
         _logger.LogCode(_testMode, LogLevel.Debug, "验证码生成 | uid:{Uid} | → {NewEmail}", code, user.Uid, request.NewEmail);
 
-        var sendError = await SendEmailCodeSafeAsync(user, user.Email, code, MailThemeKind.Change, "更换邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, user.Email, code, MailThemeKind.Change, "change-email-current");
         if (sendError is not null) return sendError;
 
         _logger.LogCode(_testMode, LogLevel.Information, "更换邮箱验证码已发送 | uid:{Uid} | → {NewEmail}", code, user.Uid, request.NewEmail);
@@ -176,11 +191,15 @@ public class AccountEmailController : ControllerBase
         var key = $"change-email:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
         if (result.Status != EmailCodeStatus.Ok)
+        {
+            await AuditCodeVerifyFailureAsync(user, "change-email", result);
             return MapEmailCodeError(result);
+        }
+        await AuditAsync(AuthConstants.EventTypes.EmailVerificationSuccess, user, result.Entry!.Email, true, "change-email");
 
         var newCode = await _emailCodeService.CreateAsync($"change-email-final:{user.Uid}", result.Entry!.Email);
 
-        var sendError = await SendEmailCodeSafeAsync(user, result.Entry.Email!, newCode, MailThemeKind.Change, "确认新邮箱");
+        var sendError = await SendEmailCodeSafeAsync(user, result.Entry.Email!, newCode, MailThemeKind.Change, "change-email-new");
         if (sendError is not null) return sendError;
         _logger.LogCode(_testMode, LogLevel.Information, "新邮箱验证码已发送 | uid:{Uid} | → {Email}", newCode, user.Uid, result.Entry.Email);
 
@@ -196,7 +215,10 @@ public class AccountEmailController : ControllerBase
         var key = $"change-email-final:{user.Uid}";
         var result = await _emailCodeService.VerifyAsync(key, request.Code);
         if (result.Status != EmailCodeStatus.Ok)
+        {
+            await AuditCodeVerifyFailureAsync(user, "change-email-final", result);
             return MapEmailCodeError(result);
+        }
 
         user.Email = result.Entry!.Email;
         user.NormalizedEmail = UsernameNormalizer.Normalize(user.Email!);
@@ -206,6 +228,7 @@ public class AccountEmailController : ControllerBase
         }
         catch (DbUpdateException ex) when (ex.IsUniqueViolation())
         {
+            await AuditAsync(AuthConstants.EventTypes.EmailChanged, user, result.Entry.Email, false, "duplicate（唯一冲突）");
             return StatusCode(409, new EmailCodeResponse { Success = false, Error = "邮箱已被其他用户占用。", ErrorCode = "duplicate" });
         }
         await _emailCodeService.RemoveAsync(key);
@@ -213,20 +236,30 @@ public class AccountEmailController : ControllerBase
         await _userAccessRevoker.RevokeUserAccessAsync(user.Uid, revokeUserToken: true);
 
         _logger.LogInformation("邮箱更换成功 | uid:{Uid} | {Email}", user.Uid, result.Entry.Email);
+        await AuditAsync(AuthConstants.EventTypes.EmailChanged, user, result.Entry.Email, true, "changed");
 
         return Ok(new EmailCodeResponse { Success = true, VerifiedEmail = result.Entry.Email });
     }
+
+    private Task AuditAsync(string eventType, User user, string? email, bool success, string? details)
+        => this.AuditAsync(_auditService, _ipResolver, eventType, user.Uid.ToString(), email, success, details);
+
+    private Task AuditCodeVerifyFailureAsync(User user, string action, EmailCodeResult result)
+        => AuditAsync(AuthConstants.EventTypes.EmailVerificationFailed, user, user.Email, false, $"{action}: {result.Status}");
 
     private async Task<IActionResult?> SendEmailCodeSafeAsync(User user, string email, string code, MailThemeKind kind, string action)
     {
         try
         {
             await _emailSender.SendVerificationCodeAsync(kind, email, code);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, user.Uid.ToString(), email, true, action);
             return null;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            _logger.LogError("邮件发送失败 | 操作:{Action} uid:{Uid} → {Email}", action, user.Uid, email);
+            _logger.LogError(ex, "邮件发送失败 | 操作:{Action} uid:{Uid} → {Email}", action, user.Uid, email);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendFailed, user.Uid.ToString(), email, false,
+                EmailSender.FailureDetails(ex));
             return StatusCode(503, new EmailCodeResponse
             {
                 Success = false,

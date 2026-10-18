@@ -138,6 +138,8 @@ public class RegisterController : ControllerBase
         if (await _context.IsEmailTakenAsync(request.Email))
         {
             _logger.LogWarning("邮箱已被占用 | {Email}（等效正常流程处理，不触发真实发送）", request.Email);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendSuppressed, null, request.Email, true,
+                "email_taken（防枚举：注册验证码未发送）", request.SessionToken);
             await Task.Delay(Random.Shared.Next(150, 300));
             return Ok(new SendEmailCodeResponse
             {
@@ -150,10 +152,11 @@ public class RegisterController : ControllerBase
         {
             await _emailSender.SendRegisterCodeAsync(request.Email, code);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            _logger.LogError("验证码邮件发送失败 | → {Email}", request.Email);
-            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, false, "SMTP send failed", request.SessionToken);
+            _logger.LogError(ex, "验证码邮件发送失败 | → {Email}", request.Email);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendFailed, null, request.Email, false,
+                EmailSender.FailureDetails(ex), request.SessionToken);
             return StatusCode(503, new SendEmailCodeResponse
             {
                 Success = false,
@@ -162,7 +165,7 @@ public class RegisterController : ControllerBase
             });
         }
 
-        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, true, null, request.SessionToken);
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.Email, true, "register", request.SessionToken);
 
         _logger.LogCode(_testMode, LogLevel.Information, "验证码已发送 → {Email}", code, request.Email);
 
@@ -269,6 +272,8 @@ public class RegisterController : ControllerBase
         if (await _context.IsEmailTakenAsync(request.NewEmail))
         {
             _logger.LogWarning("邮箱已被占用 | {Email}", request.NewEmail);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendSuppressed, null, request.NewEmail, true,
+                "email_taken（防枚举：更换邮箱验证码未发送）", request.SessionToken);
             return StatusCode(403, new ChangeRegistrationEmailResponse { Success = false, Error = "邮箱验证已被限制，请稍后重试。", ErrorCode = "banned" });
         }
 
@@ -288,10 +293,11 @@ public class RegisterController : ControllerBase
         {
             await _emailSender.SendRegisterCodeAsync(request.NewEmail, code);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            _logger.LogError("更换邮箱验证码发送失败 | → {NewEmail}", request.NewEmail);
-            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailChanged, null, request.NewEmail, false, "SMTP send failed", request.SessionToken);
+            _logger.LogError(ex, "更换邮箱验证码发送失败 | → {NewEmail}", request.NewEmail);
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailSendFailed, null, request.NewEmail, false,
+                EmailSender.FailureDetails(ex), request.SessionToken);
             return StatusCode(503, new ChangeRegistrationEmailResponse
             {
                 Success = false,
@@ -301,7 +307,8 @@ public class RegisterController : ControllerBase
             });
         }
 
-        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailChanged, null, request.NewEmail, true, $"Change #{session.EmailChangeCount}", request.SessionToken);
+        await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationSent, null, request.NewEmail, true,
+            $"register-change-email #{session.EmailChangeCount}", request.SessionToken);
 
         _logger.LogCode(_testMode, LogLevel.Information,
             "更换邮箱验证码已发送 → {NewEmail} | 剩余更换:{Remaining}", code, request.NewEmail, remaining);

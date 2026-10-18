@@ -74,35 +74,58 @@ public class PasswordResetController : ControllerBase
                 && u.Status != UserStatus.Deleted);
         }
 
+        // 后台发信线程无法再访问 HttpContext，先捕获审计所需的请求上下文
+        var userAgent = Request.Headers.UserAgent.ToString();
+        var endpoint = Request.Path.Value ?? "/api/auth/forgot-password";
+
         if (user is not null && !string.IsNullOrEmpty(user.Email))
         {
             var code = await _emailCodeService.CreateAsync(transactionKey, user.Email, user.Uid);
             _logger.LogCode(_testMode, LogLevel.Debug, "重置码生成 | transaction:{Transaction}", code, transactionId[..8]);
 
             var email = user.Email;
+            var uid = user.Uid;
             _ = Task.Run(async () =>
             {
                 try
                 {
                     await _emailSender.SendPasswordResetCodeAsync(email!, code);
-                    _logger.LogInformation("密码重置邮件已发送 | uid:{Uid}", user.Uid);
+                    _logger.LogInformation("密码重置邮件已发送 | uid:{Uid}", uid);
+                    await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailVerificationSent, uid.ToString(), email, ip, true, "password-reset", endpoint, userAgent));
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "密码重置邮件发送失败 | uid:{Uid}", user.Uid);
+                    _logger.LogError(ex, "密码重置邮件发送失败 | uid:{Uid}", uid);
+                    await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailSendFailed, uid.ToString(), email, ip, false, EmailSender.FailureDetails(ex), endpoint, userAgent));
                 }
             });
         }
         else
         {
             // 邮箱不存在：不创建验证码条目、不发送邮件，响应耗时与存在分支对齐（防时序侧信道）
-            // 但在服务端记录日志，便于管理员排查收不到重置邮件等反馈。
+            // 但记录审计与日志，便于管理员排查收不到重置邮件等反馈。
             _logger.LogWarning("密码重置请求：邮箱不存在或未绑定账号 | IP:{Ip} | 邮箱:{Email}",
                 ip, request.Email);
+            await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailSendSuppressed, null, request.Email, ip, true,
+                "user_not_found（防枚举：密码重置码未发送）", endpoint, userAgent));
         }
 
         return Ok(new ForgotPasswordResponse { Success = true, TransactionId = transactionId });
     }
+
+    private static AuditLog BuildAudit(string eventType, string? userId, string? userEmail, string ip,
+        bool success, string? details, string endpoint, string userAgent) => new()
+        {
+            EventType = eventType,
+            UserId = userId,
+            UserEmail = userEmail,
+            IpAddress = ip,
+            Endpoint = endpoint,
+            Method = "POST",
+            UserAgent = userAgent,
+            Success = success,
+            Details = details
+        };
 
     [AllowAnonymous]
     [HttpPost("reset-password")]

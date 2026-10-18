@@ -69,6 +69,8 @@ public static class AuthConstants
         public const string RegisterStarted = "RegisterStarted";
         public const string RegisterCompleted = "RegisterCompleted";
         public const string EmailVerificationSent = "EmailVerificationSent";
+        public const string EmailSendSuppressed = "EmailSendSuppressed";
+        public const string EmailSendFailed = "EmailSendFailed";
         public const string EmailVerificationFailed = "EmailVerificationFailed";
         public const string EmailVerificationSuccess = "EmailVerificationSuccess";
         public const string EmailVerificationExpired = "EmailVerificationExpired";

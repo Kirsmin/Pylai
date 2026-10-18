@@ -131,6 +131,16 @@ public class EmailSender
         }
     }
 
+    /// <summary>
+    /// 发信失败审计摘要：仅保留异常类型与截断后的消息（不泄漏堆栈），供审计 Details 使用。
+    /// </summary>
+    public static string FailureDetails(Exception ex)
+    {
+        var message = ex.Message.ReplaceLineEndings(" ");
+        if (message.Length > 300) message = message[..300];
+        return $"SMTP send failed: {ex.GetType().Name}: {message}";
+    }
+
     private static SecureSocketOptions ResolveSecurity(string? value)
     {
         return value?.Trim().ToLowerInvariant() switch
