@@ -59,6 +59,8 @@ public class PasswordResetController : ControllerBase
         if (await _ipRateLimitService.IsRateLimited(ip, "forgot-password", 3, TimeSpan.FromMinutes(10)))
         {
             await _emailCodeService.CreateAsync(transactionKey, null);
+            await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailSendSuppressed, null, request.Email, ip, true,
+                "rate_limited（IP 限流：密码重置码未发送）", Request.Path.Value ?? "/api/auth/forgot-password", Request.Headers.UserAgent.ToString()));
             return Ok(new ForgotPasswordResponse { Success = true, TransactionId = transactionId });
         }
 
@@ -161,7 +163,11 @@ public class PasswordResetController : ControllerBase
         // 3. 密码策略通过后，才真正校验并消费验证码
         var verifyResult = await _emailCodeService.VerifyAsync(key, request.Code);
         if (verifyResult.Status != EmailCodeStatus.Ok)
+        {
+            await this.AuditAsync(_auditService, _ipResolver, AuthConstants.EventTypes.EmailVerificationFailed, user.Uid.ToString(), entry.Email, false,
+                $"password-reset: {verifyResult.Status}");
             return BadRequest(InvalidOrExpired());
+        }
 
         // 4. 执行重置
         user.PasswordHash = _passwordHasher.HashPassword(user, request.NewPassword);
