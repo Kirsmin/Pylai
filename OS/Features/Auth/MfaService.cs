@@ -47,7 +47,10 @@ public interface IMfaService
     Task<(string EnrollmentId, string Secret, string Uri, string? LoginTransactionId)> BeginTotpEnrollmentAsync(Guid userUid, string? loginTransactionId);
     Task<(bool Success, string? LoginTransactionId)> ConfirmTotpEnrollmentAsync(string enrollmentId, string code);
     Task<(string RegistrationId, CredentialCreateOptions Options)> BeginWebAuthnRegistrationAsync(Guid userUid, string? loginTransactionId);
-    Task<bool> CompleteWebAuthnRegistrationAsync(Guid userUid, string registrationId, AuthenticatorAttestationRawResponse response);
+    Task<bool> CompleteWebAuthnRegistrationAsync(Guid userUid, string registrationId, AuthenticatorAttestationRawResponse response, string? name = null);
+    Task<List<MfaWebAuthnCredentialItem>> ListWebAuthnCredentialsAsync(Guid userUid);
+    Task<bool> DeleteWebAuthnCredentialAsync(Guid userUid, long id);
+    Task<bool> RenameWebAuthnCredentialAsync(Guid userUid, long id, string? name);
     Task<AssertionOptions> BeginWebAuthnAssertionAsync(string transactionId);
     Task<bool> VerifyWebAuthnAssertionAsync(string transactionId, AuthenticatorAssertionRawResponse response);
     Task<MfaLoginRequirement> BeginStepUpAsync(User user);
@@ -296,7 +299,7 @@ public sealed class MfaService : IMfaService
     }
 
     public async Task<bool> CompleteWebAuthnRegistrationAsync(
-        Guid userUid, string registrationId, AuthenticatorAttestationRawResponse response)
+        Guid userUid, string registrationId, AuthenticatorAttestationRawResponse response, string? name = null)
     {
         var state = await _cache.GetAsync<MfaWebAuthnState>(RegistrationPrefix + registrationId);
         if (state is null || state.UserUid != userUid)
@@ -315,10 +318,54 @@ public sealed class MfaService : IMfaService
             CredentialId = credential.Id,
             PublicKey = credential.PublicKey,
             SignCount = credential.SignCount,
+            Name = string.IsNullOrWhiteSpace(name) ? null : name.Trim(),
+            Transports = response.Response.Transports is { Length: > 0 } transports
+                ? string.Join(',', transports.Select(t => t.ToString().ToLowerInvariant()))
+                : null,
             CreatedAt = DateTimeOffset.UtcNow
         });
         await _context.SaveChangesAsync();
         await _cache.RemoveAsync(RegistrationPrefix + registrationId);
+        return true;
+    }
+
+    public async Task<List<MfaWebAuthnCredentialItem>> ListWebAuthnCredentialsAsync(Guid userUid)
+    {
+        var credentials = await _context.WebAuthnCredentials.AsNoTracking()
+            .Where(x => x.UserUid == userUid)
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => new { x.Id, x.Name, x.CreatedAt, x.LastUsedAt, x.Transports })
+            .ToListAsync();
+        return credentials.Select(x => new MfaWebAuthnCredentialItem
+        {
+            Id = x.Id,
+            Name = x.Name,
+            CreatedAt = x.CreatedAt,
+            LastUsedAt = x.LastUsedAt,
+            Transports = string.IsNullOrWhiteSpace(x.Transports)
+                ? []
+                : x.Transports.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        }).ToList();
+    }
+
+    public async Task<bool> DeleteWebAuthnCredentialAsync(Guid userUid, long id)
+    {
+        var credential = await _context.WebAuthnCredentials.FirstOrDefaultAsync(x => x.Id == id && x.UserUid == userUid);
+        if (credential is null)
+            return false;
+        _context.WebAuthnCredentials.Remove(credential);
+        await _context.SaveChangesAsync();
+        return true;
+    }
+
+    public async Task<bool> RenameWebAuthnCredentialAsync(Guid userUid, long id, string? name)
+    {
+        var credential = await _context.WebAuthnCredentials.FirstOrDefaultAsync(x => x.Id == id && x.UserUid == userUid);
+        if (credential is null)
+            return false;
+        var trimmed = name?.Trim();
+        credential.Name = string.IsNullOrEmpty(trimmed) ? null : trimmed;
+        await _context.SaveChangesAsync();
         return true;
     }
 

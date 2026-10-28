@@ -18,6 +18,7 @@ public sealed class WebAuthnCredential
     public byte[] CredentialId { get; set; } = [];
     public byte[] PublicKey { get; set; } = [];
     public uint SignCount { get; set; }
+    public string? Name { get; set; }
     public string? Transports { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? LastUsedAt { get; set; }

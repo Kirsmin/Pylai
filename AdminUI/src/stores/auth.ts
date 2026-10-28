@@ -1,8 +1,8 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { API_BASE, ApiError, ensureUserCsrfToken, parseApiResponse, rawFetch, userCsrfFetch } from '@/utils/http'
-import { getAssertion } from '@/utils/webauthn'
-import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser } from '@/types/admin'
+import { formatWebAuthnError, getAssertion } from '@/utils/webauthn'
+import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser, MfaWebAuthnCredential, MfaWebAuthnCredentialListResponse } from '@/types/admin'
 
 interface StepUpTicket {
   transactionId: string
@@ -27,9 +27,11 @@ export const useAuthStore = defineStore('admin-auth', () => {
   let stepUpResolve: (() => void) | null = null
   let stepUpReject: ((reason?: unknown) => void) | null = null
 
+  const mfaRequired = ref(false)
   const mfaTotpEnabled = ref(false)
   const mfaWebAuthnCount = ref(0)
   const mfaStepUpSatisfied = ref(false)
+  const mfaWebAuthnCredentials = ref<MfaWebAuthnCredential[]>([])
 
   const isAuthenticated = computed(() => user.value !== null)
   const firstCapability = computed(() => capabilities.value[0] ?? null)
@@ -218,7 +220,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       mfaStepUpSatisfied.value = true
       stepUpResolve?.()
     } catch (err) {
-      stepUpError.value = err instanceof Error ? err.message : 'Passkey 验证失败，请重试'
+      stepUpError.value = err instanceof DOMException ? formatWebAuthnError(err) : (err instanceof Error ? err.message : 'Passkey 验证失败，请重试')
     } finally {
       stepUpBusy.value = false
     }
@@ -238,14 +240,42 @@ export const useAuthStore = defineStore('admin-auth', () => {
         stepUpSatisfied: boolean
       }>(await rawFetch('/api/auth/mfa/status'))
       if (!data) return
+      mfaRequired.value = data.required
       mfaTotpEnabled.value = data.totpEnabled
       mfaWebAuthnCount.value = data.webAuthnCount
       mfaStepUpSatisfied.value = data.stepUpSatisfied
     } catch {
+      mfaRequired.value = false
       mfaTotpEnabled.value = false
       mfaWebAuthnCount.value = 0
       mfaStepUpSatisfied.value = false
     }
+  }
+
+  async function loadMfaCredentials() {
+    try {
+      const data = await parseApiResponse<MfaWebAuthnCredentialListResponse>(
+        await rawFetch('/api/auth/mfa/webauthn/credentials', { cache: 'no-store' })
+      )
+      mfaWebAuthnCredentials.value = data?.credentials ?? []
+      mfaWebAuthnCount.value = mfaWebAuthnCredentials.value.length
+    } catch {
+      mfaWebAuthnCredentials.value = []
+    }
+  }
+
+  async function deleteMfaWebAuthnCredential(id: number) {
+    await request('/api/auth/mfa/webauthn/credentials/' + id, { method: 'DELETE' })
+    await Promise.all([loadMfaStatus(), loadMfaCredentials()])
+  }
+
+  async function renameMfaWebAuthnCredential(id: number, name: string | null) {
+    await request('/api/auth/mfa/webauthn/credentials/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    })
+    await loadMfaCredentials()
   }
 
   async function logout() {
@@ -322,9 +352,14 @@ export const useAuthStore = defineStore('admin-auth', () => {
     verifyStepUpTotp,
     verifyStepUpWebAuthn,
     cancelMfaStepUp,
+    mfaRequired,
     mfaTotpEnabled,
     mfaWebAuthnCount,
     mfaStepUpSatisfied,
-    loadMfaStatus
+    mfaWebAuthnCredentials,
+    loadMfaStatus,
+    loadMfaCredentials,
+    deleteMfaWebAuthnCredential,
+    renameMfaWebAuthnCredential
   }
 })

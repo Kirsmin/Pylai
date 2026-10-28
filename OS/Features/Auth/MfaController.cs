@@ -239,7 +239,7 @@ public sealed class MfaController : ControllerBase
 
         try
         {
-            var success = await _mfa.CompleteWebAuthnRegistrationAsync(user.Uid, request.RegistrationId, request.Response);
+            var success = await _mfa.CompleteWebAuthnRegistrationAsync(user.Uid, request.RegistrationId, request.Response, request.Name);
             if (!success)
                 return BadRequest(new ApiResponse { Success = false, Error = "MFA 注册失败。", ErrorCode = "mfa_invalid" });
             return Ok(new ApiResponse { Success = true });
@@ -248,6 +248,84 @@ public sealed class MfaController : ControllerBase
         {
             return BadRequest(new ApiResponse { Success = false, Error = "MFA 注册失败。", ErrorCode = "mfa_invalid" });
         }
+    }
+
+    [Authorize(Policy = AuthConstants.Policies.AuthenticatedApi)]
+    [HttpGet("webauthn/credentials")]
+    public async Task<IActionResult> ListWebAuthnCredentials()
+    {
+        var user = await ResolveUserAsync(null);
+        if (user is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
+
+        var credentials = await _mfa.ListWebAuthnCredentialsAsync(user.Uid);
+        return Ok(new MfaWebAuthnCredentialListResponse { Success = true, Credentials = credentials.ToArray() });
+    }
+
+    [Authorize(Policy = AuthConstants.Policies.AuthenticatedApi)]
+    [HttpPatch("webauthn/credentials/{id:long}")]
+    public async Task<IActionResult> RenameWebAuthnCredential(long id, [FromBody] MfaWebAuthnCredentialRenameRequest request)
+    {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null)
+            return stepUp;
+
+        var user = await ResolveUserAsync(null);
+        if (user is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
+
+        if (!await _mfa.RenameWebAuthnCredentialAsync(user.Uid, id, request.Name))
+            return NotFound(new ApiResponse { Success = false, Error = "凭据不存在。", ErrorCode = "credential_not_found" });
+
+        await this.AuditAsync(_audit, _ipResolver, AuthConstants.EventTypes.MfaCredentialRenamed,
+            user.Uid.ToString(), user.Email, true, $"重命名 WebAuthn 凭据 #{id}");
+        return Ok(new ApiResponse { Success = true });
+    }
+
+    [Authorize(Policy = AuthConstants.Policies.AuthenticatedApi)]
+    [HttpDelete("webauthn/credentials/{id:long}")]
+    public async Task<IActionResult> DeleteWebAuthnCredential(long id)
+    {
+        var stepUp = await this.RequireMfaStepUpAsync(_mfa, _context);
+        if (stepUp is not null)
+            return stepUp;
+
+        var user = await ResolveUserAsync(null);
+        if (user is null)
+            return Unauthorized(new ApiResponse { Success = false, Error = "未登录或登录已失效。", ErrorCode = "unauthorized" });
+
+        var owned = await _context.WebAuthnCredentials.AsNoTracking().AnyAsync(x => x.Id == id && x.UserUid == user.Uid);
+        if (!owned)
+            return NotFound(new ApiResponse { Success = false, Error = "凭据不存在。", ErrorCode = "credential_not_found" });
+
+        if (await WouldLoseRequiredMfaAsync(user, id))
+            return Conflict(new ApiResponse { Success = false, Error = "这是策略要求保留的最后一个可用 MFA 方法，无法删除。", ErrorCode = "last_mfa_method" });
+
+        await _mfa.DeleteWebAuthnCredentialAsync(user.Uid, id);
+        await this.AuditAsync(_audit, _ipResolver, AuthConstants.EventTypes.MfaCredentialDeleted,
+            user.Uid.ToString(), user.Email, true, $"删除 WebAuthn 凭据 #{id}");
+        return Ok(new ApiResponse { Success = true });
+    }
+
+    /// <summary>
+    /// 删除后是否会失去策略要求保留的最后一个可用 MFA 方法。
+    /// </summary>
+    private async Task<bool> WouldLoseRequiredMfaAsync(User user, long deletingId)
+    {
+        var rank = AuthConstants.Groups.Rank(user.Group);
+        var remainingWebAuthn = await _context.WebAuthnCredentials.CountAsync(x => x.UserUid == user.Uid && x.Id != deletingId);
+
+        if (rank >= AuthConstants.Groups.Rank(AuthConstants.Roles.Max) && _config.Mfa.RequireWebAuthnForMax)
+            return remainingWebAuthn == 0;
+
+        if (rank >= AuthConstants.Groups.Rank(AuthConstants.Roles.Admin) && _config.Mfa.RequireForAdmin)
+        {
+            var settings = await _context.UserMfaSettings.AsNoTracking().FirstOrDefaultAsync(x => x.UserUid == user.Uid);
+            var hasTotp = settings?.TotpEnabled == true && !string.IsNullOrWhiteSpace(settings.EncryptedTotpSecret);
+            return !hasTotp && remainingWebAuthn == 0;
+        }
+
+        return false;
     }
 
     private async Task<bool> TryBeginMfaAttemptAsync(string kind)

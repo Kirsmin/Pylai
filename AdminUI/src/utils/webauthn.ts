@@ -28,6 +28,22 @@ export function assertWebAuthnAvailable(): void {
   }
 }
 
+export function formatWebAuthnError(err: unknown): string {
+  const name = err instanceof DOMException ? err.name : ''
+  switch (name) {
+    case 'NotAllowedError':
+      return '操作已取消或超时，请重试。'
+    case 'InvalidStateError':
+      return '当前设备可能已经注册过相同 Passkey，请检查凭据列表。'
+    case 'SecurityError':
+      return '当前安全上下文或域名不符合 WebAuthn 要求。'
+    case 'UnknownError':
+      return '系统凭据管理器暂时不可用，请稍后重试或从系统设置中移除旧 Passkey。'
+    default:
+      return 'Passkey 操作失败，请重试。'
+  }
+}
+
 export async function getAssertion(options: any) {
   assertWebAuthnAvailable()
   const publicKey = {

@@ -427,6 +427,10 @@ namespace Pylaios.Features.Database.Migrations
                     b.Property<DateTimeOffset?>("LastUsedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Name")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<byte[]>("PublicKey")
                         .IsRequired()
                         .HasColumnType("bytea");

@@ -14,7 +14,9 @@
   H. GET /api/users 令牌边界：client_credentials 令牌放行、用户令牌与伪造令牌 401
   G. MFA/WebAuthn 边界条件（Fido2 preview 专项回归）：
      TOTP enroll 强制 HTTPS、伪造 transactionId/attestation 拒绝；
-     可直连后端时（--backend-url）额外覆盖 TOTP 正向注册 + 登录 step-up + 重放防护
+     可直连后端时（--backend-url）额外覆盖 TOTP 正向注册 + step-up + 重放防护
+  I. WebAuthn 凭据管理（需 --backend-url）：列表不泄漏敏感字段、缺 CSRF/未
+     step-up 拒绝、不存在凭据 404、超长名称拒绝
 
 输出单行 JSON 到 stdout（success/scenarios/failures），exit 0/1。
 诊断信息走 stderr。
@@ -261,6 +263,14 @@ def totp_code(secret_b32: str, step: int = 30, digits: int = 6,
     return str(binary % (10 ** digits)).zfill(digits)
 
 
+def wait_next_totp_window() -> None:
+    """等待 TOTP 时间窗滚动，避开 LastTotpCounter 重放拒绝。"""
+    current = int(time.time()) // 30
+    while int(time.time()) // 30 == current:
+        time.sleep(0.5)
+    time.sleep(0.5)
+
+
 def pkce_pair() -> tuple[str, str]:
     verifier = pysecrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(
@@ -282,6 +292,8 @@ class Suite:
         self.failures: list[str] = []
         self.skipped: list[str] = []
         self._current = ""
+        # WebAuthn 边界场景注册的 max TOTP 密钥，供后续凭据管理场景完成 step-up。
+        self.max_totp_secret: str | None = None
 
     def _obtain_user(self) -> tuple[Client, str, str] | None:
         """现有账户模式直接登录；否则注册新用户。失败返回 None。"""
@@ -725,11 +737,11 @@ class Suite:
             return
         b = Client(backend_url)
         # 此时 max 尚未注册任何 MFA，可正常登录取得会话
-        bst, bbody, raw = b.post("/api/auth/login", payload={
+        bst, _, raw = b.post("/api/auth/login", payload={
             "usernameOrEmail": max_username, "password": max_password})
         if not self.check(bst == 200, f"直连后端 max 登录应 200，实际 {bst} {raw[:160]}"):
             return
-        st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll",
+        st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
                                   extra_headers={"X-Forwarded-Proto": "https"})
         enrolled = st == 200 and body and body.get("enrollmentId")
         if not self.check(enrolled,
@@ -737,35 +749,146 @@ class Suite:
             return
         enrollment_id = body["enrollmentId"]
         secret_b32 = body["secret"]
-        now = time.time()
-        code_v = totp_code(secret_b32, t=now)
         st, body, raw = b.post("/api/auth/mfa/totp/confirm", csrf=True, payload={
-            "enrollmentId": enrollment_id, "code": code_v})
+            "enrollmentId": enrollment_id, "code": totp_code(secret_b32)})
         self.check(st == 200, f"TOTP confirm 应 200，实际 {st} {raw[:200]}")
         if st != 200:
             return
+        self.max_totp_secret = secret_b32
 
-        # 启用 TOTP 后 max 登录必须 step-up
-        m2, st, body = login_client(backend_url, max_username, max_password)
-        self.check(st == 401 and body and body.get("errorCode") == "mfa_required"
-                   and body.get("mfaTransactionId"),
-                   f"启用 TOTP 后登录应 mfa_required，实际 {st} {body}")
-        if st != 401:
+        # dev 容器默认关闭登录 MFA 强制（RequireForAdmin/RequireWebAuthnForMax），
+        # 但已注册 MFA 后敏感操作 step-up 仍强制；用 TOTP step-up 正向流 + 重放防护覆盖。
+        st, body, raw = b.post("/api/auth/mfa/step-up", csrf=True)
+        if not self.check(st == 200 and body and body.get("transactionId"),
+                          f"TOTP step-up 开始应 200，实际 {st} {raw[:200]}"):
             return
-        tx = body["mfaTransactionId"]
-        st, body, raw = m2.post("/api/auth/mfa/verify", csrf=True, payload={
+        tx = body["transactionId"]
+        code_v = totp_code(secret_b32)
+        st, body, raw = b.post("/api/auth/mfa/step-up/totp", csrf=True, payload={
             "transactionId": tx, "code": code_v})
-        self.check(st == 200, f"首验 TOTP 码应 200 完成登录，实际 {st} {raw[:200]}")
+        self.check(st == 200, f"首验 TOTP step-up 应 200，实际 {st} {raw[:200]}")
+        if st != 200:
+            return
 
         # 重放防护：新事务中同一时间窗的码必须被 LastTotpCounter 拒绝
-        _, st2, body2 = login_client(backend_url, max_username, max_password)
-        if not self.check(st2 == 401 and body2 and body2.get("mfaTransactionId"),
-                          "第二次登录应再次要求 MFA"):
+        st, body, raw = b.post("/api/auth/mfa/step-up", csrf=True)
+        if not self.check(st == 200 and body and body.get("transactionId"),
+                          f"第二次 step-up 开始应 200，实际 {st} {raw[:160]}"):
             return
-        st, body, raw = m2.post("/api/auth/mfa/verify", csrf=True, payload={
-            "transactionId": body2["mfaTransactionId"], "code": code_v})
+        st, body, raw = b.post("/api/auth/mfa/step-up/totp", csrf=True, payload={
+            "transactionId": body["transactionId"], "code": code_v})
         self.check(st in (400, 401) and body and body.get("errorCode") == "mfa_invalid",
                    f"重放同一 TOTP 码应 mfa_invalid，实际 {st} {raw[:200]}")
+
+    # ---- I. WebAuthn 凭据管理端点（需 --backend-url，TOTP enroll 强制 HTTPS）----
+    def s_mfa_webauthn_credentials(self, candidates: list[tuple[str, str]],
+                                   backend_url: str | None):
+        if not backend_url:
+            self.skipped.append("mfa_webauthn_credentials(no-backend-url)")
+            return
+        max_username, max_password = self.existing or (candidates[0] if candidates else ("", ""))
+        if not max_password:
+            self.skipped.append("mfa_webauthn_credentials(no-credentials)")
+            return
+
+        b = Client(backend_url)
+        bst, body, raw = b.post("/api/auth/login", payload={
+            "usernameOrEmail": max_username, "password": max_password})
+        secret_b32 = self.max_totp_secret
+        if bst == 401 and body and body.get("errorCode") == "mfa_required":
+            # 由前序 mfa_webauthn_edges 场景复用 TOTP 密钥完成登录；
+            # 若单独运行本场景且已存在未知 MFA，无法恢复密钥，跳过而非误报。
+            if not secret_b32:
+                self.skipped.append("mfa_webauthn_credentials(existing-mfa-no-totp-secret)")
+                return
+            tx = body.get("mfaTransactionId")
+            if not self.check(bool(tx), f"mfa_required 响应缺少 transactionId: {body}"):
+                return
+            # 登录 MFA verify 是匿名端点，补签 CSRF 会 401；等待下一时间窗避开重放
+            wait_next_totp_window()
+            st, body, raw = b.post("/api/auth/mfa/verify", payload={
+                "transactionId": tx, "code": totp_code(secret_b32)})
+            if not self.check(st == 200, f"凭据管理 max 完成 MFA 登录应 200，实际 {st} {raw[:200]}"):
+                return
+        elif bst == 200:
+            # 全新环境：注册 TOTP，使后续 MFA step-up 可用
+            st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
+                                      extra_headers={"X-Forwarded-Proto": "https"})
+            if not self.check(st == 200 and body and body.get("enrollmentId"),
+                              f"凭据管理 TOTP enroll 应 200，实际 {st} {raw[:160]}"):
+                return
+            secret_b32 = body["secret"]
+            enrollment_id = body["enrollmentId"]
+            st, body, raw = b.post("/api/auth/mfa/totp/confirm", csrf=True, payload={
+                "enrollmentId": enrollment_id, "code": totp_code(secret_b32)})
+            self.check(st == 200, f"凭据管理 TOTP confirm 应 200，实际 {st} {raw[:200]}")
+            if st != 200:
+                return
+            self.max_totp_secret = secret_b32
+        else:
+            self.check(False, f"凭据管理 max 登录应 200 或 mfa_required，实际 {bst} {raw[:160]}")
+            return
+
+        # 未登录 GET credentials → 401
+        anon = Client(backend_url)
+        st, body, raw = anon.get("/api/auth/mfa/webauthn/credentials")
+        self.check(st == 401 and body and body.get("errorCode") == "unauthorized",
+                   f"未登录 GET credentials 应 401 unauthorized，实际 {st} {raw[:160]}")
+
+        # 已登录 GET credentials → 数组且不包含敏感字段
+        st, body, raw = b.get("/api/auth/mfa/webauthn/credentials")
+        if not self.check(st == 200 and isinstance(body, dict)
+                          and isinstance(body.get("credentials"), list),
+                          f"已登录 GET credentials 应 200 数组，实际 {st} {raw[:200]}"):
+            return
+        for cred in body["credentials"]:
+            self.check("id" in cred and "createdAt" in cred,
+                       f"credentials 元素缺字段: {str(cred)[:200]}")
+        self.check(not any(k in json.dumps(body) for k in
+                           ("credentialId", "publicKey", "signCount")),
+                   "credentials 响应不得泄漏 credentialId/publicKey/signCount")
+
+        # 缺少用户侧 CSRF token 的写请求 → 403 csrf_invalid
+        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
+                                  payload={"name": "x"})
+        self.check(st == 403 and body and body.get("errorCode") == "csrf_invalid",
+                   f"PATCH 缺 CSRF 应 403 csrf_invalid，实际 {st} {raw[:160]}")
+
+        # 未经 Step-up 的删除 → 403 mfa_step_up_required
+        st, body, raw = b.request("DELETE", "/api/auth/mfa/webauthn/credentials/999999",
+                                  csrf=True)
+        self.check(st == 403 and body and body.get("errorCode") == "mfa_step_up_required",
+                   f"DELETE 未经 step-up 应 403 mfa_step_up_required，实际 {st} {raw[:160]}")
+
+        # 完成 Step-up（TOTP），等下一个时间窗避免 LastTotpCounter 重放拒绝
+        st, body, raw = b.post("/api/auth/mfa/step-up", csrf=True)
+        if not self.check(st == 200 and body and body.get("transactionId"),
+                          f"step-up 开始应 200，实际 {st} {raw[:160]}"):
+            return
+        tx = body["transactionId"]
+        wait_next_totp_window()
+        st, body, raw = b.post("/api/auth/mfa/step-up/totp", csrf=True, payload={
+            "transactionId": tx, "code": totp_code(secret_b32)})
+        self.check(st == 200, f"step-up TOTP 验证应 200，实际 {st} {raw[:200]}")
+        if st != 200:
+            return
+
+        # Step-up 后：不存在/他人凭据 → 404 credential_not_found（不暴露归属）
+        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
+                                  csrf=True, payload={"name": "x"})
+        self.check(st == 404 and body and body.get("errorCode") == "credential_not_found",
+                   f"PATCH 不存在凭据应 404 credential_not_found，实际 {st} {raw[:160]}")
+        st, body, raw = b.request("DELETE", "/api/auth/mfa/webauthn/credentials/999999",
+                                  csrf=True)
+        self.check(st == 404 and body and body.get("errorCode") == "credential_not_found",
+                   f"DELETE 不存在凭据应 404 credential_not_found，实际 {st} {raw[:160]}")
+
+        # 超长名称（65 字符）应被模型校验拒绝
+        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
+                                  csrf=True, payload={"name": "a" * 65})
+        self.check(st in (400, 422),
+                   f"PATCH 65 字符名称应 400/422，实际 {st} {raw[:160]}")
+        # 注：409 last_mfa_method 与正向重命名持久化需要真实认证器注册凭据，CI 无法伪造。
 
 
 # ══════════════════════════ 入口 ══════════════════════════
@@ -774,7 +897,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
     parser.add_argument("--backend-url", default=None,
-                        help="直连后端地址（如 http://127.0.0.1:5000），提供时额外覆盖 TOTP 正向流与重放防护")
+                        help="直连后端地址（如 http://127.0.0.1:5000），提供时额外覆盖 TOTP 正向流/重放与 WebAuthn 凭据管理")
     parser.add_argument("--container", default="pylai-dev")
     parser.add_argument("--account", default=None,
                         help="现有账户凭据：'user:pass' 或种子别名 MAX/ADMIN/USER（提供后跳过需注册/改密的场景）")
@@ -825,6 +948,8 @@ def main() -> int:
         ("oauth_pkce", suite.s_oauth_pkce),
         ("users_api_token_scope", suite.s_users_api_token_scope),
         ("mfa_webauthn_edges", lambda: suite.s_mfa_webauthn_edges(
+            candidates("MAX", "max@pylaios.local"), args.backend_url)),
+        ("mfa_webauthn_credentials", lambda: suite.s_mfa_webauthn_credentials(
             candidates("MAX", "max@pylaios.local"), args.backend_url)),
     ]
     only = {x.strip() for x in args.only.split(",")} if args.only else None

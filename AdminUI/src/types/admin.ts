@@ -164,6 +164,18 @@ export interface AdminAuditLogItem {
   details: string | null
 }
 
+export interface MfaWebAuthnCredential {
+  id: number
+  name: string | null
+  createdAt: string
+  lastUsedAt: string | null
+  transports: string[]
+}
+
+export interface MfaWebAuthnCredentialListResponse extends ApiEnvelope {
+  credentials: MfaWebAuthnCredential[]
+}
+
 export interface AdminClientItem {
   id: string
   clientId: string

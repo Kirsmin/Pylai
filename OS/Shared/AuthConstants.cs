@@ -85,6 +85,8 @@ public static class AuthConstants
         public const string ConfirmationSucceeded = "ConfirmationSucceeded";
         public const string ConfirmationFailed = "ConfirmationFailed";
         public const string MfaStepUpSkipped = "MfaStepUpSkipped";
+        public const string MfaCredentialDeleted = "MfaCredentialDeleted";
+        public const string MfaCredentialRenamed = "MfaCredentialRenamed";
         public const string InviteCodeCreated = "InviteCodeCreated";
         public const string InviteCodeUpdated = "InviteCodeUpdated";
         public const string InviteCodeDeleted = "InviteCodeDeleted";

@@ -228,6 +228,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(e => e.CredentialId).IsRequired();
             entity.Property(e => e.PublicKey).IsRequired();
             entity.Property(e => e.Transports).HasMaxLength(256);
+            entity.Property(e => e.Name).HasMaxLength(64);
             entity.HasIndex(e => e.CredentialId).IsUnique();
             entity.HasIndex(e => e.UserUid);
             entity.HasOne<User>()

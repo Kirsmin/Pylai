@@ -274,7 +274,8 @@ jobs:
       - name: Smoke test — 完整实例启动 + 健康检查 + 并发注册
         run: |
           set -euo pipefail
-          docker run -d --name smoke -p 8080:80 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
+          # 5000 仅供回归脚本直连后端（验证 TOTP enroll 的 HTTPS 强制与凭据管理 step-up）
+          docker run -d --name smoke -p 8080:80 -p 127.0.0.1:5000:5000 -e PYLAI_ROLE=dev -e PYL_UI_URL=http://localhost:8080 pylai-dev:latest
 
           for i in $(seq 1 30); do
             sleep 5
@@ -326,6 +327,8 @@ jobs:
           python3 scripts/security-regression.py --base-url http://localhost:8080 --container smoke
 
           # 认证核心路径回归（必过门禁）：登录锁定/会话撤销/CSRF/MFA边界/OAuth PKCE/Refresh 轮换
-          python3 scripts/auth-regression.py --base-url http://localhost:8080 --container smoke
+          # --backend-url 直连后端：覆盖 TOTP 正向流、重放防护、WebAuthn 凭据管理 step-up
+          python3 scripts/auth-regression.py --base-url http://localhost:8080 \
+            --backend-url http://127.0.0.1:5000 --container smoke
 
           docker rm -f smoke >/dev/null 2>&1
