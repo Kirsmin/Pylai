@@ -742,7 +742,7 @@ class Suite:
         if not self.check(bst == 200, f"直连后端 max 登录应 200，实际 {bst} {raw[:160]}"):
             return
         st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
-                                  extra_headers={"X-Forwarded-Proto": "https"})
+                                  payload={}, extra_headers={"X-Forwarded-Proto": "https"})
         enrolled = st == 200 and body and body.get("enrollmentId")
         if not self.check(enrolled,
                           f"直连后端 + proto=https 的 enroll 应 200，实际 {st} {raw[:200]}"):
@@ -813,7 +813,7 @@ class Suite:
         elif bst == 200:
             # 全新环境：注册 TOTP，使后续 MFA step-up 可用
             st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
-                                      extra_headers={"X-Forwarded-Proto": "https"})
+                                      payload={}, extra_headers={"X-Forwarded-Proto": "https"})
             if not self.check(st == 200 and body and body.get("enrollmentId"),
                               f"凭据管理 TOTP enroll 应 200，实际 {st} {raw[:160]}"):
                 return
