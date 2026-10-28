@@ -125,6 +125,10 @@ class Client:
         st, _, body, _ = self.request("POST", path, **kw)
         return st, _json(body), body
 
+    def patch(self, path: str, **kw):
+        st, _, body, _ = self.request("PATCH", path, **kw)
+        return st, _json(body), body
+
     def delete(self, path: str, **kw):
         st, _, body, _ = self.request("DELETE", path, **kw)
         return st, _json(body), body
@@ -741,8 +745,8 @@ class Suite:
             "usernameOrEmail": max_username, "password": max_password})
         if not self.check(bst == 200, f"直连后端 max 登录应 200，实际 {bst} {raw[:160]}"):
             return
-        st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
-                                  payload={}, extra_headers={"X-Forwarded-Proto": "https"})
+        st, body, raw = b.post("/api/auth/mfa/totp/enroll", csrf=True,
+                               payload={}, extra_headers={"X-Forwarded-Proto": "https"})
         enrolled = st == 200 and body and body.get("enrollmentId")
         if not self.check(enrolled,
                           f"直连后端 + proto=https 的 enroll 应 200，实际 {st} {raw[:200]}"):
@@ -812,8 +816,8 @@ class Suite:
                 return
         elif bst == 200:
             # 全新环境：注册 TOTP，使后续 MFA step-up 可用
-            st, body, raw = b.request("POST", "/api/auth/mfa/totp/enroll", csrf=True,
-                                      payload={}, extra_headers={"X-Forwarded-Proto": "https"})
+            st, body, raw = b.post("/api/auth/mfa/totp/enroll", csrf=True,
+                                   payload={}, extra_headers={"X-Forwarded-Proto": "https"})
             if not self.check(st == 200 and body and body.get("enrollmentId"),
                               f"凭据管理 TOTP enroll 应 200，实际 {st} {raw[:160]}"):
                 return
@@ -849,14 +853,13 @@ class Suite:
                    "credentials 响应不得泄漏 credentialId/publicKey/signCount")
 
         # 缺少用户侧 CSRF token 的写请求 → 403 csrf_invalid
-        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
-                                  payload={"name": "x"})
+        st, body, raw = b.patch("/api/auth/mfa/webauthn/credentials/999999",
+                                payload={"name": "x"})
         self.check(st == 403 and body and body.get("errorCode") == "csrf_invalid",
                    f"PATCH 缺 CSRF 应 403 csrf_invalid，实际 {st} {raw[:160]}")
 
         # 未经 Step-up 的删除 → 403 mfa_step_up_required
-        st, body, raw = b.request("DELETE", "/api/auth/mfa/webauthn/credentials/999999",
-                                  csrf=True)
+        st, body, raw = b.delete("/api/auth/mfa/webauthn/credentials/999999", csrf=True)
         self.check(st == 403 and body and body.get("errorCode") == "mfa_step_up_required",
                    f"DELETE 未经 step-up 应 403 mfa_step_up_required，实际 {st} {raw[:160]}")
 
@@ -874,18 +877,17 @@ class Suite:
             return
 
         # Step-up 后：不存在/他人凭据 → 404 credential_not_found（不暴露归属）
-        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
-                                  csrf=True, payload={"name": "x"})
+        st, body, raw = b.patch("/api/auth/mfa/webauthn/credentials/999999",
+                                csrf=True, payload={"name": "x"})
         self.check(st == 404 and body and body.get("errorCode") == "credential_not_found",
                    f"PATCH 不存在凭据应 404 credential_not_found，实际 {st} {raw[:160]}")
-        st, body, raw = b.request("DELETE", "/api/auth/mfa/webauthn/credentials/999999",
-                                  csrf=True)
+        st, body, raw = b.delete("/api/auth/mfa/webauthn/credentials/999999", csrf=True)
         self.check(st == 404 and body and body.get("errorCode") == "credential_not_found",
                    f"DELETE 不存在凭据应 404 credential_not_found，实际 {st} {raw[:160]}")
 
         # 超长名称（65 字符）应被模型校验拒绝
-        st, body, raw = b.request("PATCH", "/api/auth/mfa/webauthn/credentials/999999",
-                                  csrf=True, payload={"name": "a" * 65})
+        st, body, raw = b.patch("/api/auth/mfa/webauthn/credentials/999999",
+                                csrf=True, payload={"name": "a" * 65})
         self.check(st in (400, 422),
                    f"PATCH 65 字符名称应 400/422，实际 {st} {raw[:160]}")
         # 注：409 last_mfa_method 与正向重命名持久化需要真实认证器注册凭据，CI 无法伪造。
