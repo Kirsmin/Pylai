@@ -911,7 +911,6 @@ class UpdateService:
         updater = SelfUpdater(client, self.ctx.manager, self.ctx.state)
         updated = updater.update(
             target_version=target_version,
-            skip_prompt=yes,
             dry_run=dry_run,
             reexec_args=reexec_args,
         )
@@ -1096,6 +1095,7 @@ class UpdateService:
                     out("已取消。")
                     return
                 out("[警告] 正在执行版本回退（降级），请确认数据兼容性。")
+            self.check_target_schema(client, target_version, force=force)
             tar_path = ensure_remote_tar(client, ctx.manager, target_version, force=force)
         else:
             tar_path = select_tar(yes=yes, prompt="请选择新版本安装包")
@@ -1178,6 +1178,56 @@ class UpdateService:
             "  3) 重新执行 `ManagePylai.pyz update --force-pg-upgrade`（新库将全新初始化）；\n"
             "  4) `ManagePylai.pyz backup restore <备份名>` 恢复数据。\n"
             "数据可丢弃时，可直接执行 `ManagePylai.pyz update --force-pg-upgrade`。"
+        )
+
+    @staticmethod
+    def _schema_ts(schema: str) -> int:
+        """取 dbSchemaVersion 前缀时间戳（20261028070411_xxx）用于方向比较。"""
+        ts, _, _ = str(schema).partition("_")
+        return int(ts) if ts.isdigit() else 0
+
+    def check_target_schema(
+        self,
+        client: ReleaseClient,
+        target_version: str,
+        *,
+        force: bool = False,
+    ) -> None:
+        """云端更新前按 dbSchemaVersion 做方向性校验。
+
+        正向变更（目标 schema 更新）：新容器首启时由 entrypoint 自动执行
+        `db migrate`，无需人工干预；反向变更（降级）时本地数据库已应用更新的迁移，
+        直接降级会因 databaseAhead 拒绝启动（serve Fail Closed），在此提前拦截。--force 放行。
+        """
+        target = client.fetch_release_json(target_version)
+        current = client.fetch_release_json(self.ctx.state.version)
+        if not target or not current:
+            out("[警告] 无法完整获取目标/当前版本的 release.json，已跳过数据库 schema 校验。")
+            return
+        target_schema = target.get("dbSchemaVersion")
+        current_schema = current.get("dbSchemaVersion")
+        if not target_schema or not current_schema:
+            return
+        if target_schema == current_schema:
+            return
+
+        if self._schema_ts(target_schema) > self._schema_ts(current_schema):
+            out(f"==> 目标版本包含数据库迁移: {current_schema} -> {target_schema}")
+            out("    新容器首次启动时由 entrypoint 自动执行 db migrate，无需手动操作。")
+            return
+
+        if force:
+            out(
+                f"[警告] 已强制接受数据库 schema 降级（{current_schema} -> {target_schema}），"
+                "需自行将数据库恢复到与目标匹配的 schema，否则后端拒绝启动。"
+            )
+            return
+        raise ManageError(
+            f"无法降级：目标 v{target_version} 的数据库 schema（{target_schema}）"
+            f"旧于当前数据库（{current_schema}）。\n"
+            "本地数据库已应用更新的迁移，直接降级将因 databaseAhead 拒绝启动。\n"
+            "请选择不低于当前 schema 的版本，"
+            "或执行 `update --from-remote --force` 强制降级（需自行恢复匹配 schema 的数据库备份）。"
         )
 
     def preflight_config(self, image: str) -> None:

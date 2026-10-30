@@ -108,7 +108,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.39"
+__version__ = "0.1.40"
 
 
 class ManageError(Exception):
@@ -2851,38 +2851,11 @@ class SelfUpdater:
 
         return version, info
 
-    def _check_schema_compat(self, release_info: Json) -> bool:
-        remote_schema = release_info.get("dbSchemaVersion")
-        if not remote_schema:
-            return True
-
-        if not self.state or not self.state.installed:
-            return True
-
-        current_pylai_version = self.state.version
-        current_release = self.client.fetch_release_json(current_pylai_version)
-
-        if not current_release:
-            out(
-                f"警告：无法获取当前 Pylai {current_pylai_version} 的 release.json，"
-                "跳过 schema 兼容性检查。"
-            )
-            return True
-
-        current_schema = current_release.get("dbSchemaVersion", "0")
-        if remote_schema == current_schema:
-            return True
-
-        out(f"dbSchemaVersion 不兼容: 当前 {current_schema} -> 目标 {remote_schema}")
-        out("此更新需要手动数据库迁移，请查看迁移文档后手动执行。")
-        return False
-
     def update(
         self,
         *,
         force: bool = False,
         dry_run: bool = False,
-        skip_prompt: bool = False,
         target_version: str | None = None,
         reexec_args: Sequence[str] | None = None,
     ) -> bool:
@@ -2893,13 +2866,12 @@ class SelfUpdater:
         """
         if target_version:
             version = normalize_release_version(target_version)
-            info = self.client.fetch_release_json(version) or {}
         else:
             result = self.client.check_latest()
             if not result:
                 out("无法获取最新版本信息。")
                 return False
-            version, _, info = result
+            version = result[0]
 
         if not force and not self.version_gt(version, __version__):
             if target_version:
@@ -2909,13 +2881,6 @@ class SelfUpdater:
             return False
 
         out(f"==> 更新管理工具: {__version__} -> {version}")
-
-        if not self._check_schema_compat(info):
-            if skip_prompt:
-                out("Schema 不兼容且非交互模式，拒绝更新管理工具。")
-                return False
-            if not ask_bool("Schema 不兼容，仍强制更新管理工具（不推荐）？", False):
-                return False
 
         if self.script_path.suffix.lower() != ".pyz":
             raise ManageError(
@@ -3004,7 +2969,7 @@ class SelfUpdater:
 
         if yes:
             out(message + " [Y/n] Y (非交互模式)")
-            if self.update(skip_prompt=yes):
+            if self.update():
                 out("管理工具已更新，请重新运行命令。")
                 sys.exit(0)
             return

@@ -336,7 +336,7 @@ def cmd_self_update(ctx: AppContext, args: argparse.Namespace) -> None:
         else:
             out("当前已是最新，或无法获取版本信息。")
     else:
-        updater.update(force=args.force, dry_run=args.dry_run, skip_prompt=args.yes)
+        updater.update(force=args.force, dry_run=args.dry_run)
 
 
 def cmd_compose(ctx: AppContext, args: argparse.Namespace) -> None:
@@ -515,7 +515,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_p.add_argument(
         "--force",
         action="store_true",
-        help="忽略下载缓存，强制重新下载",
+        help="强制重新下载安装包；同时放行数据库 schema 降级保护",
     )
 
     self_update_p = subparsers.add_parser("self-update", help="更新管理工具自身")
