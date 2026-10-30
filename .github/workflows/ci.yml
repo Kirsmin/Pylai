@@ -46,10 +46,6 @@ jobs:
           python3 scripts/check_versions.py
           python3 Manager/build.py --check
 
-          # 根目录只保留 start-dev.py（废弃工具）；管理工具源码全在 Manager/，
-          # 旧入口 ManagePylai.py 与旧构建器 build_managepylai.py 不再存在。
-          test "$(ls ./*.py)" = "./start-dev.py"
-
       - name: ManagePylai.pyz 发布物构建与校验
         run: |
           set -euo pipefail

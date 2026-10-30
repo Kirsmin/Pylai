@@ -16,13 +16,15 @@ _✨简单单机 Docker 部署的 OAuth2（客户端/服务端）/OIDC 用户系
 > [!TIP]
 > 推荐提前配置代理工具，或者使用镜像源替代
 
-1. 安装 Docker、Pnpm、Dotnet 工具链
+1. 安装 Pnpm、Dotnet 工具链（可选 Docker，用于开发容器）
 
 2. 拉取本仓库 `git clone https://github.com/Kirsmin/Pylai.git`
 
-3. 进入 UI/ AdminUI/ 页面，输入 `pnpm install` 部署
+3. 进入 `UI/`、`AdminUI/` 执行 `pnpm install`
 
-4. 运行 `python start-dev.py`
+4. 按 `OS/pylai.example.toml` 准备配置并初始化数据库，运行 `dotnet run --project OS/Pylaios.csproj serve`
+
+5. 在 `UI/`、`AdminUI/` 分别执行 `pnpm dev`
 
 ## 协议
 
