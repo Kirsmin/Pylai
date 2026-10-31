@@ -45,6 +45,7 @@ from core import (
     confirm_danger,
     converge_stack,
     out,
+    redact_log_line,
     service_action,
     uninstall,
 )
@@ -190,10 +191,122 @@ class InteractiveMenu:
                 ("手动拉起（compose up -d）", lambda: converge_stack(self.ctx)),
                 ("Compose 直通（手动操作容器）", self._compose_passthrough),
                 ("组件管理", lambda: ComponentService(self.ctx).manage()),
-                ("查看最近日志", lambda: self.ctx.docker.view_logs(200)),
-                ("实时日志", lambda: self.ctx.docker.view_logs(200, follow=True)),
+                ("日志", self._logs_menu),
             ])
         self.run_submenu("服务", items)
+
+    # ---- 日志两级菜单 ----
+
+    _LOG_SERVICES: tuple[tuple[str, str], ...] = (
+        ("Pylai 后端", "backend"),
+        ("Nginx", "nginx"),
+        ("PostgreSQL", "postgres"),
+        ("Redis", "redis"),
+    )
+
+    def _logs_menu(self) -> None:
+        self.run_submenu(
+            "日志",
+            [
+                ("实时跟踪", self._logs_follow_menu),
+                ("最近日志", self._logs_recent_menu),
+                ("诊断摘要", self._logs_summary),
+            ],
+        )
+
+    def _last_log_service(self) -> str:
+        """上次选择的服务（默认 backend），存 state.json。"""
+        last = str(self.ctx.state.get("logs_last_service") or "backend")
+        return last if any(svc == last for _, svc in self._LOG_SERVICES) else "backend"
+
+    def _remember_log_service(self, service: str) -> None:
+        if service != "all":
+            self.ctx.state.set("logs_last_service", service)
+            self.ctx.state.save()
+
+    def _choose_log_service(self, title: str) -> str | None:
+        """服务选择：显示实时状态，空输入回车选中默认项（上次选择，首次 backend）。"""
+        default = self._last_log_service()
+        options: list[tuple[str, str]] = [("全部服务", "all")]
+        for label, svc in self._LOG_SERVICES:
+            try:
+                status = self.ctx.docker.service_status(svc)  # type: ignore[arg-type]
+            except Exception:
+                status = "unknown"
+            mark = "（默认）" if svc == default else ""
+            options.append((f"{label}（{status}）{mark}", svc))
+
+        self._print_header()
+        out(f"\n? {title}")
+        for idx, (label, _) in enumerate(options, 1):
+            out(f"  {idx}. {label}")
+        out("  b. 返回")
+        choice = self._read_choice()
+        if choice in {"b", "back"}:
+            return None
+        if choice in {"q", "quit", "exit"}:
+            raise SystemExit(0)
+        if not choice:
+            return default
+        try:
+            return options[int(choice) - 1][1]
+        except (ValueError, IndexError):
+            out("! 选择无效。")
+            return None
+
+    def _logs_follow_menu(self) -> None:
+        while True:
+            service = self._choose_log_service("实时跟踪 · 选择服务")
+            if service is None:
+                return
+            self._remember_log_service(service)
+            try:
+                # 停止的服务：view_logs 明确提示「服务未运行，无法跟踪」后返回菜单
+                self.ctx.docker.view_logs(200, follow=True, service=service)
+            except ManageError as exc:
+                out(f"! {exc}")
+
+    def _logs_recent_menu(self) -> None:
+        while True:
+            service = self._choose_log_service("最近日志 · 选择服务")
+            if service is None:
+                return
+            self._remember_log_service(service)
+            try:
+                self.ctx.docker.view_logs(200, service=service)
+            except ManageError as exc:
+                out(f"! {exc}")
+            self._pause()
+
+    def _logs_summary(self) -> None:
+        """诊断摘要：各服务状态 + 最近日志中 error/exception/warning 行摘要。"""
+        docker = self.ctx.docker
+        out("\n诊断摘要")
+        total = 0
+        for label, svc in self._LOG_SERVICES:
+            try:
+                status = docker.service_status(svc)  # type: ignore[arg-type]
+            except Exception:
+                status = "unknown"
+            warn = "" if status == "running" else " ⚠"
+            out(f"  {label}（{svc}）: {status}{warn}")
+            text = docker.logs_text(100, service=svc) or ""
+            hits = [
+                line
+                for line in text.splitlines()
+                if re.search(r"(?i)error|exception|warning|fatal|failed|crit", line)
+            ]
+            if hits:
+                total += len(hits)
+                out(f"    最近 error/warning {len(hits)} 条，末尾 5 条：")
+                for line in hits[-5:]:
+                    out(f"      {redact_log_line(line)}")
+            else:
+                out("    最近日志无 error/warning")
+        if total:
+            out(f"\n共 {total} 条 error/warning，可用「最近日志」查看完整上下文。")
+        else:
+            out("\n未发现明显异常。")
 
     def _compose_passthrough(self) -> None:
         """手动直通 docker compose：例如 up -d nginx / ps -a / logs -f nginx。"""
@@ -314,14 +427,27 @@ class InteractiveMenu:
             out("更新可用: " + "；".join(notices))
 
 
+def _apply_memory_tier(ctx: AppContext, args: argparse.Namespace) -> None:
+    """install/update 的 --memory-tier：写入 ManagerConfig.toml [Compose] MemoryTier。"""
+    tier = getattr(args, "memory_tier", None)
+    if tier:
+        ctx.manager.set_memory_tier(tier)
+        out(f"内存档位已设置为 {tier}（写入 ManagerConfig.toml [Compose] MemoryTier）。")
+
+
 def cmd_install(ctx: AppContext, args: argparse.Namespace) -> None:
     if ctx.state.installed:
         raise ManageError("检测到已有安装。如需重新安装，请先卸载。")
 
+    _apply_memory_tier(ctx, args)
     InstallService(ctx).install_cli(args)
 
 
 def cmd_update(ctx: AppContext, args: argparse.Namespace) -> None:
+    if getattr(args, "check_only", False) and getattr(args, "memory_tier", None):
+        raise ManageError("--memory-tier 不能与 --check-only 同时使用。")
+
+    _apply_memory_tier(ctx, args)
     UpdateService(ctx).update_cli(args)
 
 
@@ -357,12 +483,38 @@ def cmd_compose(ctx: AppContext, args: argparse.Namespace) -> None:
 def cmd_logs(ctx: AppContext, args: argparse.Namespace) -> None:
     ctx.require_installed()
 
-    tail = getattr(args, "tail", 200)
+    tail: str = str(getattr(args, "tail", "200"))
+    services: list[str] = list(getattr(args, "services", None) or ["all"])
+
+    if args.export:
+        ctx.docker.export_logs(
+            Path(args.export),
+            services=None if "all" in services else services,  # type: ignore[arg-type]
+            since=args.since,
+            tail=tail,
+        )
+        return
+
     if args.follow:
-        ctx.docker.view_logs(tail=tail, follow=True, service=args.service, verbose=args.verbose)
+        ctx.docker.view_logs(
+            tail=tail,
+            follow=True,
+            service=services,  # type: ignore[arg-type]
+            verbose=args.verbose,
+            since=args.since,
+            until=args.until,
+            grep=args.grep,
+        )
     else:
-        text = ctx.docker.logs_text(tail=tail, service=args.service)
-        out(text.strip() or "（暂无日志输出）")
+        text = ctx.docker.logs_text(
+            tail,
+            service=services,  # type: ignore[arg-type]
+            since=args.since,
+            until=args.until,
+            grep=args.grep,
+        )
+        if text is not None:
+            out(text.strip() or "（暂无日志输出）")
 
 
 def cmd_config(ctx: AppContext, args: argparse.Namespace) -> None:
@@ -543,11 +695,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     logs_p = subparsers.add_parser("logs", help="查看日志")
     logs_p.add_argument(
-        "service",
-        nargs="?",
-        default="all",
+        "services",
+        nargs="*",
+        default=["all"],
         choices=["backend", "nginx", "postgres", "redis", "all"],
-        help="服务名",
+        help="服务名（可多个，如 logs backend nginx -f；缺省 all）",
     )
     logs_p.add_argument(
         "-f", "--follow",
@@ -558,7 +710,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--tail",
         type=str,
         default="200",
-        help="显示最后 N 行（默认 200，all 表示全部）",
+        help="显示最后 N 行（默认 200，all 表示全部；all 或 >10000 时流式输出并给出警告）",
+    )
+    logs_p.add_argument(
+        "--since",
+        help="只显示该时间之后的日志（如 15m、1h、2026-10-31T10:00），透传 docker compose logs --since",
+    )
+    logs_p.add_argument(
+        "--until",
+        help="只显示该时间之前的日志（格式同 --since），透传 docker compose logs --until",
+    )
+    logs_p.add_argument(
+        "--grep",
+        help="正则显示过滤（只显示匹配行；仅为显示过滤，不改变后端日志级别）",
+    )
+    logs_p.add_argument(
+        "--export",
+        metavar="FILE",
+        help="导出诊断包（.tar.gz，每服务一个文件，内容脱敏，权限 600）",
+    )
+
+    memory_tier_help = (
+        "容器内存护栏档位：safe=2G稳妥(320/192/64/32) "
+        "recommended=1G推荐(256/128/48/24) extreme=1G极限(192/96/32/16)，默认 safe"
+    )
+    install_p.add_argument(
+        "--memory-tier",
+        choices=["safe", "recommended", "extreme"],
+        help=memory_tier_help,
+    )
+    update_p.add_argument(
+        "--memory-tier",
+        choices=["safe", "recommended", "extreme"],
+        help=memory_tier_help,
     )
 
     config_p = subparsers.add_parser("config", help="配置管理")

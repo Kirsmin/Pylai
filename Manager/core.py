@@ -17,10 +17,13 @@ import platform as host_platform
 import re
 import secrets
 import shutil
+import signal
 import socket
 import string
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import tomllib
@@ -28,7 +31,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -66,6 +69,8 @@ CONFIG_FILE = CONFIG_DIR / "pylai.toml"
 # atomic_write() 换 inode 后运行中的容器仍读旧文件，reload 静默失效。
 NGINX_CONF_DIR = CONFIG_DIR / "nginx.d"
 NGINX_CONF_FILE = NGINX_CONF_DIR / "default.conf"
+# Nginx 主配置（compose 挂载为容器 /etc/nginx/nginx.conf，worker_processes 1 内存护栏）
+NGINX_MAIN_FILE = CONFIG_DIR / "nginx.main.conf"
 NGINX_CONF_IN_CONTAINER = "/etc/nginx/conf.d/default.conf"
 LEGACY_NGINX_CONF_FILE = CONFIG_DIR / "nginx.conf"
 CERT_DIR = CONFIG_DIR / "certs"
@@ -77,6 +82,40 @@ HOST_NGINX_FILE = HOME / "host-nginx.conf"
 
 # 云端（GitHub Release）下载的 tar 安装包缓存目录（可通过 ManagerConfig.toml [Updates] DownloadDir 覆盖）
 DEFAULT_DOWNLOAD_DIR = HOME / "downloads"
+
+# Compose override：用户手改的 ~/.pylai/docker-compose.override.yml（compose 标准机制），
+# regenerate() 只重渲染基础 compose，绝不覆盖它；所有 compose 命令统一带上。
+OVERRIDE_FILE = HOME / "docker-compose.override.yml"
+
+# 内存护栏档位：每服务 (mem_limit, mem_reservation)。可被 docker-compose.override.yml 或
+# ManagerConfig.toml [Compose] MemoryTier 覆盖；regenerate/update 不会丢失 override。
+MEMORY_TIERS: dict[str, dict[str, tuple[str, str]]] = {
+    # 2G 稳妥档（默认）
+    "safe": {
+        "backend": ("320m", "160m"),
+        "postgres": ("192m", "96m"),
+        "redis": ("64m", "32m"),
+        "nginx": ("32m", "16m"),
+    },
+    # 1G 推荐档
+    "recommended": {
+        "backend": ("256m", "128m"),
+        "postgres": ("128m", "64m"),
+        "redis": ("48m", "24m"),
+        "nginx": ("24m", "12m"),
+    },
+    # 1G 极限档
+    "extreme": {
+        "backend": ("192m", "96m"),
+        "postgres": ("96m", "48m"),
+        "redis": ("32m", "16m"),
+        "nginx": ("16m", "8m"),
+    },
+}
+DEFAULT_MEMORY_TIER = "safe"
+
+# 日志一次性捕获上限：tail 行数超过该值或 tail=all 时改流式输出，防止大日志撑爆内存
+LOG_CAPTURE_LIMIT = 10000
 
 # 与 deploy/entrypoint.py WEAK_SECRETS 保持一致，本地预检 Fail Closed
 WEAK_SECRETS = {"change-me", "changeme", "password", "secret", "123456", "pylai"}
@@ -90,6 +129,93 @@ SECRET_LINE = re.compile(
     r"^(\s*[^=]*\b(?:Password|Secret|ConnectionString)\s*=\s*).*$",
     re.IGNORECASE,
 )
+
+# ---- 日志显示过滤 / 导出脱敏 ----
+# docker compose logs 行前缀："pylai-nginx-1  | ..."，服务名可能带项目/序号前后缀
+_NGINX_LOG_PREFIX = re.compile(r"^[\w.-]*nginx[\w.-]*\s+\|")
+# Nginx access 行："GET /path HTTP/1.1" 200
+_NGINX_ACCESS = re.compile(r'"(?:GET|HEAD|OPTIONS)\s+(\S+)\s+HTTP/[\d.]+"\s+(\d{3})\b')
+_NGINX_ERROR_MARK = re.compile(r"\[(?:error|crit|alert|emerg)\]")
+_STATIC_EXT = re.compile(
+    r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|webp|avif|ico|ttf|otf|woff2?|txt|xml|json|webmanifest)$",
+    re.IGNORECASE,
+)
+_STATIC_PREFIXES = ("/assets/", "/fonts/")
+
+# 导出诊断包时的脱敏规则：密码/Token/Cookie/Authorization/邮箱/邀请码/SMTP 凭据等
+_LOG_REDACTIONS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(?i)\b(authorization\s*[:=]\s*(?:bearer\s+|basic\s+)?)([^\s,;]+)"),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(password|passwd|pwd|token|secret|api[-_]?key|access[-_]?key|"
+            r"refresh[-_]?token|smtp[-_]?password|invite[-_]?code|invitation[-_]?code)"
+            r"(\s*[:=]\s*)(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"
+        ),
+        r"\1\2***",
+    ),
+    (
+        re.compile(r"(?i)\b(cookie\s*[:=]\s*)([^\s;,]+)"),
+        r"\1***",
+    ),
+    # 独立出现的邀请码（如 INVITE-AB12CD）
+    (re.compile(r"(?i)\binvite-[A-Z0-9]{4,}\b"), "***"),
+    # JWT（eyJ 开头的三段式）
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "***"),
+    # 邮箱
+    (
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+        "***@***.***",
+    ),
+]
+
+
+def is_nginx_noise(line: str) -> bool:
+    """是否 Nginx 静态资源 access 噪音行（verbose 模式下隐藏）。
+
+    只隐藏静态资源的 2xx/304 access；error 行与 5xx 行必须保留。
+    """
+    if not _NGINX_LOG_PREFIX.match(line):
+        return False
+    if _NGINX_ERROR_MARK.search(line):
+        return False
+    match = _NGINX_ACCESS.search(line)
+    if not match:
+        return False
+    path, status = match.group(1), int(match.group(2))
+    if status >= 500:
+        return False
+    if path.startswith(_STATIC_PREFIXES):
+        return True
+    if status == 304:
+        return True
+    return status == 200 and bool(_STATIC_EXT.search(path))
+
+
+def redact_log_line(line: str) -> str:
+    """对单行日志做脱敏（导出诊断包与诊断摘要共用）。"""
+    for pattern, repl in _LOG_REDACTIONS:
+        line = pattern.sub(repl, line)
+    return line
+
+
+def _terminate_logs_process(proc: subprocess.Popen[str], grace: float = 3.0) -> None:
+    """终止 docker compose logs 进程组，确保 Ctrl+C 后不残留子进程。"""
+    if proc.poll() is not None:
+        return
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    with suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=grace)
 
 SUPPORTED_ARCH = {
     "x86_64": "AMD64",
@@ -108,7 +234,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.40"
+__version__ = "0.1.41"
 
 
 class ManageError(Exception):
@@ -1276,6 +1402,7 @@ LastCheck = "{last_check}"
 
 [Compose]
 ProjectName = "{project_name}"
+MemoryTier = "{memory_tier}"
 
 [Security]
 AutoBackupBeforeUpdate = {auto_backup}
@@ -1342,6 +1469,7 @@ Level = "{level}"
             last_check=self.get("Manager", "State", "LastCheck", default=utc_now_iso()),
             skip_version_line=skip_version_line,
             project_name=self.get("Compose", "ProjectName", default="pylai"),
+            memory_tier=self.memory_tier,
             auto_backup="true" if self.auto_backup else "false",
             retention=self.get("Security", "BackupRetentionDays", default=7),
             auto_check="true" if self.auto_check else "false",
@@ -1395,6 +1523,21 @@ Level = "{level}"
     @property
     def project_name(self) -> str:
         return str(self.get("Compose", "ProjectName", default="pylai"))
+
+    @property
+    def memory_tier(self) -> str:
+        """容器内存护栏档位（safe/recommended/extreme），默认 safe。"""
+        tier = str(self.get("Compose", "MemoryTier", default=DEFAULT_MEMORY_TIER)).strip().lower()
+        return tier if tier in MEMORY_TIERS else DEFAULT_MEMORY_TIER
+
+    def set_memory_tier(self, tier: str) -> None:
+        tier = tier.strip().lower()
+        if tier not in MEMORY_TIERS:
+            raise ManageError(
+                f"未知内存档位: {tier}（可选: {', '.join(MEMORY_TIERS)}）"
+            )
+        self.set("Compose", "MemoryTier", value=tier)
+        self.save()
 
     @property
     def auto_backup(self) -> bool:
@@ -1840,6 +1983,9 @@ class DockerCompose:
     project: str = "pylai"
     compose_file: Path = HOME / "docker-compose.yml"
     env_file: Path = HOME / ".env"
+    # compose 标准 override 机制：存在时所有 compose 命令统一带上，
+    # 用户可在此覆盖内存护栏等默认值，regenerate() 不会触碰该文件
+    override_file: Path = OVERRIDE_FILE
 
     def ensure_docker(self) -> None:
         if shutil.which("docker") is None:
@@ -1856,6 +2002,12 @@ class DockerCompose:
                 "RHEL/Fedora: dnf install docker-compose-plugin。"
             )
 
+    def _compose_files(self) -> list[str]:
+        files = ["-f", str(self.compose_file)]
+        if self.override_file.is_file():
+            files += ["-f", str(self.override_file)]
+        return files
+
     def compose(
         self,
         *args: str | Path,
@@ -1871,8 +2023,7 @@ class DockerCompose:
                 self.project,
                 "--env-file",
                 str(self.env_file),
-                "-f",
-                self.compose_file,
+                *self._compose_files(),
                 *args,
             ],
             check=check,
@@ -1959,7 +2110,7 @@ class DockerCompose:
             "docker", "compose",
             "-p", self.project,
             "--env-file", str(self.env_file),
-            "-f", str(self.compose_file),
+            *self._compose_files(),
             *[str(a) for a in args],
         ]
         out(f"$ {' '.join(cmd)}")
@@ -2045,129 +2196,276 @@ class DockerCompose:
                 f"docker-compose.yml 校验失败:\n{result.stderr.strip() or result.stdout.strip()}"
             )
 
+    # ---- 日志命令底层（CLI 与 TUI 共用） ----
+
+    @staticmethod
+    def _normalize_log_services(
+        service: ServiceName | Literal["all"] | Sequence[ServiceName] | None,
+    ) -> list[ServiceName]:
+        """统一服务参数：'all'/None → []（compose 全部服务，自带服务名前缀）。"""
+        if service is None or service == "all":
+            return []
+        if isinstance(service, str):
+            return [service]  # type: ignore[list-item]
+        return list(service)
+
+    _LOG_TIME_RE = re.compile(
+        r"^\d+[smhdw]$|^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$"
+    )
+
+    @classmethod
+    def _check_log_time(cls, value: str | None, flag: str) -> None:
+        if value and not cls._LOG_TIME_RE.match(value):
+            raise ManageError(
+                f"{flag} 格式不正确: {value}（示例: 15m、1h、2026-10-31T10:00、2026-10-31T10:00:00+08:00）"
+            )
+
+    def _logs_cmd(
+        self,
+        services: Sequence[ServiceName],
+        tail: int | str,
+        follow: bool,
+        since: str | None,
+        until: str | None,
+    ) -> list[str | Path]:
+        cmd: list[str | Path] = ["logs", "--timestamps"]
+        if since:
+            cmd += ["--since", since]
+        if until:
+            cmd += ["--until", until]
+        cmd += ["--tail", str(tail)]
+        if follow:
+            cmd.append("-f")
+        # 多服务直接透传 compose（保留服务名前缀输出），不做文本前缀过滤
+        cmd += services
+        return cmd
+
+    def _logs_base_cmd(self) -> list[str | Path]:
+        cmd: list[str | Path] = [
+            "docker", "compose",
+            "-p", self.project,
+            "--env-file", str(self.env_file),
+            *self._compose_files(),
+        ]
+        return cmd
+
+    def _popen_logs(self, cmd: Sequence[str | Path]) -> subprocess.Popen[str]:
+        full_cmd = [str(x) for x in [*self._logs_base_cmd(), *cmd]]
+        try:
+            return subprocess.Popen(
+                full_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except FileNotFoundError as exc:
+            raise ManageError("未找到 docker，请先安装 Docker。") from exc
+
+    def _stream_lines(
+        self,
+        cmd: Sequence[str | Path],
+        *,
+        predicate: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Popen + 逐行读取转发到终端（流式，不整段捕获），Ctrl+C 3 秒内终止进程组。"""
+        process = self._popen_logs(cmd)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                if predicate is None or predicate(line):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+            process.wait()
+        except KeyboardInterrupt:
+            out("\n[正在停止日志跟踪...]")
+        finally:
+            _terminate_logs_process(process)
+
     def logs_text(
         self,
         tail: int | str = 200,
         *,
         follow: bool = False,
-        service: ServiceName | Literal["all"] = "all",
-    ) -> str:
-        cmd: list[str | Path] = ["logs", "--timestamps", "--tail", str(tail)]
+        service: ServiceName | Literal["all"] | Sequence[ServiceName] = "all",
+        since: str | None = None,
+        until: str | None = None,
+        grep: str | None = None,
+    ) -> str | None:
+        """读取日志文本；大日志量或 follow 时改为流式直出终端并返回 None。
 
-        if follow:
-            cmd.append("-f")
-        if service != "all":
-            cmd.append(service)
+        tail=all 或 tail > LOG_CAPTURE_LIMIT 时不允许一次性捕获（防 OOM），
+        逐行流式输出并打印警告；tail ≤ LOG_CAPTURE_LIMIT 才 capture_output 读取。
+        --grep 仅为显示过滤，不改变后端日志级别。
+        """
+        self._check_log_time(since, "--since")
+        self._check_log_time(until, "--until")
 
+        services = self._normalize_log_services(service)
+        pattern: re.Pattern[str] | None = None
+        if grep:
+            out("[提示] --grep 仅为显示过滤，不改变后端日志级别。")
+            try:
+                pattern = re.compile(grep)
+            except re.error as exc:
+                raise ManageError(f"--grep 正则无效: {exc}") from exc
+
+        tail_num: int | None
+        if isinstance(tail, str) and not tail.isdigit():
+            tail_num = None  # "all" 等
+        else:
+            tail_num = int(tail)
+
+        if follow or tail_num is None or tail_num > LOG_CAPTURE_LIMIT:
+            if not follow:
+                out(
+                    "[警告] 正在输出全部历史日志，大日志量时请优先使用 "
+                    "--tail/--since 或 --export。"
+                )
+            cmd = self._logs_cmd(services, tail, follow, since, until)
+            self._stream_lines(cmd, predicate=(pattern.search if pattern else None))
+            return None
+
+        cmd = self._logs_cmd(services, tail, False, since, until)
         result = self.compose(*cmd, check=False)
-        return result.stdout + result.stderr
+        text = result.stdout + result.stderr
+        if pattern:
+            text = "".join(
+                line for line in text.splitlines(keepends=True) if pattern.search(line)
+            )
+        return text
 
     def view_logs(
         self,
         tail: int | str = 200,
         *,
         follow: bool = False,
-        service: ServiceName | Literal["all"] = "all",
+        service: ServiceName | Literal["all"] | Sequence[ServiceName] = "all",
         verbose: bool = False,
+        since: str | None = None,
+        until: str | None = None,
+        grep: str | None = None,
     ) -> None:
         if not self.compose_file.is_file():
             out("尚未安装（docker-compose.yml 不存在）。")
             return
-        if not self.service_exists("backend"):
-            text = self.logs_text(tail, follow=False, service=service)
-            if text.strip():
-                out(text.strip())
-                out("\n[提示] 后端容器未运行，以上为最近日志。")
-                return
-            out("尚未安装或服务不存在。")
-            return
+
+        services = self._normalize_log_services(service)
+
+        # 前置检查：只对被请求的服务做检查——选 nginx/postgres/redis 时
+        # backend 停止不得阻断；只有 all/backend 才要求 backend 运行
+        if follow:
+            checks: Sequence[str] = services if services else ["backend"]
+            for svc in checks:
+                if not self.service_running(svc):  # type: ignore[arg-type]
+                    out(f"! 服务未运行，无法跟踪: {svc}")
+                    out("  提示：已退出的服务可改用「最近日志」查看历史输出。")
+                    return
+
+        if verbose:
+            # verbose 不强制修改调用方参数，只在本地生效并给出明确提示
+            out("verbose：全部服务、全部历史、仅用于诊断。")
+            services = []
+            tail = "all"
+            self._print_service_status()
 
         if follow:
-            self._stream_logs(tail=tail, service=service, verbose=verbose)
+            self._stream_logs(
+                tail=tail, services=services, verbose=verbose,
+                since=since, until=until, grep=grep,
+            )
         else:
-            text = self.logs_text(tail, follow=False, service=service)
-            out(text.strip() or "（暂无日志输出）")
+            text = self.logs_text(
+                tail, service=services, since=since, until=until, grep=grep,
+            )
+            if text is not None:
+                out(text.strip() or "（暂无日志输出）")
 
     def _stream_logs(
         self,
         tail: int | str = 200,
         *,
-        service: ServiceName | Literal["all"] = "all",
+        services: Sequence[ServiceName] | None = None,
         verbose: bool = False,
+        since: str | None = None,
+        until: str | None = None,
+        grep: str | None = None,
     ) -> None:
         """直接流式输出 docker compose logs -f 到终端，支持 Ctrl+C 优雅退出。
 
-        详细诊断模式(verbose=True)下会自动屏蔽 Nginx 访问日志，避免其淹没后端输出。
+        verbose 只隐藏 Nginx 静态资源 access 行（error/5xx 保留），不再整体过滤 Nginx。
         """
-        cmd: list[str | Path] = ["logs", "--timestamps"]
+        services = services or []
+        title = " + ".join(services) if services else "全部服务"
+        out(f"\n实时日志 · {title}（Ctrl+C 退出）")
 
-        if verbose:
-            service = "all"
-            tail = "all"
-            out("\n实时日志 · 详细诊断")
-            out("  服务: 全部(已屏蔽 Nginx) | 时间戳: 启用 | 历史: 全部")
-            self._print_service_status()
-        else:
-            out(f"\n实时日志 · {service if service != 'all' else '所有服务'}（Ctrl+C 退出）")
-
-        cmd.extend(["--tail", str(tail)])
-        cmd.append("-f")
-        if service != "all":
-            cmd.append(service)
-
-        full_cmd = [
-            "docker", "compose",
-            "-p", self.project,
-            "--env-file", str(self.env_file),
-            "-f", self.compose_file,
-            *cmd,
-        ]
-
-        # 详细诊断模式下通过管道读取并过滤 Nginx 日志，避免访问日志淹没后端输出
-        if verbose:
-            import re
-            # docker compose logs 格式: "service-name  |  [timestamp] log content"
-            # 服务名可能是 pylai-nginx-1、nginx 等形式
-            nginx_pattern = re.compile(r"^[\w-]*nginx[\w-]*\s+\|")
-
+        pattern: re.Pattern[str] | None = None
+        if grep:
             try:
-                process = subprocess.Popen(
-                    [str(x) for x in full_cmd],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
+                pattern = re.compile(grep)
+            except re.error as exc:
+                raise ManageError(f"--grep 正则无效: {exc}") from exc
+
+        cmd = self._logs_cmd(services, tail, True, since, until)
+
+        if verbose:
+            base = pattern.search if pattern else None
+            self._stream_lines(
+                cmd,
+                predicate=lambda line: not is_nginx_noise(line)
+                and (base is None or base(line)),
+            )
+        else:
+            self._stream_lines(cmd, predicate=(pattern.search if pattern else None))
+
+    def export_logs(
+        self,
+        dest: Path,
+        *,
+        services: Sequence[ServiceName] | None = None,
+        since: str | None = None,
+        tail: int | str = "all",
+    ) -> None:
+        """导出诊断包：每服务一个 .log 写入 tar.gz，流式脱敏，文件权限 600。"""
+        self._check_log_time(since, "--since")
+        if not services:
+            services = ["backend", "postgres", "redis", "nginx"]
+
+        dest = dest.expanduser()
+        if not (dest.name.endswith(".tar.gz") or dest.name.endswith(".tgz")):
+            raise ManageError("导出文件需以 .tar.gz（或 .tgz）结尾。")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        out(f"导出日志诊断包: {dest}（服务: {', '.join(services)}）")
+        tmpdir = Path(tempfile.mkdtemp(prefix="pylai-logs-"))
+        try:
+            with tarfile.open(dest, "w:gz") as tar:
+                for svc in services:
+                    member = f"{svc}.log"
+                    tmp = tmpdir / member
+                    self._write_logs_redacted(tmp, self._logs_cmd([svc], tail, False, since, None))
+                    tar.add(tmp, arcname=member)
+                    out(f"  ✓ {member}")
+            os.chmod(dest, 0o600)
+            out(f"已导出（权限 600，内容已脱敏）: {dest}")
+        except KeyboardInterrupt:
+            dest.unlink(missing_ok=True)
+            raise ManageError("导出已取消，临时文件已清理。") from None
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _write_logs_redacted(self, path: Path, cmd: Sequence[str | Path]) -> None:
+        """流式读取日志并逐行脱敏写入文件，不整段进内存。"""
+        process = self._popen_logs(cmd)
+        try:
+            with path.open("w", encoding="utf-8", errors="replace") as fh:
                 assert process.stdout is not None
                 for line in process.stdout:
-                    if not nginx_pattern.match(line):
-                        sys.stdout.write(line)
-                        sys.stdout.flush()
+                    fh.write(redact_log_line(line))
                 process.wait()
-            except KeyboardInterrupt:
-                out("\n[正在停止日志跟踪...]")
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                out("[日志跟踪已退出]")
-            return
-
-        try:
-            process = subprocess.Popen(
-                [str(x) for x in full_cmd],
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-            )
-            process.wait()
-        except KeyboardInterrupt:
-            out("\n[正在停止日志跟踪...]")
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            out("[日志跟踪已退出]")
+        finally:
+            _terminate_logs_process(process)
 
     def _print_service_status(self) -> None:
         """打印当前各服务状态（用于诊断）。"""
@@ -2372,12 +2670,29 @@ services:
   postgres:
     image: {postgres_image}
     restart: unless-stopped
+    # 内存护栏（可被 docker-compose.override.yml 覆盖）
+    mem_limit: {pg_mem}
+    mem_reservation: {pg_mem_res}
+    shm_size: 64m
+    command: >
+      postgres
+      -c shared_buffers=64MB
+      -c max_connections=40
+      -c work_mem=1MB
+      -c maintenance_work_mem=32MB
+      -c temp_buffers=2MB
+      -c effective_cache_size=128MB
     volumes:
       - pylai_pgdata:/var/lib/postgresql
     environment:
       POSTGRES_USER: ${{PYLAI_DB_USER:?}}
       POSTGRES_PASSWORD: ${{PYLAI_DB_PASSWORD:?}}
       POSTGRES_DB: ${{PYLAI_DB_NAME:?}}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${{PYLAI_DB_USER}} -d ${{PYLAI_DB_NAME}}"]
       interval: 5s
@@ -2387,6 +2702,8 @@ services:
   redis:
     image: {redis_image}
     restart: unless-stopped
+    mem_limit: {rd_mem}
+    mem_reservation: {rd_mem_res}
     volumes:
       - pylai_redisdata:/data
     command: >
@@ -2394,6 +2711,8 @@ services:
       --requirepass ${{PYLAI_REDIS_PASSWORD:?}}
       --appendonly yes
       --save ""
+      --maxmemory 48mb
+      --maxmemory-policy noeviction
       --loglevel warning
     logging:
       driver: "json-file"
@@ -2411,6 +2730,8 @@ services:
   backend:
     image: {backend_image}
     restart: unless-stopped
+    mem_limit: {be_mem}
+    mem_reservation: {be_mem_res}
     depends_on:
       postgres:
         condition: service_healthy
@@ -2429,6 +2750,10 @@ services:
       PYLAI_DB_PASSWORD: ${{PYLAI_DB_PASSWORD:?}}
       PYLAI_DB_NAME: ${{PYLAI_DB_NAME:?}}
       PYLAI_REDIS_PASSWORD: ${{PYLAI_REDIS_PASSWORD:?}}
+      # GC 护栏：低内存主机防 backend 膨胀 OOM（只作用于 backend）
+      DOTNET_gcServer: "0"
+      DOTNET_GCHeapHardLimit: "0xA000000"
+      DOTNET_GCConserveMemory: "3"
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     read_only: true
@@ -2450,6 +2775,8 @@ services:
   nginx:
     image: {nginx_image}
     restart: unless-stopped
+    mem_limit: {nx_mem}
+    mem_reservation: {nx_mem_res}
     depends_on:
       backend:
         condition: service_healthy
@@ -2457,6 +2784,7 @@ services:
       - "${{PYLAI_PUBLIC_PORT:?}}:80"
     volumes:
       - {config_dir}/nginx.d:/etc/nginx/conf.d:ro
+      - {config_dir}/nginx.main.conf:/etc/nginx/nginx.conf:ro
       - pylai_www:/var/lib/pylai/www:ro
     logging:
       driver: "json-file"
@@ -2471,6 +2799,63 @@ volumes:
   pylai_www:
 """
 
+    # Nginx 主配置（覆盖镜像默认 /etc/nginx/nginx.conf）：限定 worker_processes 1 配合内存护栏
+    _NGINX_MAIN_TEMPLATE = """\
+# 由 ManagePylai 生成（compose 挂载为容器 /etc/nginx/nginx.conf，请勿手改；
+# 自定义请使用 ~/.pylai/docker-compose.override.yml 或修改 compose 模板）。
+user nginx;
+worker_processes 1;
+pid /run/nginx.pid;
+error_log /var/log/nginx/error.log notice;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    keepalive_timeout 65;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+"""
+
+    @classmethod
+    def _render(cls, image: str, manager: ManagerConfig | None) -> str:
+        """按模板渲染 compose 文本（镜像、内存档位等默认值）。
+
+        用户自定义走 ~/.pylai/docker-compose.override.yml（compose 标准机制），
+        本方法只渲染基础文件，不触碰 override。
+        """
+        services_cfg = manager.get("Compose", "Services", default={}) if manager else {}
+        services_cfg = services_cfg or {}
+
+        tier = MEMORY_TIERS[manager.memory_tier if manager else DEFAULT_MEMORY_TIER]
+
+        return cls._COMPOSE_TEMPLATE.format(
+            postgres_image=services_cfg.get("PostgresImage", "postgres:18-alpine"),
+            redis_image=services_cfg.get("RedisImage", "redis:8-alpine"),
+            backend_image=services_cfg.get("BackendImage", image),
+            nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
+            config_dir=CONFIG_DIR,
+            pg_mem=tier["postgres"][0],
+            pg_mem_res=tier["postgres"][1],
+            rd_mem=tier["redis"][0],
+            rd_mem_res=tier["redis"][1],
+            be_mem=tier["backend"][0],
+            be_mem_res=tier["backend"][1],
+            nx_mem=tier["nginx"][0],
+            nx_mem_res=tier["nginx"][1],
+        )
+
     @classmethod
     def generate(
         cls,
@@ -2480,16 +2865,7 @@ volumes:
     ) -> None:
         ensure_home()
 
-        services_cfg = manager.get("Compose", "Services", default={}) if manager else {}
-        services_cfg = services_cfg or {}
-
-        compose_text = cls._COMPOSE_TEMPLATE.format(
-            postgres_image=services_cfg.get("PostgresImage", "postgres:18-alpine"),
-            redis_image=services_cfg.get("RedisImage", "redis:8-alpine"),
-            backend_image=services_cfg.get("BackendImage", image),
-            nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
-            config_dir=CONFIG_DIR,
-        )
+        compose_text = cls._render(image, manager)
 
         atomic_write(cls.ENV_FILE, "\n".join(answers.env_lines()) + "\n")
         atomic_write(cls.COMPOSE_FILE, compose_text)
@@ -2497,19 +2873,15 @@ volumes:
 
     @classmethod
     def regenerate(cls, image: str, manager: ManagerConfig | None = None) -> None:
-        """更新时按最新模板全量重渲染 compose（保留现有 .env 凭据与 nginx 配置）。"""
+        """更新时按最新模板全量重渲染 compose（保留 .env 凭据、nginx 配置与 override）。
+
+        用户手改的 ~/.pylai/docker-compose.override.yml 不属于本文件，天然保留；
+        所有 compose 命令统一带上 override，override 中的 mem_limit 等改动不会因
+        update/regenerate 丢失。
+        """
         ensure_home()
 
-        services_cfg = manager.get("Compose", "Services", default={}) if manager else {}
-        services_cfg = services_cfg or {}
-
-        compose_text = cls._COMPOSE_TEMPLATE.format(
-            postgres_image=services_cfg.get("PostgresImage", "postgres:18-alpine"),
-            redis_image=services_cfg.get("RedisImage", "redis:8-alpine"),
-            backend_image=services_cfg.get("BackendImage", image),
-            nginx_image=services_cfg.get("NginxImage", "nginx:alpine"),
-            config_dir=CONFIG_DIR,
-        )
+        compose_text = cls._render(image, manager)
 
         atomic_write(cls.COMPOSE_FILE, compose_text)
         cls.write_nginx_conf(manager)
@@ -2600,6 +2972,8 @@ server {
         template = template.replace("@@ROOT_BLOCK@@", root_block)
         NGINX_CONF_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write(NGINX_CONF_FILE, template, mode=0o644)
+        # 主配置（worker_processes 1 内存护栏），compose 挂载为容器 /etc/nginx/nginx.conf
+        atomic_write(NGINX_MAIN_FILE, cls._NGINX_MAIN_TEMPLATE, mode=0o644)
         cls.migrate_nginx_conf()
 
     @classmethod
@@ -2626,8 +3000,12 @@ server {
     @classmethod
     def validate_compose(cls, compose_file: Path | None = None) -> None:
         target = compose_file or cls.COMPOSE_FILE
+        cmd = ["docker", "compose", "-f", str(target)]
+        if OVERRIDE_FILE.is_file():
+            cmd += ["-f", str(OVERRIDE_FILE)]
+        cmd += ["config", "--quiet"]
         result = run(
-            ["docker", "compose", "-f", target, "config", "--quiet"],
+            cmd,
             check=False,
         )
         if result.returncode != 0:
