@@ -59,7 +59,7 @@ public static class AppServices
     public static IServiceCollection AddDatabaseFeature(this IServiceCollection services, MainConfig config)
     {
         var csBuilder = new NpgsqlConnectionStringBuilder(config.Database.ConnectionString);
-        if (!csBuilder.ContainsKey("Max Pool Size"))
+        if (!csBuilder.ContainsKey("Maximum Pool Size"))
             csBuilder.MaxPoolSize = 200;
 
         services.AddDbContext<ApplicationDbContext>(options =>
