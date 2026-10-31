@@ -482,6 +482,27 @@ class InstallWizard:
                 False,
             )
 
+def print_swap_hint_if_low_memory() -> None:
+    """主机内存低于 2 GiB 时提示创建 Swap（仅提示，不执行任何操作）。"""
+    try:
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError:
+        return
+    match = re.search(r"^MemTotal:\s+(\d+)\s+kB", meminfo, re.MULTILINE)
+    if not match:
+        return
+    total_gib = int(match.group(1)) / 1024 / 1024
+    if total_gib < 2:
+        out(
+            f"提示：检测到主机内存约 {total_gib:.1f} GiB（低于 2 GiB），"
+            "建议先创建 Swap 交换空间，避免安装或构建时内存不足。"
+        )
+        out(
+            "      示例：fallocate -l 2G /swapfile && chmod 600 /swapfile "
+            "&& mkswap /swapfile && swapon /swapfile"
+        )
+
+
 class InstallService:
     """安装服务 - 新流程：必选项 → Web编辑器 → 启动容器。"""
 
@@ -493,6 +514,7 @@ class InstallService:
     # ========================================================================
     def install_cli(self, args: argparse.Namespace) -> None:
         """CLI 入口。"""
+        print_swap_hint_if_low_memory()
         tar_path = self._resolve_install_tar(args)
         image = self.ctx.docker.load_image_tar(tar_path)
 
@@ -520,6 +542,7 @@ class InstallService:
 
     def install_interactive(self) -> None:
         """交互菜单入口。"""
+        print_swap_hint_if_low_memory()
         source = choose_install_source("请选择安装包的来源")
         client = ReleaseClient(self.ctx.manager)
 

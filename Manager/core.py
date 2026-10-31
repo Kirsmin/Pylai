@@ -234,7 +234,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.42"
+__version__ = "0.1.43"
 
 
 class ManageError(Exception):
@@ -1011,7 +1011,8 @@ class InstallAnswers:
             f"Host=postgres;Port=5432;"
             f"Database={self.db_name};"
             f"Username={self.db_user};"
-            f"Password={self.db_password}"
+            f"Password={self.db_password};"
+            "Maximum Pool Size=20;Minimum Pool Size=0;Connection Idle Lifetime=60;Timeout=15;Command Timeout=30"
         )
 
         subs: dict[str, str] = {
@@ -1863,7 +1864,8 @@ class PylaiConfig:
             f"Host=postgres;Port=5432;"
             f"Database={answers.db_name};"
             f"Username={answers.db_user};"
-            f"Password={answers.db_password}"
+            f"Password={answers.db_password};"
+            "Maximum Pool Size=20;Minimum Pool Size=0;Connection Idle Lifetime=60;Timeout=15;Command Timeout=30"
         )
 
         t = TomlText(text)
