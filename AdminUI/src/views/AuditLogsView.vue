@@ -15,7 +15,7 @@ const logs = ref<AdminAuditLogItem[]>([])
 const total = ref(0)
 const loading = ref(false)
 const eventType = ref<string | null>(null)
-const userId = ref('')
+const user = ref('')
 const ip = ref('')
 const success = ref<boolean | null>(null)
 const timeRange = ref<[number, number] | null>(null)
@@ -82,7 +82,7 @@ async function load() {
   try {
     const params = new URLSearchParams({ skip: String((page.value - 1) * pageSize), take: String(pageSize) })
     if (eventType.value) params.set('eventType', eventType.value)
-    if (userId.value.trim()) params.set('userId', userId.value.trim())
+    if (user.value.trim()) params.set('user', user.value.trim())
     if (ip.value.trim()) params.set('ip', ip.value.trim())
     if (success.value !== null) params.set('success', String(success.value))
     if (timeRange.value?.[0]) params.set('from', new Date(timeRange.value[0]).toISOString())
@@ -106,7 +106,7 @@ function search() {
 
 function resetFilters() {
   eventType.value = null
-  userId.value = ''
+  user.value = ''
   ip.value = ''
   success.value = null
   timeRange.value = null
@@ -152,8 +152,8 @@ onMounted(load)
           />
         </div>
         <div class="admin-filter-field">
-          <label>用户 ID</label>
-          <NInput v-model:value="userId" clearable placeholder="UID" @keyup.enter="search" />
+          <label>用户</label>
+          <NInput v-model:value="user" clearable placeholder="UID / 用户名 / 邮箱" @keyup.enter="search" />
         </div>
         <div class="admin-filter-field">
           <label>IP 地址</label>

@@ -9,7 +9,6 @@ namespace Pylaios.Features.PasswordReset;
 [Route("api/auth")]
 public class PasswordResetController : ControllerBase
 {
-    private readonly EmailSender _emailSender;
     private readonly IpRateLimitService _ipRateLimitService;
     private readonly IpResolutionService _ipResolver;
     private readonly IPasswordHasher<User> _passwordHasher;
@@ -18,11 +17,11 @@ public class PasswordResetController : ControllerBase
     private readonly IEmailVerificationCodeService _emailCodeService;
     private readonly IUserAccessRevoker _userAccessRevoker;
     private readonly IAuditService _auditService;
+    private readonly PasswordResetEmailQueue _emailQueue;
     private readonly TestModeOptions _testMode;
     private readonly ILogger<PasswordResetController> _logger;
 
     public PasswordResetController(
-        EmailSender emailSender,
         IpRateLimitService ipRateLimitService,
         IpResolutionService ipResolver,
         IPasswordHasher<User> passwordHasher,
@@ -31,10 +30,10 @@ public class PasswordResetController : ControllerBase
         IEmailVerificationCodeService emailCodeService,
         IUserAccessRevoker userAccessRevoker,
         IAuditService auditService,
+        PasswordResetEmailQueue emailQueue,
         TestModeOptions testMode,
         ILogger<PasswordResetController> logger)
     {
-        _emailSender = emailSender;
         _ipRateLimitService = ipRateLimitService;
         _ipResolver = ipResolver;
         _passwordHasher = passwordHasher;
@@ -43,6 +42,7 @@ public class PasswordResetController : ControllerBase
         _emailCodeService = emailCodeService;
         _userAccessRevoker = userAccessRevoker;
         _auditService = auditService;
+        _emailQueue = emailQueue;
         _testMode = testMode;
         _logger = logger;
     }
@@ -87,20 +87,13 @@ public class PasswordResetController : ControllerBase
 
             var email = user.Email;
             var uid = user.Uid;
-            _ = Task.Run(async () =>
+            // 有界队列派发（容量 100，超出快速失败并审计，§4.4 P2），不再无界 Task.Run
+            if (!_emailQueue.TryEnqueue(new PasswordResetEmailJob(email!, code, uid, ip, endpoint, userAgent)))
             {
-                try
-                {
-                    await _emailSender.SendPasswordResetCodeAsync(email!, code);
-                    _logger.LogInformation("密码重置邮件已发送 | uid:{Uid}", uid);
-                    await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailVerificationSent, uid.ToString(), email, ip, true, "password-reset", endpoint, userAgent));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "密码重置邮件发送失败 | uid:{Uid}", uid);
-                    await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailSendFailed, uid.ToString(), email, ip, false, EmailSender.FailureDetails(ex), endpoint, userAgent));
-                }
-            });
+                _logger.LogError("密码重置邮件队列已满（{Capacity}），发送被丢弃 | uid:{Uid}", PasswordResetEmailQueue.Capacity, uid);
+                await _auditService.LogAsync(BuildAudit(AuthConstants.EventTypes.EmailSendFailed, uid.ToString(), email, ip, false,
+                    $"queue_full（邮件队列已满，发送被丢弃）", endpoint, userAgent));
+            }
         }
         else
         {

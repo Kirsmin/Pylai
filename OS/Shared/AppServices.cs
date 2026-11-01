@@ -335,6 +335,9 @@ public static class AppServices
         services.AddSingleton<IpResolutionService>();
         services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         services.AddScoped<EmailSender>();
+        services.AddSingleton<PasswordResetEmailQueue>();
+        if (!cliOnly)
+            services.AddHostedService(sp => sp.GetRequiredService<PasswordResetEmailQueue>());
         services.AddScoped<IUserAccessRevoker, UserAccessRevoker>();
         services.AddScoped<IUserHardDeleter, UserHardDeleter>();
         return services;

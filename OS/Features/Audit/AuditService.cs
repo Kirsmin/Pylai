@@ -25,7 +25,8 @@ public class AuditService : IAuditService, IHostedService
         _scopeFactory = scopeFactory;
         _logger = logger;
         _channel = background
-            ? Channel.CreateBounded<AuditLog>(new BoundedChannelOptions(10000)
+            // 容量 1000（§4.4 P1）：数据库故障时防止审计事件在内存堆积数十 MB
+            ? Channel.CreateBounded<AuditLog>(new BoundedChannelOptions(1000)
             {
                 FullMode = BoundedChannelFullMode.Wait
             })

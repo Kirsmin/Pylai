@@ -375,7 +375,7 @@ public class AdminController : ControllerBase
     [HttpGet("audit-logs")]
     public async Task<IActionResult> AuditLogs(
         [FromQuery] string? eventType = null,
-        [FromQuery] string? userId = null,
+        [FromQuery] string? user = null,
         [FromQuery] string? ip = null,
         [FromQuery] bool? success = null,
         [FromQuery] DateTimeOffset? from = null,
@@ -386,8 +386,41 @@ public class AdminController : ControllerBase
         var query = _context.AuditLogs.AsNoTracking();
         if (!string.IsNullOrEmpty(eventType))
             query = query.Where(l => l.EventType == eventType);
-        if (!string.IsNullOrEmpty(userId))
-            query = query.Where(l => l.UserId == userId);
+        if (!string.IsNullOrEmpty(user))
+        {
+            // user 支持三种输入：a) GUID → 匹配 UserId；b) 邮箱（含 @）→ 匹配 UserEmail；
+            // c) 用户名 → 查 Users 表 Name/Email 解析 Uid 集合。
+            // 统一 OR 组合：UserId ∈ 解析集合 OR UserEmail == 输入，
+            // 保证登录失败等 UserId 为 null 的事件也能命中。
+            var input = user.Trim();
+            List<string> uidSet;
+            string? emailEq;
+            if (Guid.TryParse(input, out var guid))
+            {
+                uidSet = [guid.ToString()];
+                emailEq = null;
+            }
+            else
+            {
+                var normalized = UsernameNormalizer.Normalize(input);
+                var matched = await _context.Users.AsNoTracking()
+                    .Where(u => u.Status != UserStatus.Deleted &&
+                        (u.Name.ToLower() == input.ToLower() ||
+                         (u.NormalizedEmail != null && u.NormalizedEmail == normalized)))
+                    .Select(u => u.Uid)
+                    .ToListAsync();
+                if (matched.Count == 0)
+                    return Ok(new AdminAuditLogListResponse { Success = true, Total = 0, Logs = [] });
+                uidSet = matched.Select(u => u.ToString()).ToList();
+                emailEq = input;
+            }
+
+            var loweredUids = uidSet.Select(u => u.ToLower()).ToList();
+            var loweredEmail = emailEq?.ToLower();
+            query = query.Where(l =>
+                (l.UserId != null && loweredUids.Contains(l.UserId.ToLower())) ||
+                (loweredEmail != null && l.UserEmail != null && l.UserEmail.ToLower() == loweredEmail));
+        }
         if (!string.IsNullOrEmpty(ip))
             query = query.Where(l => l.IpAddress == ip);
         if (success is not null)
