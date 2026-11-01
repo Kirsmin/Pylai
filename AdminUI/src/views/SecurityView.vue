@@ -28,7 +28,19 @@ const renameValue = ref('')
 const renameBusy = ref(false)
 
 const otpCode = computed(() => code.value.join(''))
-const secondFactorCount = computed(() => Number(authStore.mfaTotpEnabled) + authStore.mfaWebAuthnCount)
+// 四态化：已配置 / 未配置 / 状态未知 / 加载失败。查询失败绝不显示"未配置"。
+const mfaSummary = computed(() => {
+  switch (authStore.mfaStatus) {
+    case 'configured':
+      return { title: '已配置第二因素', tone: 'success' as const, badge: '已保护' }
+    case 'unconfigured':
+      return { title: '尚未配置第二因素', tone: 'warning' as const, badge: '建议配置' }
+    case 'error':
+      return { title: 'MFA 状态加载失败', tone: 'danger' as const, badge: '状态未知' }
+    default:
+      return { title: 'MFA 状态未知', tone: 'neutral' as const, badge: '状态未知' }
+  }
+})
 const renameVisible = computed({
   get: () => renameTargetId.value !== null,
   set: (value: boolean) => { if (!value) renameTargetId.value = null }
@@ -188,13 +200,24 @@ onMounted(load)
     <div class="security-summary admin-panel">
       <div>
         <span class="summary-kicker">MFA 状态</span>
-        <strong>{{ secondFactorCount > 0 ? '已配置第二因素' : '尚未配置第二因素' }}</strong>
-        <span class="muted">TOTP {{ authStore.mfaTotpEnabled ? '已启用' : '未启用' }} · Passkey {{ authStore.mfaWebAuthnCount }} 个</span>
+        <strong>{{ mfaSummary.title }}</strong>
+        <span v-if="authStore.mfaStatus === 'configured' || authStore.mfaStatus === 'unconfigured'" class="muted">
+          TOTP {{ authStore.mfaTotpEnabled ? '已启用' : '未启用' }} · Passkey {{ authStore.mfaWebAuthnCount }} 个
+        </span>
+        <span v-else class="muted">无法确认当前账户的第二因素配置，请重试。</span>
       </div>
-      <AppBadge :tone="secondFactorCount > 0 ? 'success' : 'warning'">
-        {{ secondFactorCount > 0 ? '已保护' : '建议配置' }}
-      </AppBadge>
-      <AppBadge v-if="authStore.mfaRequired" tone="info">策略要求 MFA</AppBadge>
+      <div class="summary-badges">
+        <AppBadge :tone="mfaSummary.tone">{{ mfaSummary.badge }}</AppBadge>
+        <AppBadge v-if="authStore.mfaStatus === 'configured' && authStore.mfaRequired" tone="info">策略要求 MFA</AppBadge>
+        <NButton
+          v-if="authStore.mfaStatus === 'unknown' || authStore.mfaStatus === 'error'"
+          size="small"
+          :loading="passkeyListLoading"
+          @click="load"
+        >
+          重试
+        </NButton>
+      </div>
     </div>
 
     <div class="security-grid">
@@ -204,8 +227,8 @@ onMounted(load)
             <h3>TOTP 认证器</h3>
             <p>使用支持 RFC 6238 的认证器生成 6 位一次性验证码。</p>
           </div>
-          <AppBadge :tone="authStore.mfaTotpEnabled ? 'success' : 'neutral'">
-            {{ authStore.mfaTotpEnabled ? '已启用' : '未启用' }}
+          <AppBadge :tone="authStore.mfaStatus === 'configured' || authStore.mfaStatus === 'unconfigured' ? (authStore.mfaTotpEnabled ? 'success' : 'neutral') : 'danger'">
+            {{ authStore.mfaStatus === 'configured' || authStore.mfaStatus === 'unconfigured' ? (authStore.mfaTotpEnabled ? '已启用' : '未启用') : '状态未知' }}
           </AppBadge>
         </div>
 
@@ -262,8 +285,8 @@ onMounted(load)
             <h3>Passkey / WebAuthn</h3>
             <p>使用硬件安全密钥、系统凭据或生物识别完成强认证。</p>
           </div>
-          <AppBadge :tone="authStore.mfaWebAuthnCount > 0 ? 'success' : 'neutral'">
-            {{ authStore.mfaWebAuthnCount }} 个
+          <AppBadge :tone="authStore.mfaStatus === 'configured' || authStore.mfaStatus === 'unconfigured' ? (authStore.mfaWebAuthnCount > 0 ? 'success' : 'neutral') : 'danger'">
+            {{ authStore.mfaStatus === 'configured' || authStore.mfaStatus === 'unconfigured' ? `${authStore.mfaWebAuthnCount} 个` : '状态未知' }}
           </AppBadge>
         </div>
         <div class="security-card-body">
@@ -360,7 +383,8 @@ onMounted(load)
   gap: 20px;
   padding: 16px 18px;
 }
-.security-summary > div { display: flex; flex-direction: column; gap: 2px; }
+.security-summary > div:first-child { display: flex; flex-direction: column; gap: 2px; }
+.summary-badges { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .summary-kicker { color: var(--text-tertiary); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .security-summary strong { font-size: 15px; font-weight: 650; }
 .security-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--gap); align-items: start; }

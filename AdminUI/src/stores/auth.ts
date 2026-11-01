@@ -9,12 +9,18 @@ interface StepUpTicket {
   methods: string[]
 }
 
+// MFA 状态四态：已配置 / 未配置 / 状态未知（初始或刷新中）/ 加载失败。
+// 查询失败必须落到 error，绝不能显示为"未配置"这种错误的安逸状态。
+export type MfaStatus = 'configured' | 'unconfigured' | 'unknown' | 'error'
+
 export const useAuthStore = defineStore('admin-auth', () => {
   const initialized = ref(false)
   const starting = ref(false)
   const user = ref<AdminCapabilityUser | null>(null)
   const capabilities = ref<AdminCapability[]>([])
   const inviteCodeRequired = ref(false)
+  // 服务端 capabilities 显式声明的 admin/max 权限标记；normal 用户为 false，用于 403 体验而非授权判断。
+  const adminAccess = ref(false)
   const loginError = ref('')
   const csrfToken = ref('')
 
@@ -28,6 +34,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
   let stepUpReject: ((reason?: unknown) => void) | null = null
 
   const mfaRequired = ref(false)
+  const mfaStatus = ref<MfaStatus>('unknown')
   const mfaTotpEnabled = ref(false)
   const mfaWebAuthnCount = ref(0)
   const mfaStepUpSatisfied = ref(false)
@@ -78,11 +85,13 @@ export const useAuthStore = defineStore('admin-auth', () => {
       user.value = null
       capabilities.value = []
       inviteCodeRequired.value = false
+      adminAccess.value = false
       return false
     }
     const data = await parseApiResponse<AdminCapabilitiesResponse>(response)
     if (!data) throw new Error('无法获取管理能力')
     user.value = data.user ?? null
+    adminAccess.value = data.adminAccess === true
     capabilities.value = data.capabilities ?? []
     const capabilityValue = data.inviteCodeRequired ?? false
     inviteCodeRequired.value = capabilityValue
@@ -239,16 +248,19 @@ export const useAuthStore = defineStore('admin-auth', () => {
         webAuthnCount: number
         stepUpSatisfied: boolean
       }>(await rawFetch('/api/auth/mfa/status'))
-      if (!data) return
+      if (!data) {
+        mfaStatus.value = 'error'
+        return
+      }
       mfaRequired.value = data.required
       mfaTotpEnabled.value = data.totpEnabled
       mfaWebAuthnCount.value = data.webAuthnCount
       mfaStepUpSatisfied.value = data.stepUpSatisfied
+      mfaStatus.value = data.totpEnabled || data.webAuthnCount > 0 ? 'configured' : 'unconfigured'
     } catch {
-      mfaRequired.value = false
-      mfaTotpEnabled.value = false
-      mfaWebAuthnCount.value = 0
-      mfaStepUpSatisfied.value = false
+      // 网络错误/401/500 等一律视为"加载失败"，保留旧值，由界面提示重试；
+      // 绝不能重置为 false 造成"尚未配置"的错误安逸状态。
+      mfaStatus.value = 'error'
     }
   }
 
@@ -291,6 +303,8 @@ export const useAuthStore = defineStore('admin-auth', () => {
     user.value = null
     capabilities.value = []
     inviteCodeRequired.value = false
+    adminAccess.value = false
+    mfaStatus.value = 'unknown'
     csrfToken.value = ''
     stepUpTicket.value = null
     stepUpVisible.value = false
@@ -320,6 +334,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       loginError.value = err instanceof Error ? err.message : '初始化登录状态失败'
       user.value = null
       capabilities.value = []
+      adminAccess.value = false
     } finally {
       initialized.value = true
       starting.value = false
@@ -337,6 +352,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     displayName,
     group,
     inviteCodeRequired,
+    adminAccess,
     hasCapability,
     capability,
     refreshCapabilities,
@@ -353,6 +369,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     verifyStepUpWebAuthn,
     cancelMfaStepUp,
     mfaRequired,
+    mfaStatus,
     mfaTotpEnabled,
     mfaWebAuthnCount,
     mfaStepUpSatisfied,

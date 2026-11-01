@@ -253,6 +253,7 @@ public class AdminCapabilityUser
 public class AdminCapabilitiesResponse : ApiResponse
 {
     public AdminCapabilityUser? User { get; set; }
+    public bool AdminAccess { get; set; }
     public List<AdminCapability> Capabilities { get; set; } = [];
     public bool InviteCodeRequired { get; set; }
 }

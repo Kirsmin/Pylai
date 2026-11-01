@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import PageHeader from '@/components/PageHeader.vue'
@@ -103,8 +103,13 @@ const editorVisible = ref(false)
 const editingId = ref<string | null>(null)
 const saving = ref(false)
 const form = ref({ group: 'normal' as string, maxRedemptions: 10, lifetimeHours: 168 })
+// 高权限组（admin/max）服务端强制最大核销 1 次：选中后立即锁定输入框，避免表单与真实行为不一致。
+const isHighPrivilegeGroup = computed(() => ['admin', 'max'].includes(form.value.group.toLowerCase()))
+watch(isHighPrivilegeGroup, (high) => { if (high) form.value.maxRedemptions = 1 })
+
 const createdCode = ref<AdminInviteCodeCreateResponse | null>(null)
 const createdVisible = ref(false)
+const createdSaved = ref(false)
 
 function openCreate() { editingId.value = null; form.value = { group: 'normal', maxRedemptions: 10, lifetimeHours: 168 }; editorVisible.value = true }
 function openEdit(code: AdminInviteCode) {
@@ -121,6 +126,7 @@ async function save() {
         body: JSON.stringify({ group: form.value.group, maxRedemptions: form.value.maxRedemptions, lifetimeHours: form.value.lifetimeHours })
       })
       createdCode.value = data ?? null
+      createdSaved.value = false
       createdVisible.value = data !== null && data !== undefined
     } else {
       await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(editingId.value)}`, {
@@ -147,6 +153,16 @@ async function openDetail(id: string) {
   } catch (err) { message.error(err instanceof Error ? err.message : '加载详情失败'); detailVisible.value = false }
   finally { detailLoading.value = false }
 }
+async function copyCreatedCode() {
+  if (!createdCode.value) return
+  try {
+    await navigator.clipboard.writeText(createdCode.value.code)
+    message.success('邀请码已复制')
+  } catch {
+    message.error('复制失败，请手动复制')
+  }
+}
+function finishCreated() { createdVisible.value = false; createdSaved.value = false }
 async function revoke(id: string) {
   try {
     await authStore.request(`/api/admin/invite-codes/${encodeURIComponent(id)}`, {
@@ -255,7 +271,17 @@ async function revoke(id: string) {
         </label>
         <label class="admin-field">
           <span class="admin-field-label">最大核销次数</span>
-          <NInputNumber v-model:value="form.maxRedemptions" :min="1" :precision="0" style="width:100%" />
+          <NInputNumber
+            v-model:value="form.maxRedemptions"
+            :min="1"
+            :precision="0"
+            :max="isHighPrivilegeGroup ? 1 : undefined"
+            :disabled="isHighPrivilegeGroup"
+            style="width:100%"
+          />
+          <span v-if="isHighPrivilegeGroup" class="field-hint">
+            高权限邀请码仅允许核销 1 次（服务端强制）
+          </span>
         </label>
         <label v-if="editingId===null" class="admin-field">
           <span class="admin-field-label">有效期（小时）</span>
@@ -269,12 +295,28 @@ async function revoke(id: string) {
       </div>
     </NModal>
 
-    <NModal v-model:show="createdVisible" preset="card" style="width:min(92%,520px)" title="邀请码已创建">
+    <NModal
+      v-model:show="createdVisible"
+      preset="card"
+      style="width:min(92%,520px)"
+      title="邀请码已创建"
+      :mask-closable="false"
+      :closable="false"
+      :close-on-esc="false"
+    >
       <div v-if="createdCode" class="created-code-box">
-        <NAlert type="warning" :show-icon="false">完整邀请码只展示这一次，请立即安全保存。</NAlert>
-        <code class="mono created-code-value">{{ createdCode.code }}</code>
-        <div class="muted small">{{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次</div>
-        <div class="modal-actions"><NButton type="primary" @click="createdVisible = false">我已保存</NButton></div>
+        <NAlert type="warning" :show-icon="false">完整邀请码只展示这一次，误关后无法恢复，请立即安全保存。</NAlert>
+        <div class="created-code-row">
+          <code class="mono created-code-value">{{ createdCode.code }}</code>
+          <NButton size="small" quaternary @click="copyCreatedCode">复制</NButton>
+        </div>
+        <div class="muted small">
+          用户组 {{ createdCode.group }} · 最大核销 {{ createdCode.maxRedemptions }} 次 · 到期 {{ formatDate(createdCode.expiresAt) }}
+        </div>
+        <NCheckbox v-model:checked="createdSaved">我已安全保存该邀请码</NCheckbox>
+        <div class="modal-actions">
+          <NButton type="primary" :disabled="!createdSaved" @click="finishCreated">完成</NButton>
+        </div>
       </div>
     </NModal>
 
@@ -325,7 +367,8 @@ async function revoke(id: string) {
 .invite-progress-value { height: 100%; border-radius: inherit; background: var(--success); }
 .invite-row-actions { display: inline-flex; gap: 4px; }
 .created-code-box { display: flex; flex-direction: column; gap: 12px; }
-.created-code-value { display: block; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 16px; word-break: break-all; }
+.created-code-row { display: flex; align-items: center; gap: 8px; }
+.created-code-value { flex: 1; min-width: 0; display: block; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-sunken); font-size: 16px; word-break: break-all; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 @media (max-width: 680px) {
   .registration-policy { align-items: flex-start; flex-direction: column; }

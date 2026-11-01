@@ -4,6 +4,7 @@ import { darkTheme } from 'naive-ui'
 import type { GlobalThemeOverrides } from 'naive-ui'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
+import { API_BASE } from '@/utils/http'
 import LoginView from '@/views/LoginView.vue'
 import AdminLayout from '@/components/AdminLayout.vue'
 
@@ -59,6 +60,16 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
         <template v-else-if="!authStore.isAuthenticated">
           <LoginView />
         </template>
+        <template v-else-if="!authStore.adminAccess">
+          <div class="forbidden-page">
+            <div class="forbidden-card">
+              <span class="forbidden-code">403</span>
+              <strong>当前账户没有管理权限</strong>
+              <p class="muted">此账户已登录，但不属于 admin / max 用户组，无法访问管理台。如需权限请联系 Max 管理员调整用户组。</p>
+              <NButton type="primary" tag="a" :href="`${API_BASE}/`">返回用户中心</NButton>
+            </div>
+          </div>
+        </template>
         <template v-else>
           <AdminLayout>
             <router-view />
@@ -78,4 +89,27 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
   justify-content: center;
   background: var(--page-bg);
 }
+.forbidden-page {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--page-bg);
+}
+.forbidden-card {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface, #fff);
+}
+.forbidden-code { font-size: 34px; font-weight: 800; color: var(--text-tertiary); line-height: 1; }
+.forbidden-card strong { font-size: 16px; font-weight: 650; }
+.forbidden-card p { margin: 0 0 6px; font-size: 13px; line-height: 1.6; }
 </style>

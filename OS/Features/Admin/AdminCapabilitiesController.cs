@@ -50,6 +50,7 @@ public class AdminCapabilitiesController : ControllerBase
                 Email = user.Email,
                 Group = user.Group
             },
+            AdminAccess = isAdmin || isMax,
             Capabilities = capabilities,
             InviteCodeRequired = _config.InviteCode.RequireInviteCode
         });
