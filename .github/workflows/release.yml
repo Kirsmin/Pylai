@@ -48,7 +48,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14.0"
+          python-version: "3.14"
 
       - name: Setup QEMU
         if: matrix.target == 'linux-arm64'
@@ -249,7 +249,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14.0"
+          python-version: "3.14"
 
       - name: Resolve version
         id: version
@@ -330,7 +330,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.14.0"
+          python-version: "3.14"
 
       - name: Resolve version
         id: version
