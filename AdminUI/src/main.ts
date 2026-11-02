@@ -7,6 +7,7 @@ import router from './router'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
 import './assets/fonts.css'
+import './styles/tokens.css'
 import './assets/theme.css'
 import './assets/admin.css'
 

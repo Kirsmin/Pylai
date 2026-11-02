@@ -1,93 +1,66 @@
-/* Pylai Admin — practical, neutral administration surface */
+/* Pylai Admin — 语义层：消费 styles/tokens.css 的设计令牌，
+   同时保留旧变量名作为派生别名，保证既有页面无需改动即可迁移。 */
 :root {
-  --page-bg: #f5f6f7;
-  --surface: #ffffff;
-  --surface-hover: #f3f5f6;
-  --surface-active: #e9edef;
-  --surface-sunken: #f8f9fa;
-  --border: #dde1e4;
-  --border-strong: #c4cbd0;
-  --divider: #eceef0;
+  /* 基础令牌派生 */
+  --page-bg: var(--bg);
+  --surface-hover: color-mix(in srgb, var(--bg) 68%, var(--text));
+  --surface-active: color-mix(in srgb, var(--bg) 82%, var(--text));
+  --surface-sunken: var(--surface-subtle);
+  --border-strong: color-mix(in srgb, var(--border) 72%, var(--text));
+  --divider: color-mix(in srgb, var(--border) 52%, var(--surface));
 
-  --text-primary: #1d2129;
-  --text-secondary: #666b73;
-  --text-tertiary: #8a9199;
-  --text-danger: #bd3f43;
+  --text-primary: var(--text);
+  --text-danger: var(--danger);
 
-  --accent: #19734a;
-  --accent-hover: #125f3d;
-  --accent-pressed: #0d5033;
-  --accent-soft: #edf6f1;
-  --accent-ring: rgba(25, 115, 74, 0.17);
+  --accent-hover: color-mix(in srgb, var(--accent) 82%, #000);
+  --accent-pressed: color-mix(in srgb, var(--accent) 68%, #000);
+  --accent-soft: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  --accent-ring: color-mix(in srgb, var(--accent) 24%, transparent);
 
-  --success: #19734a;
-  --success-soft: #edf6f1;
-  --success-hover: #125f3d;
+  --success: var(--accent);
+  --success-soft: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  --success-hover: color-mix(in srgb, var(--accent) 82%, #000);
   --info: #416fae;
-  --info-soft: #eef3fa;
-  --warning: #a96d12;
-  --warning-soft: #faf4e9;
+  --info-soft: color-mix(in srgb, #416fae 9%, var(--surface));
+  --warning-soft: color-mix(in srgb, var(--warning) 11%, var(--surface));
   --purple: #73589c;
-  --purple-soft: #f3eff8;
-  --danger: #bd3f43;
-  --danger-soft: #fbefef;
+  --purple-soft: color-mix(in srgb, #73589c 10%, var(--surface));
+  --danger-soft: color-mix(in srgb, var(--danger) 9%, var(--surface));
   --neutral: #66707a;
-  --neutral-soft: #f0f2f4;
+  --neutral-soft: color-mix(in srgb, #66707a 10%, var(--surface));
 
   --shadow-sm: none;
-  --shadow-md: 0 8px 24px rgba(18, 24, 30, 0.10);
-  --shadow-lg: 0 18px 44px rgba(18, 24, 30, 0.16);
+  --shadow-md: var(--shadow-popover);
+  --shadow-lg: var(--shadow-modal);
 
-  --radius-sm: 5px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --sidebar-width: 236px;
-  --header-height: 56px;
   --gap: 18px;
-  --transition-fast: 0.1s ease;
-  --transition-base: 0.14s ease;
-  --transition-slow: 0.2s ease;
+  --transition-fast: var(--duration-fast) var(--easing-standard);
+  --transition-base: var(--duration-base) var(--easing-standard);
+  --transition-slow: var(--duration-slow) var(--easing-standard);
 }
 
 .dark {
-  color-scheme: dark;
-  --page-bg: #111315;
-  --surface: #181b1e;
-  --surface-hover: #1e2226;
-  --surface-active: #252a2f;
-  --surface-sunken: #141719;
-  --border: #2a2f34;
-  --border-strong: #3a4148;
-  --divider: #252a2f;
+  --surface-hover: color-mix(in srgb, var(--surface) 88%, var(--text));
+  --surface-active: color-mix(in srgb, var(--surface) 78%, var(--text));
+  --border-strong: color-mix(in srgb, var(--border) 130%, var(--text));
+  --divider: color-mix(in srgb, var(--border) 64%, var(--surface));
 
-  --text-primary: #edf0f2;
-  --text-secondary: #b6bdc4;
-  --text-tertiary: #818a93;
-  --text-danger: #ef7474;
+  --text-danger: var(--danger);
 
-  --accent: #43a56f;
-  --accent-hover: #55b27f;
-  --accent-pressed: #378c5f;
-  --accent-soft: rgba(67, 165, 111, 0.14);
-  --accent-ring: rgba(67, 165, 111, 0.22);
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #fff);
+  --accent-pressed: color-mix(in srgb, var(--accent) 74%, #fff);
+  --accent-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+  --accent-ring: color-mix(in srgb, var(--accent) 30%, transparent);
 
-  --success: #43a56f;
-  --success-soft: rgba(67, 165, 111, 0.14);
-  --success-hover: #55b27f;
-  --info: #7ba5e7;
-  --info-soft: rgba(123, 165, 231, 0.12);
-  --warning: #e0b15a;
-  --warning-soft: rgba(224, 177, 90, 0.12);
+  --success-soft: color-mix(in srgb, var(--accent) 15%, transparent);
+  --info: #729cda;
+  --info-soft: color-mix(in srgb, #729cda 14%, transparent);
+  --warning-soft: color-mix(in srgb, var(--warning) 15%, transparent);
   --purple: #ad91d5;
-  --purple-soft: rgba(173, 145, 213, 0.12);
-  --danger: #ef7474;
-  --danger-soft: rgba(239, 116, 116, 0.12);
+  --purple-soft: color-mix(in srgb, #ad91d5 14%, transparent);
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
   --neutral: #a2aab2;
-  --neutral-soft: rgba(162, 170, 178, 0.12);
-
-  --shadow-sm: none;
-  --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.24);
-  --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.36);
+  --neutral-soft: color-mix(in srgb, #a2aab2 14%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -97,8 +70,8 @@ body {
   font-family: var(--font-family);
   background: var(--page-bg);
   color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -218,7 +191,7 @@ textarea.admin-input { min-height: 68px; resize: vertical; }
   background: var(--surface);
   box-shadow: var(--shadow-sm);
 }
-.admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: var(--font-size-table); }
 .admin-table thead { background: var(--surface-sunken); }
 .admin-table th {
   padding: 10px 14px;

@@ -1,10 +1,12 @@
-/* Pylai Admin — practical application shell */
+/* Pylai Admin — 应用壳（AdminLayout）
+   侧栏 232px，可折叠 64px 纯图标栏；顶栏 56px（面包屑/搜索/帮助/用户菜单）；移动端为真 Drawer。 */
 .admin-shell {
   min-height: 100vh;
   display: flex;
-  background: var(--page-bg);
+  background: var(--bg);
 }
 
+/* ── 侧栏 ─────────────────────────────────────────── */
 .admin-sidebar {
   position: fixed;
   inset: 0 auto 0 0;
@@ -14,48 +16,58 @@
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: var(--surface);
-  transition: transform var(--transition-slow);
+  transition: width var(--duration-base) var(--easing-standard), transform var(--duration-base) var(--easing-standard);
 }
 
 .sidebar-brand {
-  width: 100%;
   height: var(--header-height);
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 0 14px;
-  border: 0;
+  gap: var(--space-1);
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  flex-shrink: 0;
+}
+.sidebar-brand-main {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
   user-select: none;
+  padding: 0;
 }
-.sidebar-brand:hover { background: var(--surface-hover); }
+.sidebar-brand-main:hover .brand-name { color: var(--accent); }
 .brand-mark {
   width: 28px;
   height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--surface-sunken);
-  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text);
   font-family: var(--font-family-mono);
-  font-size: 14px;
+  font-size: var(--font-size-caption);
   font-weight: 700;
   flex-shrink: 0;
 }
 .brand-copy { min-width: 0; display: flex; flex-direction: column; gap: 0; }
-.brand-name { font-size: 13px; font-weight: 700; color: var(--text-primary); line-height: 1.25; }
+.brand-name { font-size: 13px; font-weight: 700; color: var(--text); line-height: 1.25; }
 .brand-subtitle { font-size: 9px; color: var(--text-tertiary); font-family: var(--font-family-mono); letter-spacing: .05em; }
 
 .sidebar-nav {
   flex: 1;
-  padding: 12px 10px 16px;
+  padding: var(--space-3) var(--space-2) var(--space-4);
   overflow-y: auto;
+  overflow-x: hidden;
 }
 .nav-section-label {
   display: block;
@@ -64,9 +76,9 @@
   font-weight: 700;
   letter-spacing: .08em;
   color: var(--text-tertiary);
+  white-space: nowrap;
 }
-
-.nav-section-spaced { margin-top: 8px; }
+.nav-section-spaced { margin-top: var(--space-2); }
 .nav-item {
   width: 100%;
   min-height: 36px;
@@ -74,26 +86,30 @@
   align-items: center;
   gap: 10px;
   padding: 7px 9px;
+  margin-bottom: 1px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
 }
-.nav-item:hover { background: var(--surface-hover); color: var(--text-primary); }
-.nav-item.active { background: var(--surface-active); color: var(--text-primary); font-weight: 650; }
+.nav-item:hover { background: var(--surface-hover); color: var(--text); }
+.nav-item.active { background: var(--surface-active); color: var(--text); font-weight: 650; }
 .nav-icon { width: 18px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 17px; color: var(--text-tertiary); }
 .nav-item.active .nav-icon { color: var(--accent); }
+.nav-label { flex: 1; min-width: 0; }
 
 .sidebar-footer {
   padding: 10px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 .user-card {
   min-width: 0;
@@ -103,7 +119,7 @@
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
+  background: var(--surface-subtle);
 }
 .user-avatar {
   width: 28px;
@@ -115,17 +131,34 @@
   border-radius: 50%;
   background: var(--surface-active);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--font-size-caption);
   font-weight: 700;
   text-transform: uppercase;
 }
 .user-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0; }
-.user-name { color: var(--text-primary); font-size: 12px; font-weight: 650; line-height: 1.35; }
+.user-name { color: var(--text); font-size: var(--font-size-caption); font-weight: 650; line-height: 1.35; }
 .user-group { color: var(--text-tertiary) !important; font-family: var(--font-family-mono); font-size: 10px; font-weight: 650; line-height: 1.35; }
 .footer-row { display: flex; align-items: center; gap: 6px; }
 .footer-version { flex: 1; color: var(--text-tertiary); font-family: var(--font-family-mono); font-size: 10px; padding-left: 2px; }
 .footer-actions { display: flex; gap: 4px; }
 
+/* ── 折叠态：64px 纯图标栏 ─────────────────────────────── */
+.admin-shell.collapsed .admin-sidebar { width: var(--sidebar-width-collapsed); }
+.admin-shell.collapsed .admin-main { margin-left: var(--sidebar-width-collapsed); }
+.admin-shell.collapsed .brand-copy,
+.admin-shell.collapsed .nav-section-label,
+.admin-shell.collapsed .nav-label,
+.admin-shell.collapsed .user-meta,
+.admin-shell.collapsed .footer-version { display: none; }
+.admin-shell.collapsed .sidebar-brand { justify-content: center; padding: 0; }
+.admin-shell.collapsed .sidebar-brand-main { flex: 0 0 auto; width: 100%; justify-content: center; }
+.admin-shell.collapsed .sidebar-nav { padding: var(--space-3) var(--space-2); }
+.admin-shell.collapsed .nav-item { justify-content: center; padding: 7px 0; }
+.admin-shell.collapsed .nav-icon { width: auto; }
+.admin-shell.collapsed .user-card { justify-content: center; border-color: transparent; background: transparent; padding: 4px 0; }
+.admin-shell.collapsed .footer-row { justify-content: center; }
+
+/* ── 主区 + 顶栏 ────────────────────────────────────── */
 .admin-main {
   min-width: 0;
   min-height: 100vh;
@@ -133,6 +166,7 @@
   margin-left: var(--sidebar-width);
   display: flex;
   flex-direction: column;
+  transition: margin-left var(--duration-base) var(--easing-standard);
 }
 .admin-header {
   position: sticky;
@@ -142,29 +176,26 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 0 22px;
+  gap: var(--space-3);
+  padding: 0 var(--content-padding);
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
   backdrop-filter: blur(8px);
 }
 .header-left { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.header-title {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 650;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.header-actions { flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+.header-breadcrumb { white-space: nowrap; }
+.header-actions { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-2); }
+.header-search { width: 200px; transition: width var(--duration-base) var(--easing-standard); }
+.header-search:focus-within, .header-search:hover { width: 260px; }
+
 .icon-btn {
   min-width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -172,24 +203,72 @@
   font-size: 17px;
   cursor: pointer;
 }
-.icon-btn:hover { border-color: var(--border); background: var(--surface-hover); color: var(--text-primary); }
+.icon-btn:hover { border-color: var(--border); background: var(--surface-hover); color: var(--text); }
+
+.user-menu-trigger {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.user-menu-trigger:hover { border-color: var(--border); background: var(--surface-hover); }
+.user-menu-caret { font-size: 12px; color: var(--text-tertiary); }
+.user-menu-name { max-width: 140px; font-weight: 600; }
+
+.help-popover { max-width: 260px; }
+.help-title { margin: 0 0 4px; font-size: 13px; font-weight: 650; color: var(--text); }
+.help-line { margin: 0 0 8px; font-size: var(--font-size-caption); line-height: 1.6; color: var(--text-secondary); }
+.help-links { display: flex; gap: var(--space-3); margin-bottom: 8px; }
+.help-version { margin: 0; font-size: 10px; color: var(--text-tertiary); }
 
 .admin-content {
   width: 100%;
-  max-width: 1360px;
+  max-width: var(--content-max-width);
   flex: 1;
   margin: 0 auto;
-  padding: 24px 28px 52px;
+  padding: var(--space-6) var(--content-padding) 52px;
 }
 
-.mobile-menu-btn { display: none; }
+/* ── 焦点可见性 ─────────────────────────────────────── */
+.nav-item:focus-visible,
+.icon-btn:focus-visible,
+.pg-btn:focus-visible,
+.segmented button:focus-visible,
+.admin-input:focus-visible,
+.user-menu-trigger:focus-visible,
+.sidebar-brand-main:focus-visible,
+.drawer-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── 移动端 Drawer ──────────────────────────────────── */
+.mobile-menu-btn, .drawer-close { display: none; }
 .mobile-overlay { position: fixed; inset: 0; z-index: 45; background: rgba(0, 0, 0, .34); }
 
 @media (max-width: 768px) {
-  .admin-sidebar { width: 252px; transform: translateX(-100%); transition: none; }
-  .admin-sidebar.open { transform: translateX(0); box-shadow: var(--shadow-lg); }
+  .admin-sidebar {
+    width: 264px;
+    transform: translateX(-100%);
+    box-shadow: none;
+  }
+  .admin-sidebar.open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-modal);
+  }
   .admin-main { margin-left: 0; }
   .mobile-menu-btn { display: inline-flex; }
-  .admin-header { padding: 0 14px; }
-  .admin-content { padding: 18px 14px 42px; }
+  .drawer-close { display: inline-flex; }
+  .admin-header { padding: 0 var(--space-4); }
+  .header-search { width: 130px; }
+  .header-search:focus-within, .header-search:hover { width: 160px; }
+  .user-menu-name { display: none; }
+  .admin-content { padding: var(--space-4) var(--space-4) 42px; }
 }
