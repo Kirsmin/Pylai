@@ -41,6 +41,7 @@ from core import (
     ReleaseClient,
     SelfUpdater,
     __version__,
+    ask,
     ask_bool,
     confirm_danger,
     converge_stack,
@@ -48,7 +49,9 @@ from core import (
     redact_log_line,
     service_action,
     uninstall,
+    utc_now_iso,
 )
+import daemon
 from install import InstallService, UpdateService
 from services import (
     BackupService,
@@ -71,13 +74,25 @@ class InteractiveMenu:
 
     def _print_header(self) -> None:
         ctx = self.ctx
-        out(f"\nPylai Manager {__version__}")
+        out(f"\nPylai Manager {__version__}{self._update_hint()}")
         if not ctx.state.installed:
             out("  未安装")
             return
         running = ctx.docker.service_running()
         status = "运行中" if running else "已停止"
         out(f"  Pylai v{ctx.state.version} · {status} · {ctx.state.public_url}")
+
+    def _update_hint(self) -> str:
+        """标题提示：state.json 缓存的远端版本高于本地（管理工具或 Pylai 应用）时显示。"""
+        ctx = self.ctx
+        latest = str(ctx.state.get("latest_version") or "")
+        if not latest or latest == ctx.manager.skip_version:
+            return ""
+        newer_manager = SelfUpdater.version_gt(latest, __version__)
+        newer_app = ctx.state.installed and SelfUpdater.version_gt(latest, ctx.state.version)
+        if newer_manager or newer_app:
+            return f" · 有新版本 v{latest}"
+        return ""
 
     @staticmethod
     def _read_choice() -> str:
@@ -127,6 +142,7 @@ class InteractiveMenu:
                 self._pause()
 
     def run(self) -> None:
+        daemon.ensure(self.ctx)
         self.auto_check_notify()
         while True:
             self._print_header()
@@ -383,9 +399,14 @@ class InteractiveMenu:
                 ("查看管理工具设置", settings.view),
                 ("修改镜像源", settings.change_mirror),
                 ("自动检查更新", settings.change_auto_check),
+                ("自动更新（AutoUpdate）", settings.change_auto_update),
+                ("检查间隔（分钟）", settings.change_check_interval),
                 ("包含预发布版本", settings.change_include_prerelease),
                 ("下载缓存目录", settings.change_download_dir),
                 ("更新前自动备份", settings.change_auto_backup),
+                ("常驻进程状态", lambda: daemon.status(self.ctx)),
+                ("启动常驻进程", lambda: daemon.start(self.ctx)),
+                ("停止常驻进程", lambda: daemon.stop(self.ctx)),
             ],
         )
 
@@ -424,6 +445,11 @@ class InteractiveMenu:
                 app += f" (schema {info['dbSchemaVersion']})"
             notices.append(app)
         if notices:
+            # 缓存检查结果：常驻进程未覆盖到的场景（如未安装）也能在标题提示
+            if ctx.state.installed:
+                ctx.state.set("latest_version", version)
+                ctx.state.set("latest_check_at", utc_now_iso())
+                ctx.state.save()
             out("更新可用: " + "；".join(notices))
 
 
@@ -463,6 +489,21 @@ def cmd_self_update(ctx: AppContext, args: argparse.Namespace) -> None:
             out("当前已是最新，或无法获取版本信息。")
     else:
         updater.update(force=args.force, dry_run=args.dry_run)
+
+
+def cmd_daemon(ctx: AppContext, args: argparse.Namespace) -> None:
+    """常驻更新进程管理：run 前台循环，start/stop/status 后台管理。"""
+    match args.daemon_cmd:
+        case "run":
+            daemon.run(ctx)
+        case "start":
+            daemon.start(ctx)
+        case "stop":
+            daemon.stop(ctx)
+        case "status":
+            daemon.status(ctx)
+        case _:
+            raise ManageError("请指定 daemon 子命令: run / start / stop / status")
 
 
 def cmd_compose(ctx: AppContext, args: argparse.Namespace) -> None:
@@ -674,6 +715,13 @@ def build_parser() -> argparse.ArgumentParser:
     self_update_p.add_argument("--check-only", action="store_true")
     self_update_p.add_argument("--force", action="store_true")
 
+    daemon_p = subparsers.add_parser("daemon", help="常驻更新进程管理")
+    daemon_sub = daemon_p.add_subparsers(dest="daemon_cmd")
+    daemon_sub.add_parser("run", help="前台运行常驻检查循环（一般无需手动执行）")
+    daemon_sub.add_parser("start", help="后台启动常驻进程（菜单启动也会自动拉起）")
+    daemon_sub.add_parser("stop", help="停止常驻进程（菜单启动不再自动拉起）")
+    daemon_sub.add_parser("status", help="查看常驻进程状态")
+
     for name, help_text in (
         ("start", "启动服务（收敛全部服务）"),
         ("stop", "停止服务"),
@@ -810,6 +858,7 @@ COMMANDS: dict[str, Callable[[AppContext, argparse.Namespace], None]] = {
     "install": cmd_install,
     "update": cmd_update,
     "self-update": cmd_self_update,
+    "daemon": cmd_daemon,
     "start": lambda ctx, _a: service_action(ctx, "start"),
     "stop": lambda ctx, _a: service_action(ctx, "stop"),
     "restart": lambda ctx, _a: service_action(ctx, "restart"),

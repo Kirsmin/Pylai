@@ -725,6 +725,8 @@ class SettingsService:
         out(f"  [Manager.Source] Mirror      = {manager.mirror}")
         out(f"  [Manager.Source] BaseUrl     = {manager.custom_mirror_base or ''}")
         out(f"  [Updates]        AutoCheck       = {str(manager.auto_check).lower()}")
+        out(f"  [Updates]        AutoUpdate      = {str(manager.auto_update).lower()}")
+        out(f"  [Updates]        CheckIntervalMinutes = {manager.check_interval_minutes}")
         out(f"  [Updates]        IncludePrerelease = {str(manager.include_prerelease).lower()}")
         out(f"  [Updates]        DownloadDir     = {manager.download_dir}")
         out(f"  [Security]       AutoBackupBeforeUpdate = {str(manager.auto_backup).lower()}")
@@ -756,6 +758,28 @@ class SettingsService:
         enabled = ask_bool("每次运行时自动检查更新并提示？", manager.auto_check)
         manager.set_auto_check(enabled)
         out(f"AutoCheck 已设为 {str(enabled).lower()}。")
+
+    def change_auto_update(self) -> None:
+        manager = self.ctx.manager
+        enabled = ask_bool(
+            "常驻进程检测到新版本时自动更新（管理工具 + Pylai 应用，等同 update --from-remote --yes）？",
+            manager.auto_update,
+        )
+        manager.set_auto_update(enabled)
+        out(f"AutoUpdate 已设为 {str(enabled).lower()}。")
+        if enabled:
+            out(f"常驻进程每 {manager.check_interval_minutes} 分钟检查一次，可用「常驻进程状态」查看。")
+
+    def change_check_interval(self) -> None:
+        manager = self.ctx.manager
+        value = ask_int(
+            "常驻进程检查间隔（分钟，5-1440）",
+            manager.check_interval_minutes,
+            minimum=5,
+            maximum=1440,
+        )
+        manager.set_check_interval(value)
+        out(f"CheckIntervalMinutes 已设为 {manager.check_interval_minutes}（常驻进程下一轮检查生效）。")
 
     def change_include_prerelease(self) -> None:
         manager = self.ctx.manager

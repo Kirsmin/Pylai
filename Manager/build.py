@@ -2,7 +2,7 @@
 """从 Manager/ 源码构建 ManagePylai 发布物。
 
 输出：
-  - ManagePylai.pyz：标准 zipapp（``__main__.py`` + core/install/editor/services/cli）。
+  - ManagePylai.pyz：标准 zipapp（``__main__.py`` + core/install/editor/services/daemon/cli）。
   - ManagePylai.pyz.sha256：校验文件。
 
 发布物只保留 .pyz 一种形态；不再生成兼容用的 ManagePylai.py 文本启动器。
@@ -22,6 +22,7 @@ SOURCE_FILES = (
     "install.py",
     "editor.py",
     "services.py",
+    "daemon.py",
     "cli.py",
 )
 ENTRY_FILE = "__main__.py"

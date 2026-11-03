@@ -234,7 +234,7 @@ STATUS_OPTIONS: list[tuple[str, str]] = [
     ("banned — 封禁", "banned"),
 ]
 
-__version__ = "0.1.46"
+__version__ = "0.1.47"
 
 
 class ManageError(Exception):
@@ -1399,7 +1399,7 @@ BaseUrl = "{base_url}"
 
 [Manager.State]
 LastCheck = "{last_check}"
-{skip_version_line}
+{skip_version_line}{daemon_stopped_line}
 
 [Compose]
 ProjectName = "{project_name}"
@@ -1411,6 +1411,8 @@ BackupRetentionDays = {retention}
 
 [Updates]
 AutoCheck = {auto_check}
+AutoUpdate = {auto_update}
+CheckIntervalMinutes = {check_interval}
 IncludePrerelease = {include_prerelease}
 DownloadDir = "{download_dir}"
 
@@ -1461,7 +1463,10 @@ Level = "{level}"
         ensure_home()
 
         skip = self.get("Manager", "State", "SkipVersion")
-        skip_version_line = f"SkipVersion = {json.dumps(skip)}" if skip else ""
+        skip_version_line = f"SkipVersion = {json.dumps(skip)}\n" if skip else ""
+        daemon_stopped_line = (
+            f"DaemonStopped = {'true' if self.daemon_stopped else 'false'}\n"
+        )
 
         text = self._DEFAULT_TOML.format(
             version=self.get("Manager", "Version", default=__version__),
@@ -1469,11 +1474,14 @@ Level = "{level}"
             base_url=self.custom_mirror_base or "",
             last_check=self.get("Manager", "State", "LastCheck", default=utc_now_iso()),
             skip_version_line=skip_version_line,
+            daemon_stopped_line=daemon_stopped_line,
             project_name=self.get("Compose", "ProjectName", default="pylai"),
             memory_tier=self.memory_tier,
             auto_backup="true" if self.auto_backup else "false",
             retention=self.get("Security", "BackupRetentionDays", default=7),
             auto_check="true" if self.auto_check else "false",
+            auto_update="true" if self.auto_update else "false",
+            check_interval=self.check_interval_minutes,
             include_prerelease="true" if self.include_prerelease else "false",
             download_dir=self.download_dir,
             level=self.get("Logging", "Level", default="info"),
@@ -1554,6 +1562,33 @@ Level = "{level}"
 
     def set_auto_check(self, enabled: bool) -> None:
         self.set("Updates", "AutoCheck", value=bool(enabled))
+        self.save()
+
+    @property
+    def auto_update(self) -> bool:
+        """常驻进程检测到新版本时是否自动执行更新（默认关闭，只提示）。"""
+        return bool(self.get("Updates", "AutoUpdate", default=False))
+
+    def set_auto_update(self, enabled: bool) -> None:
+        self.set("Updates", "AutoUpdate", value=bool(enabled))
+        self.save()
+
+    @property
+    def check_interval_minutes(self) -> int:
+        """常驻进程检查间隔（分钟），默认 30，合法范围 5-1440。"""
+        return max(5, min(1440, as_int(self.get("Updates", "CheckIntervalMinutes", default=30), 30)))
+
+    def set_check_interval(self, minutes: int) -> None:
+        self.set("Updates", "CheckIntervalMinutes", value=max(5, min(1440, as_int(minutes, 30))))
+        self.save()
+
+    @property
+    def daemon_stopped(self) -> bool:
+        """用户显式停止常驻进程后，菜单启动不再自动拉起（daemon start 清除）。"""
+        return bool(self.get("Manager", "State", "DaemonStopped", default=False))
+
+    def set_daemon_stopped(self, stopped: bool) -> None:
+        self.set("Manager", "State", "DaemonStopped", value=bool(stopped))
         self.save()
 
     @property
