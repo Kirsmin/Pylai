@@ -106,13 +106,26 @@ def write_sha256(path: Path) -> Path:
     return target
 
 
+def check_source_layout(root: Path) -> None:
+    """Fail Closed：Manager/ 顶层模块必须与构建清单逐一对应，新增模块漏登记立即失败。"""
+    discovered = {path.name for path in root.glob("*.py")} - {Path(__file__).name}
+    declared = {ENTRY_FILE, *SOURCE_FILES}
+    if discovered != declared:
+        raise SystemExit(
+            "Manager 源码与构建清单不一致："
+            f"未打包={sorted(discovered - declared)}，清单多余={sorted(declared - discovered)}"
+        )
+
+
 def verify_artifacts(output_dir: Path, version: str) -> None:
     with zipfile.ZipFile(output_dir / "ManagePylai.pyz") as zf:
         names = set(zf.namelist())
         required = {ENTRY_FILE, *SOURCE_FILES}
-        missing = required - names
-        if missing:
-            raise SystemExit(f"zipapp missing files: {sorted(missing)}")
+        if names != required:
+            raise SystemExit(
+                "zipapp 成员与构建清单不一致："
+                f"缺失={sorted(required - names)}，多余={sorted(names - required)}"
+            )
         for name in ("core.py", ENTRY_FILE):
             content = zf.read(name).decode("utf-8")
             match = VERSION_RE.search(content)
@@ -133,6 +146,7 @@ def main() -> None:
     args = parse_args()
     root = args.root.resolve()
     compile_sources(root)
+    check_source_layout(root)
     source_version = check_versions(root)
     if args.check:
         if args.version:
