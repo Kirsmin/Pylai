@@ -39,6 +39,7 @@ public class AdminCapabilitiesController : ControllerBase
             capabilities.Add(ClientsCapability());
         }
 
+        var pwd = _config.Identity.Password;
         return Ok(new AdminCapabilitiesResponse
         {
             Success = true,
@@ -52,7 +53,19 @@ public class AdminCapabilitiesController : ControllerBase
             },
             AdminAccess = isAdmin || isMax,
             Capabilities = capabilities,
-            InviteCodeRequired = _config.InviteCode.RequireInviteCode
+            InviteCodeRequired = _config.InviteCode.RequireInviteCode,
+            PasswordPolicy = isAdmin || isMax
+                ? new AdminPasswordPolicyInfo
+                {
+                    RequiredLength = pwd.RequiredLength,
+                    AdminRequiredLength = pwd.AdminRequiredLength,
+                    RequireDigit = pwd.RequireDigit,
+                    RequireLowercase = pwd.RequireLowercase,
+                    RequireUppercase = pwd.RequireUppercase,
+                    RequireNonAlphanumeric = pwd.RequireNonAlphanumeric,
+                    CheckBreachedPasswords = pwd.CheckBreachedPasswords
+                }
+                : null
         });
     }
 

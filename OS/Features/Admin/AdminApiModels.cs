@@ -256,6 +256,19 @@ public class AdminCapabilitiesResponse : ApiResponse
     public bool AdminAccess { get; set; }
     public List<AdminCapability> Capabilities { get; set; } = [];
     public bool InviteCodeRequired { get; set; }
+    // 密码策略（重置密码表单本地预检用）；仅当用户具备 users 管理能力时下发
+    public AdminPasswordPolicyInfo? PasswordPolicy { get; set; }
+}
+
+public class AdminPasswordPolicyInfo
+{
+    public int RequiredLength { get; set; }
+    public int AdminRequiredLength { get; set; }
+    public bool RequireDigit { get; set; }
+    public bool RequireLowercase { get; set; }
+    public bool RequireUppercase { get; set; }
+    public bool RequireNonAlphanumeric { get; set; }
+    public bool CheckBreachedPasswords { get; set; }
 }
 
 public class SetRequireInviteCodeRequest

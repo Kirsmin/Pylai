@@ -2,7 +2,7 @@ import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import { API_BASE, ApiError, ensureUserCsrfToken, parseApiResponse, rawFetch, userCsrfFetch } from '@/utils/http'
 import { formatWebAuthnError, getAssertion } from '@/utils/webauthn'
-import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser, MfaWebAuthnCredential, MfaWebAuthnCredentialListResponse } from '@/types/admin'
+import type { AdminCapability, AdminCapabilitiesResponse, AdminCapabilityUser, AdminPasswordPolicy, MfaWebAuthnCredential, MfaWebAuthnCredentialListResponse } from '@/types/admin'
 
 interface StepUpTicket {
   transactionId: string
@@ -19,6 +19,8 @@ export const useAuthStore = defineStore('admin-auth', () => {
   const user = ref<AdminCapabilityUser | null>(null)
   const capabilities = ref<AdminCapability[]>([])
   const inviteCodeRequired = ref(false)
+  // 密码策略（capabilities 下发，重置密码表单本地预检用）；normal 用户为 null
+  const passwordPolicy = ref<AdminPasswordPolicy | null>(null)
   // 服务端 capabilities 显式声明的 admin/max 权限标记；normal 用户为 false，用于 403 体验而非授权判断。
   const adminAccess = ref(false)
   const loginError = ref('')
@@ -85,6 +87,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
       user.value = null
       capabilities.value = []
       inviteCodeRequired.value = false
+      passwordPolicy.value = null
       adminAccess.value = false
       return false
     }
@@ -93,6 +96,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     user.value = data.user ?? null
     adminAccess.value = data.adminAccess === true
     capabilities.value = data.capabilities ?? []
+    passwordPolicy.value = data.passwordPolicy ?? null
     const capabilityValue = data.inviteCodeRequired ?? false
     inviteCodeRequired.value = capabilityValue
     if (user.value) await loadInviteCodeRequirement(capabilityValue)
@@ -303,6 +307,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     user.value = null
     capabilities.value = []
     inviteCodeRequired.value = false
+    passwordPolicy.value = null
     adminAccess.value = false
     mfaStatus.value = 'unknown'
     csrfToken.value = ''
@@ -352,6 +357,7 @@ export const useAuthStore = defineStore('admin-auth', () => {
     displayName,
     group,
     inviteCodeRequired,
+    passwordPolicy,
     adminAccess,
     hasCapability,
     capability,

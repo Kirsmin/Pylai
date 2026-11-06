@@ -5,6 +5,8 @@ import { AlertCircle, Inbox, Lock } from '@vicons/tabler'
 
 withDefaults(defineProps<{
   state: 'loading' | 'empty' | 'error' | 'forbidden'
+  /** loading 形态：spinner 紧凑转圈；skeleton 列表骨架行 */
+  variant?: 'spinner' | 'skeleton'
   description?: string
   loadingText?: string
   emptyText?: string
@@ -12,6 +14,7 @@ withDefaults(defineProps<{
   forbiddenText?: string
   retryable?: boolean
 }>(), {
+  variant: 'spinner',
   loadingText: '加载中…',
   emptyText: '暂无数据',
   errorText: '加载失败',
@@ -23,7 +26,13 @@ const emit = defineEmits<{ retry: [] }>()
 
 <template>
   <div class="state-block" :data-state="state" role="status">
-    <template v-if="state === 'loading'">
+    <template v-if="state === 'loading' && variant === 'skeleton'">
+      <div class="state-skeleton" aria-hidden="true">
+        <span v-for="i in 4" :key="i" class="state-skeleton-line" :style="{ width: `${88 - i * 12}%` }" />
+      </div>
+      <p class="state-text">{{ loadingText }}</p>
+    </template>
+    <template v-else-if="state === 'loading'">
       <span class="state-spinner" aria-hidden="true" />
       <p class="state-text">{{ loadingText }}</p>
     </template>
@@ -81,6 +90,27 @@ const emit = defineEmits<{ retry: [] }>()
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: state-spin 0.8s linear infinite;
+}
+.state-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(100%, 560px);
+}
+.state-skeleton-line {
+  display: block;
+  height: 14px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-active) 25%, var(--surface-sunken) 50%, var(--surface-active) 75%);
+  background-size: 200% 100%;
+  animation: state-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes state-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .state-skeleton-line { animation: none; }
 }
 @keyframes state-spin {
   to { transform: rotate(360deg); }

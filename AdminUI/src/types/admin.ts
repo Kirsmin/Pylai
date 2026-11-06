@@ -28,11 +28,22 @@ export interface AdminCapabilityUser {
   group: string
 }
 
+export interface AdminPasswordPolicy {
+  requiredLength: number
+  adminRequiredLength: number
+  requireDigit: boolean
+  requireLowercase: boolean
+  requireUppercase: boolean
+  requireNonAlphanumeric: boolean
+  checkBreachedPasswords: boolean
+}
+
 export interface AdminCapabilitiesResponse extends ApiEnvelope {
   user: AdminCapabilityUser | null
   adminAccess: boolean
   capabilities: AdminCapability[]
   inviteCodeRequired: boolean
+  passwordPolicy?: AdminPasswordPolicy | null
 }
 
 export interface AdminUserListItem {

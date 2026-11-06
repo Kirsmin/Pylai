@@ -54,12 +54,38 @@ public class AdminController : ControllerBase
     [HttpGet("invite-codes")]
     public async Task<IActionResult> ListInviteCodes(
         [FromQuery] string? group = null,
+        [FromQuery] string? status = null,
+        [FromQuery] string? search = null,
         [FromQuery] int skip = 0,
         [FromQuery] int take = 20)
     {
         var query = _context.InviteCodes.AsNoTracking();
         if (!string.IsNullOrEmpty(group))
             query = query.Where(c => c.Group == group);
+
+        // 有效状态为派生值：已撤销 > 已用完 > 已过期 > 有效
+        if (!string.IsNullOrEmpty(status))
+        {
+            var now = DateTimeOffset.UtcNow;
+            query = status.ToLowerInvariant() switch
+            {
+                "active" => query.Where(c => c.Status == InviteCodeStatus.Active
+                    && c.UsedCount < c.MaxRedemptions && c.ExpiresAt > now),
+                "exhausted" => query.Where(c => c.UsedCount >= c.MaxRedemptions),
+                "expired" => query.Where(c => c.ExpiresAt <= now),
+                "revoked" => query.Where(c => c.Status == InviteCodeStatus.Revoked),
+                _ => query
+            };
+            if (!IsKnownInviteCodeStatus(status))
+                return BadRequest(new ApiResponse { Success = false, Error = "无效的邀请码状态。", ErrorCode = "invalid_request" });
+        }
+
+        if (!string.IsNullOrEmpty(search))
+        {
+            var term = search.Trim().ToLowerInvariant();
+            if (term.Length > 0)
+                query = query.Where(c => c.Prefix.ToLower().Contains(term));
+        }
 
         var total = await query.CountAsync();
         var codes = await query.OrderBy(c => c.Prefix)
@@ -453,6 +479,9 @@ public class AdminController : ControllerBase
 
     private static bool IsKnownActiveBanType(string type)
         => type is "login" or "invite" or "email" or "admin" or "confirm";
+
+    private static bool IsKnownInviteCodeStatus(string status)
+        => status.ToLowerInvariant() is "active" or "exhausted" or "expired" or "revoked";
 
     private static bool IsKnownIpBanType(string type)
         => type is "login" or "invite" or "email" or "admin";

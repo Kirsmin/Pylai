@@ -3,6 +3,7 @@ import { useAuthStore } from '@/stores/auth'
 
 const HomeView = () => import('@/views/HomeView.vue')
 const UsersView = () => import('@/views/UsersView.vue')
+const UserDetailView = () => import('@/views/UserDetailView.vue')
 const InviteCodesView = () => import('@/views/InviteCodesView.vue')
 const BansView = () => import('@/views/BansView.vue')
 const AuditLogsView = () => import('@/views/AuditLogsView.vue')
@@ -17,6 +18,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'home', component: HomeView, meta: { pageTitle: '概览' } },
     { path: '/users', name: 'users', component: UsersView, meta: { pageTitle: '用户管理', capability: 'users' } },
+    { path: '/users/:uid', name: 'user-detail', component: UserDetailView, meta: { pageTitle: '用户详情', capability: 'users' } },
     { path: '/invite-codes', name: 'invite-codes', component: InviteCodesView, meta: { pageTitle: '邀请码', capability: 'inviteCodes' } },
     { path: '/clients', name: 'clients', component: ClientsView, meta: { pageTitle: 'OAuth2 客户端', capability: 'clients' } },
     { path: '/bans', name: 'bans', component: BansView, meta: { pageTitle: '封禁管理', capability: 'bans' } },

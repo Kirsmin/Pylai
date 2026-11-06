@@ -32,7 +32,9 @@ const PRESETS: Record<string, Preset> = {
   failed: { label: '失败', tone: 'danger' },
   error: { label: '错误', tone: 'danger' },
   banned: { label: '已封禁', tone: 'danger' },
-  locked: { label: '已锁定', tone: 'danger' }
+  locked: { label: '已锁定', tone: 'danger' },
+  deleted: { label: '已删除', tone: 'neutral' },
+  exhausted: { label: '已用完', tone: 'warning' }
 }
 
 const TONE_ICONS: Record<StatusTone, Component> = {
